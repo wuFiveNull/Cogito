@@ -154,11 +154,11 @@ class TestOutboxLease:
         _insert_outbox_events(db, [
             {"event_id": "e1", "status": "retry_scheduled"},
         ])
-        # Set next_attempt_at in the past
-        past_time = datetime(2020, 1, 1, tzinfo=UTC)
+        # Set next_attempt_at in the past (epoch ms)
+        past_ms = int(datetime(2020, 1, 1, tzinfo=UTC).timestamp() * 1000)
         db.execute(
             "UPDATE outbox_events SET next_attempt_at=? WHERE event_id='e1'",
-            (past_time.isoformat(),),
+            (past_ms,),
         )
         db.commit()
 
@@ -172,10 +172,10 @@ class TestOutboxLease:
         _insert_outbox_events(db, [
             {"event_id": "e1", "status": "retry_scheduled"},
         ])
-        future_time = datetime(2099, 1, 1, tzinfo=UTC)
+        future_ms = int(datetime(2099, 1, 1, tzinfo=UTC).timestamp() * 1000)
         db.execute(
             "UPDATE outbox_events SET next_attempt_at=? WHERE event_id='e1'",
-            (future_time.isoformat(),),
+            (future_ms,),
         )
         db.commit()
 
@@ -248,8 +248,9 @@ class TestOutboxRetry:
             "SELECT next_attempt_at, attempt_count FROM outbox_events WHERE event_id='e1'"
         ).fetchone()
         assert row["next_attempt_at"] is not None
-        # next_attempt_at should be in the future
-        assert row["next_attempt_at"] > clock.isoformat()
+        # next_attempt_at should be in the future (stored as TEXT, convert to int for comparison)
+        clock_ms = int(clock.timestamp() * 1000)
+        assert int(row["next_attempt_at"]) > clock_ms
 
     def test_dead_letter_after_max_retries(self, db: sqlite3.Connection):
         """After MAX_TENTATIVE attempts, retry should move to dead_letter."""
@@ -439,10 +440,10 @@ class TestDeliveryLease:
     def test_lease_retry_scheduled_expired(self, db: sqlite3.Connection):
         """retry_scheduled past next_attempt_at can be leased."""
         did = _insert_delivery(db, status="retry_scheduled")
-        past_time = datetime(2020, 1, 1, tzinfo=UTC)
+        past_ms = int(datetime(2020, 1, 1, tzinfo=UTC).timestamp() * 1000)
         db.execute(
             "UPDATE deliveries SET next_attempt_at=? WHERE delivery_id=?",
-            (past_time.isoformat(), did),
+            (past_ms, did),
         )
         db.commit()
 
@@ -454,10 +455,10 @@ class TestDeliveryLease:
     def test_lease_retry_scheduled_future_skipped(self, db: sqlite3.Connection):
         """retry_scheduled with future next_attempt_at is skipped."""
         _insert_delivery(db, status="retry_scheduled")
-        future_time = datetime(2099, 1, 1, tzinfo=UTC)
+        future_ms = int(datetime(2099, 1, 1, tzinfo=UTC).timestamp() * 1000)
         db.execute(
             "UPDATE deliveries SET next_attempt_at=?",
-            (future_time.isoformat(),),
+            (future_ms,),
         )
         db.commit()
 
@@ -552,26 +553,20 @@ class TestDeliverySend:
 
         from cogito.service.delivery_worker import MAX_DELIVERY_TENTATIVE
 
-        for attempt in range(1, MAX_DELIVERY_TENTATIVE + 1):
-            # Set status to pending for retry simulation
-            # In production, this would be done by RecoveryService
-            if attempt > 1:
-                db.execute(
-                    "UPDATE deliveries SET status='pending' WHERE delivery_id=?",
-                    (did,),
-                )
-                db.commit()
+        clock = make_clock("2026-01-15T12:00:00+00:00")
 
-            lease = worker.lease_next("w1")
+        for attempt in range(1, MAX_DELIVERY_TENTATIVE + 1):
+            lease = worker.lease_next("w1", clock=clock)
             assert lease is not None, f"Failed to lease at attempt {attempt}"
             assert lease.attempt_count == attempt
-            result = worker.deliver(lease, "w1")
+            result = worker.deliver(lease, "w1", clock=clock)
+            assert result == "failed"
 
-            if attempt < MAX_DELIVERY_TENTATIVE:
-                assert result == "failed"
-                # After retry, status is retry_scheduled - set back to pending for next lease
-            else:
-                assert result == "failed"
+            # Advance clock past exponential backoff for next lease
+            if attempt == 1:
+                clock = make_clock("2026-01-15T12:00:20+00:00")  # past 10s
+            elif attempt == 2:
+                clock = make_clock("2026-01-15T12:01:00+00:00")  # past 30s
 
         row = db.execute(
             "SELECT status, attempt_count FROM deliveries WHERE delivery_id=?",
@@ -670,7 +665,8 @@ class TestRecoveryService:
         row = db.execute(
             "SELECT status FROM deliveries WHERE delivery_id=?", (did,),
         ).fetchone()
-        assert row["status"] == "pending"
+        # sending + expired → unknown (not pending, because external may have succeeded)
+        assert row["status"] == "unknown"
 
     def test_recover_unknown_not_touched(self, db: sqlite3.Connection):
         """unknown Delivery should NOT be reset to pending by recovery."""
@@ -692,12 +688,14 @@ class TestRecoveryService:
         _create_session(db, "s1", "c1")
         _create_queued_turn(db)
         dispatcher = Dispatcher(db)
-        claimed = dispatcher.claim_next("worker1")
+        clock = make_clock("2026-01-15T12:00:00+00:00")
+        claimed = dispatcher.claim_next("worker1", clock=clock)
         assert claimed is not None
 
-        # Recovery should reset running → queued
+        # Fast forward past lease expiry
+        future = make_clock("2026-01-15T12:30:00+00:00")
         recovery = RecoveryService(db)
-        count = recovery.recover_stale_turns()
+        count = recovery.recover_stale_turns(clock=future)
         assert count == 1
 
         row = db.execute(
@@ -783,17 +781,16 @@ class TestFullCycle:
         lease = worker.lease_next("w1", clock=lease_clock)
         assert lease is not None
 
-        # Simulate: gateway says True but worker crashes before commit
-        # Next scan finds it as sending with expired lease
+        # Simulate: worker leases delivery but crashes before any send
+        # Recovery finds it as sending with expired lease → unknown (safest status)
         future = make_clock("2026-01-15T12:30:00+00:00")
         RecoveryService(db).recover_delivery_leases(clock=future)
 
-        # After recovery, it's back to pending
         row = db.execute(
             "SELECT status FROM deliveries WHERE delivery_id=?",
             (lease.delivery_id,),
         ).fetchone()
-        assert row["status"] == "pending"
+        assert row["status"] == "unknown"
 
     def test_gateway_sent_records(self, db: sqlite3.Connection):
         """Verify FakeGateway records all sent messages."""

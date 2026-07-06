@@ -41,16 +41,19 @@ python -m compileall -q src
 | 领域实体 | ✅ 完成 | Principal、Conversation、Session、Message、Turn、Task、Delivery、MemoryItem |
 | 状态机 | ✅ 完成 | Turn、RunAttempt、Task、Delivery、Memory 状态转移验证 |
 | 异常层次 | ✅ 完成 | 实体未找到、非法状态转移、并发冲突、幂等违反、Lease 错误等 |
-| SQLite 存储 | ✅ 完成 | Schema、连接管理、编号 Migration（v1-v5） |
-| CLI | ✅ 完成 | `init` 创建 workspace 和数据库，`info` 显示系统信息 |
-| 严格配置 | ✅ 完成 | 分层配置模型（runtime/storage/interaction），未知字段报错 |
+| SQLite 存储 | ✅ 完成 | Schema、连接管理、编号 Migration（v1-v6） |
+| CLI | ✅ 完成 | `init` 创建 workspace 和数据库，`info` 显示系统信息（无 API Key 仍可用） |
+| 严格配置 | ✅ 完成 | 分层配置模型（runtime/storage/interaction/worker 等），未知字段报错 |
 | 入站事务 | ✅ 完成 | accept_inbound（Inbox 幂等、Conversation/Session/Message/Turn/Outbox 同事务） |
-| Dispatcher + Lane | ✅ 完成 | 按优先级 DESC 调度、Lane 隔离、原子 RunAttempt 创建 |
+| Dispatcher + Lane | ✅ 完成 | 按优先级 DESC 调度、Lane 隔离、原子 RunAttempt 创建，Lease 强制执行 |
 | Stub Agent + TurnCompletion | ✅ 完成 | 固定回复、原子写入 Message + Delivery + Outbox |
-| Outbox Worker | ✅ 完成 | 聚合顺序、Lease/版本校验、指数退避重试、精确 dead_letter |
-| Delivery Worker | ✅ 完成 | Lease/版本校验、失败重试、unknown→reconcile、精确 failed |
-| Recovery Service | ✅ 完成 | 过期 Lease 回收、stale Turn/RunAttempt 重置 |
-| 可靠性测试 | ✅ 完成 | 并发领取、Lease 过期、旧 Worker 拒绝、重试时序、恢复幂等 |
+| Outbox Worker | ✅ 完成 | 聚合顺序、Lease/版本校验、指数退避重试、精确 dead_letter，TTL 配置 |
+| Delivery Worker | ✅ 完成 | Lease/版本校验、失败重试、unknown→reconcile、精确 failed，TTL 配置 |
+| Recovery Service | ✅ 完成 | 过期 Lease 回收（sending→unknown）、stale Turn 清理（验证 Lease 有效性） |
+| RunAttempt Lease | ✅ 完成 | worker_id/lease_version/lease_expires_at/heartbeat_at，Dispatcher 全流程强制校验 |
+| Config 扩展 | ✅ 完成 | 完整 CONFIG-PROFILES 节支持，Worker/Lease TTL 配置，跨字段校验 |
+| 数据库时间工具 | ✅ 完成 | epoch_ms/from_epoch_ms 工具，新字段使用 INTEGER epoch ms |
+| 可靠性测试 | ✅ 完成 | 并发领取、Lease TTL、有效 Lease 不被回收、旧版本/旧 Worker 拒绝 |
 
 ## 架构概要
 

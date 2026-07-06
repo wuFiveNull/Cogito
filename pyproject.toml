@@ -9,6 +9,9 @@ dependencies = [
     "pydantic>=2.0",
 ]
 
+[project.scripts]
+cogito = "cogito.__main__:main"
+
 [build-system]
 requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
@@ -30,6 +33,7 @@ select = ["E", "F", "I", "N", "W", "UP"]
 "src/cogito/store/schema.py" = ["E501"]
 "src/cogito/domain/*.py" = ["E501"]
 "src/cogito/service/completion.py" = ["E501"]
+"src/cogito/service/recovery_service.py" = ["E501"]
 "src/cogito/service/delivery_worker.py" = ["E501"]
 "src/cogito/service/inbound_service.py" = ["E501"]
 "src/cogito/store/repositories.py" = ["E501"]

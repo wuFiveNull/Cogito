@@ -1,8 +1,9 @@
 """Configuration — strict layered config model.
 
 遵循 CONFIG-PROFILES / 1（配置层级）与 CONFIG-PROFILES / 6（启动校验）：
-- 配置分层：runtime / storage / interaction
-- 未知字段和节在加载时报错
+- 配置分层：runtime / storage / interaction / channel / agent / worker 等
+- 未知字段和节在加载时报错（仅限当前已定型节内未知字段）
+- 已知但未定型节可以出现但内容暂不校验
 - 敏感字段（api_key 等）在 repr 中脱敏
 """
 
@@ -17,21 +18,41 @@ from typing import Any
 
 DEFAULT_CONFIG_PATH = Path("config.toml")
 
-# ── 已知顶层 key 和 section —— 之外的视为未知 ──
+# ── 已知顶层 key —— 之外的视为未知 ──
+# CONFIG-PROFILES / 2 定义的全部顶层节
 KNOWN_TOP_KEYS = frozenset({"workspace_path"})
-KNOWN_SECTIONS = frozenset({"runtime", "storage", "interaction"})
+KNOWN_SECTIONS = frozenset({
+    "runtime", "storage", "interaction",
+    "channel", "conversation", "agent", "model", "memory",
+    "capability", "sandbox", "worker", "scheduler",
+    "connector", "proactive", "security",
+    "observability", "retention", "backup",
+})
 
-# ── 各 section 内的已知字段 ──
+# ── 已定型节内的已知字段（校验未知字段）──
 STORAGE_FIELDS = frozenset({"db_path", "enable_wal", "busy_timeout", "payload_dir"})
-RUNTIME_FIELDS = frozenset({})  # 扩展到 model/agent 配置
-INTERACTION_FIELDS = frozenset({})  # 扩展到 channel/delivery 配置
+RUNTIME_FIELDS = frozenset({"profile", "timezone", "instance_id"})
+INTERACTION_FIELDS = frozenset({"bind_host", "allow_remote", "validate_origin"})
+WORKER_FIELDS = frozenset({
+    "concurrency", "lease_duration_seconds", "heartbeat_interval_seconds",
+    "outbox_lease_ttl_seconds", "delivery_lease_ttl_seconds",
+    "recovery_grace_period_seconds",
+})
 
-# ── 需要脱敏的字段（repr 或日志输出时替换为 ****） ──
+# ── 已声明但尚未定型节（内容暂不校验，仅允许存在）──
+_TOLERATED_SECTIONS = frozenset({
+    "channel", "conversation", "agent", "model", "memory",
+    "capability", "sandbox", "scheduler",
+    "connector", "proactive", "security",
+    "observability", "retention", "backup",
+})
+
+
+# ── 需要脱敏的字段 ──
 SENSITIVE_FIELDS = frozenset({"api_key", "token", "secret"})
 
 
 def _mask_sensitive(key: str, value: str) -> str:
-    """对敏感字段脱敏。"""
     if key.lower() in SENSITIVE_FIELDS and value:
         return value[:4] + "****" if len(value) > 4 else "****"
     return value
@@ -46,7 +67,6 @@ def _check_unknown(raw: dict[str, Any], known: frozenset[str], section: str) -> 
 
 
 def _resolve_env(value: Any) -> Any:
-    """递归解析字符串值中的 ${ENV_VAR} 引用。"""
     if isinstance(value, str):
         pattern = re.compile(r"\$\{(\w+)\}")
         return pattern.sub(lambda m: os.environ.get(m.group(1), ""), value)
@@ -58,7 +78,7 @@ def _resolve_env(value: Any) -> Any:
 
 
 # =============================================================================
-# Storage 配置（数据库 + 文件存储）
+# Storage 配置
 # =============================================================================
 
 
@@ -89,41 +109,114 @@ class StorageConfig:
 
 
 # =============================================================================
-# Runtime 配置（模型/Agent 执行）
+# Runtime 配置
 # =============================================================================
 
 
 @dataclass
 class RuntimeConfig:
-    # 预留：model provider 配置将在后续阶段扩展
-    pass
+    profile: str = "personal"
+    timezone: str = "Asia/Shanghai"
+    instance_id: str = ""
 
     def __repr__(self) -> str:
-        return "RuntimeConfig()"
+        return f"RuntimeConfig(profile={self.profile!r}, timezone={self.timezone!r})"
 
     @classmethod
     def _from_raw(cls, raw: dict[str, Any]) -> RuntimeConfig:
         _check_unknown(raw, RUNTIME_FIELDS, "runtime")
-        return cls()
+        return cls(
+            profile=str(raw.get("profile", "personal")),
+            timezone=str(raw.get("timezone", "Asia/Shanghai")),
+            instance_id=str(raw.get("instance_id", "")),
+        )
 
 
 # =============================================================================
-# Interaction 配置（通道/投递）
+# Interaction 配置
 # =============================================================================
 
 
 @dataclass
 class InteractionConfig:
-    # 预留：channel/delivery 配置将在后续阶段扩展
-    pass
+    bind_host: str = "127.0.0.1"
+    allow_remote: bool = False
+    validate_origin: bool = True
 
     def __repr__(self) -> str:
-        return "InteractionConfig()"
+        return (
+            f"InteractionConfig(bind_host={self.bind_host!r}, "
+            f"allow_remote={self.allow_remote})"
+        )
 
     @classmethod
     def _from_raw(cls, raw: dict[str, Any]) -> InteractionConfig:
         _check_unknown(raw, INTERACTION_FIELDS, "interaction")
-        return cls()
+        return cls(
+            bind_host=str(raw.get("bind_host", "127.0.0.1")),
+            allow_remote=bool(raw.get("allow_remote", False)),
+            validate_origin=bool(raw.get("validate_origin", True)),
+        )
+
+
+# =============================================================================
+# Worker 配置（Lease TTL、心跳等）
+# =============================================================================
+
+
+@dataclass
+class WorkerConfig:
+    """Worker、Lease 和恢复相关配置。
+
+    CONFIG-PROFILES / 6 要求：
+    - lease_duration > heartbeat_interval
+    - outbox/delivery TTL > heartbeat_interval
+    - recovery_grace > 0
+    """
+
+    concurrency: int = 1
+    lease_duration_seconds: int = 300
+    heartbeat_interval_seconds: int = 60
+    outbox_lease_ttl_seconds: int = 120
+    delivery_lease_ttl_seconds: int = 120
+    recovery_grace_period_seconds: int = 30
+
+    def __post_init__(self) -> None:
+        self._validate()
+
+    def _validate(self) -> None:
+        if self.lease_duration_seconds <= self.heartbeat_interval_seconds:
+            raise ValueError(
+                f"lease_duration_seconds ({self.lease_duration_seconds}) must be "
+                f"> heartbeat_interval_seconds ({self.heartbeat_interval_seconds})"
+            )
+        if self.outbox_lease_ttl_seconds <= self.heartbeat_interval_seconds:
+            raise ValueError(
+                f"outbox_lease_ttl_seconds ({self.outbox_lease_ttl_seconds}) must be "
+                f"> heartbeat_interval_seconds ({self.heartbeat_interval_seconds})"
+            )
+        if self.delivery_lease_ttl_seconds <= self.heartbeat_interval_seconds:
+            raise ValueError(
+                f"delivery_lease_ttl_seconds ({self.delivery_lease_ttl_seconds}) must be "
+                f"> heartbeat_interval_seconds ({self.heartbeat_interval_seconds})"
+            )
+        if self.recovery_grace_period_seconds < 0:
+            raise ValueError(
+                f"recovery_grace_period_seconds ({self.recovery_grace_period_seconds}) "
+                f"must be >= 0"
+            )
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> WorkerConfig:
+        _check_unknown(raw, WORKER_FIELDS, "worker")
+        return cls(
+            concurrency=int(raw.get("concurrency", 1)),
+            lease_duration_seconds=int(raw.get("lease_duration_seconds", 300)),
+            heartbeat_interval_seconds=int(raw.get("heartbeat_interval_seconds", 60)),
+            outbox_lease_ttl_seconds=int(raw.get("outbox_lease_ttl_seconds", 120)),
+            delivery_lease_ttl_seconds=int(raw.get("delivery_lease_ttl_seconds", 120)),
+            recovery_grace_period_seconds=int(raw.get("recovery_grace_period_seconds", 30)),
+        )
 
 
 # =============================================================================
@@ -133,19 +226,13 @@ class InteractionConfig:
 
 @dataclass
 class Config:
-    """Cogito 严格分层配置模型。
-
-    路径约定：
-    - 所有相对路径以 workspace_path 为基准
-    - workspace 默认 .workspace/
-    - storage.db_path      → <workspace>/<db_path>
-    - storage.payload_dir  → <workspace>/<payload_dir>
-    """
+    """Cogito 严格分层配置模型。"""
 
     workspace_path: str = ".workspace"
     storage: StorageConfig = field(default_factory=StorageConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     interaction: InteractionConfig = field(default_factory=InteractionConfig)
+    worker: WorkerConfig = field(default_factory=WorkerConfig)
 
     def __repr__(self) -> str:
         return (
@@ -158,61 +245,13 @@ class Config:
     # ── 路径快捷方法 ──
 
     def resolve_db_path(self) -> str:
-        """返回数据库文件的绝对路径。"""
         return str(Path(self.workspace_path) / self.storage.db_path)
 
     def resolve_payload_dir(self) -> str:
-        """返回 payload 存储目录的绝对路径。"""
         return str(Path(self.workspace_path) / self.storage.payload_dir)
 
     def resolve_log_dir(self) -> str:
-        """返回日志目录（当前固定为 workspace 下的 logs）。"""
         return str(Path(self.workspace_path) / "logs")
-
-    # ── 加载 ──
-
-    @classmethod
-    def load(cls, path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
-        """从 TOML 文件加载配置。
-
-        规则：
-        - 文件不存在返回全默认配置
-        - 未知顶层 section → ValueError
-        - 已知 section 内未知字段 → ValueError
-        - ${ENV_VAR} 引用在字符串值中展开
-        """
-        cfg_path = Path(path)
-        if not cfg_path.exists():
-            return cls()
-
-        with cfg_path.open("rb") as f:
-            data = tomllib.load(f)
-
-        resolved = _resolve_env(data)
-
-        # 检查未知顶层 key 或 section（合并已知集后检测）
-        known_all = KNOWN_TOP_KEYS | KNOWN_SECTIONS
-        unknown_keys = set(resolved) - known_all
-        if unknown_keys:
-            raise ValueError(
-                f"Unknown config key/section: {', '.join(sorted(unknown_keys))}. "
-                f"Known: {', '.join(sorted(known_all))}"
-            )
-
-        storage = StorageConfig._from_raw(resolved.get("storage", {}))
-        runtime = RuntimeConfig._from_raw(resolved.get("runtime", {}))
-        interaction = InteractionConfig._from_raw(resolved.get("interaction", {}))
-
-        return cls(
-            workspace_path=str(resolved.get("workspace_path", ".workspace")),
-            storage=storage,
-            runtime=runtime,
-            interaction=interaction,
-        )
-
-    @classmethod
-    def _default(cls) -> Config:
-        return cls()
 
     def save_default(self, path: str | Path = DEFAULT_CONFIG_PATH) -> None:
         """写出默认配置模板（不含 API Key）。"""
@@ -231,9 +270,54 @@ busy_timeout = {self.storage.busy_timeout}
 payload_dir = "{self.storage.payload_dir}"
 
 [runtime]
-# 预留：模型提供者配置将在后续阶段扩展
+profile = "{self.runtime.profile}"
+timezone = "{self.runtime.timezone}"
 
 [interaction]
-# 预留：通道/投递配置将在后续阶段扩展
+bind_host = "{self.interaction.bind_host}"
+allow_remote = {"true" if self.interaction.allow_remote else "false"}
+
+[worker]
+concurrency = {self.worker.concurrency}
+lease_duration_seconds = {self.worker.lease_duration_seconds}
+heartbeat_interval_seconds = {self.worker.heartbeat_interval_seconds}
+outbox_lease_ttl_seconds = {self.worker.outbox_lease_ttl_seconds}
+delivery_lease_ttl_seconds = {self.worker.delivery_lease_ttl_seconds}
+recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
 """
         cfg_path.write_text(content, encoding="utf-8")
+
+    # ── 加载 ──
+
+    @classmethod
+    def load(cls, path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
+        cfg_path = Path(path)
+        if not cfg_path.exists():
+            return cls()
+
+        with cfg_path.open("rb") as f:
+            data = tomllib.load(f)
+
+        resolved = _resolve_env(data)
+
+        known_all = KNOWN_TOP_KEYS | KNOWN_SECTIONS
+        unknown_keys = set(resolved) - known_all
+        if unknown_keys:
+            raise ValueError(
+                f"Unknown config key/section: {', '.join(sorted(unknown_keys))}. "
+                f"Known: {', '.join(sorted(known_all))}"
+            )
+
+        storage = StorageConfig._from_raw(resolved.get("storage", {}))
+        runtime = RuntimeConfig._from_raw(resolved.get("runtime", {}))
+        interaction = InteractionConfig._from_raw(resolved.get("interaction", {}))
+        worker_raw = resolved.get("worker", {})
+        worker = WorkerConfig._from_raw(worker_raw) if worker_raw else WorkerConfig()
+
+        return cls(
+            workspace_path=str(resolved.get("workspace_path", ".workspace")),
+            storage=storage,
+            runtime=runtime,
+            interaction=interaction,
+            worker=worker,
+        )

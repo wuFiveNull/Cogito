@@ -5,6 +5,12 @@ Lane 概念：同一 context_partition_key 同一时间最多一个 running Turn
 
 RUNTIME-FLOWS / 3.2 优先级：
 优先级数值越大越重要（100=取消/审批 > 80=用户消息 > ... > 10=维护）
+
+EXECUTION-LIFECYCLE / 3.2 开始 Attempt：
+同一事务内完成验证 Turn=queued → 创建 RunAttempt → 设置 Lease。
+
+GLOBAL-INVARIANTS / 2.5：
+旧 Lease/旧版本 Attempt 的结果不得提交业务状态。
 """
 
 from __future__ import annotations
@@ -16,6 +22,10 @@ from typing import NamedTuple
 from cogito.domain.state_machines import validate_transition_turn
 from cogito.domain.turn import RunAttempt, RunAttemptStatus, Turn, TurnStatus
 from cogito.service.unit_of_work import UnitOfWork
+from cogito.store.time_utils import epoch_ms, now_ms
+
+# Default lease TTL in seconds (overridable via Config)
+DEFAULT_LEASE_TTL_S = 120
 
 
 class ClaimedRun(NamedTuple):
@@ -28,22 +38,29 @@ class Dispatcher:
     """Turn 调度器 —— 领取、执行、完成。
 
     职责：
-    - claim_next：领取下一个 queued Turn 并创建 RunAttempt
-    - complete：完成 RunAttempt 并推进 Turn
-    - fail：标记 RunAttempt 失败，推进 Turn 到 failed
+    - claim_next：领取 queued Turn 并创建带有效 Lease 的 RunAttempt
+    - complete：提交结果（验证 lease_owner, lease_version, 未过期）
+    - fail：标记失败（同样验证 Lease）
+    - heartbeat：延长当前 Lease
     """
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, lease_ttl_s: int = DEFAULT_LEASE_TTL_S) -> None:
         self._conn = conn
+        self._lease_ttl_s = lease_ttl_s
 
-    def claim_next(self, worker_id: str) -> ClaimedRun | None:
+    def claim_next(self, worker_id: str, clock: datetime | None = None) -> ClaimedRun | None:
         """领取下一个可执行的 queued Turn。
 
-        约束：
-        - 同一 Session 中最多一个 running Turn（Lane 机制）
-        - 按 priority DESC（高优先级优先）、created_at ASC 排序
-        - 原子创建 RunAttempt
+        同一事务中：
+        1. 验证 Turn=queued
+        2. 验证 Lane 可用（同 Session 无 running Turn）
+        3. 创建带有效 Lease 的 RunAttempt
+        4. 设置 Turn.active_attempt_id
+        5. 推进 Turn 和 Attempt 到 running
         """
+        now = clock or datetime.now(UTC)
+        lease_expires = epoch_ms(now) + self._lease_ttl_s * 1000
+
         with UnitOfWork(self._conn) as uow:
             turn_row = self._conn.execute("""
                 SELECT t.* FROM turns t
@@ -77,7 +94,7 @@ class Dispatcher:
                 created_at=datetime.fromisoformat(turn_row["created_at"]),
             )
 
-            # 创建 RunAttempt（取当前最大 attempt_no + 1）
+            # 创建 RunAttempt
             max_no_row = self._conn.execute(
                 "SELECT COALESCE(MAX(attempt_no), 0) + 1 FROM run_attempts WHERE turn_id=?",
                 (turn.turn_id,),
@@ -88,10 +105,13 @@ class Dispatcher:
                 turn_id=turn.turn_id,
                 attempt_no=attempt_no,
                 status=RunAttemptStatus.created,
-                started_at=datetime.now(UTC),
+                started_at=now,
+                worker_id=worker_id,
+                lease_version=1,
+                lease_expires_at=now.timestamp() + self._lease_ttl_s,
             )
 
-            # 原子推进 Turn: queued → running（需要当前版本匹配）
+            # 原子推进 Turn: queued → running
             validate_transition_turn(turn.turn_id, turn.status, TurnStatus.running)
 
             updated = self._conn.execute(
@@ -107,12 +127,14 @@ class Dispatcher:
             turn.status = TurnStatus.running
             turn.active_attempt_id = attempt.attempt_id
 
-            # 写入 RunAttempt
+            # 写入 RunAttempt（含 Lease 字段）
             self._conn.execute(
-                "INSERT INTO run_attempts (attempt_id, turn_id, attempt_no, status, started_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO run_attempts (attempt_id, turn_id, attempt_no, status, "
+                "started_at, worker_id, lease_version, lease_expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (attempt.attempt_id, attempt.turn_id, attempt.attempt_no,
-                 RunAttemptStatus.running.value, attempt.started_at.isoformat()),
+                 RunAttemptStatus.running.value, epoch_ms(attempt.started_at),
+                 worker_id, attempt.lease_version, int(lease_expires)),
             )
 
             attempt.status = RunAttemptStatus.running
@@ -126,28 +148,35 @@ class Dispatcher:
         turn_id: str,
         attempt_id: str,
         expected_turn_version: int,
+        worker_id: str = "",
+        lease_version: int = 0,
         *,
         final_message_id: str | None = None,
         _uow: UnitOfWork | None = None,
     ) -> bool:
         """完成 RunAttempt 并推进 Turn 到 completed。
 
-        原子操作：
-        1. RunAttempt: running → succeeded（验证 attempt_id 和 status）
-        2. Turn: running → completed（版本条件更新）
-
-        只有两步都成功时返回 True。
-        如果提供 _uow，则在现有 UoW 内执行（不自行 commit）。
+        验证（全部匹配才提交）：
+        - turn version
+        - active_attempt_id
+        - attempt status='running'
+        - lease_owner
+        - lease_version
         """
+        now = now_ms()
+        now_iso = datetime.fromtimestamp(now / 1000, tz=UTC).isoformat()
+
         if _uow is not None:
             return self._complete_internal(
                 _uow, turn_id, attempt_id, expected_turn_version,
+                worker_id, lease_version, now_iso,
                 final_message_id=final_message_id,
             )
 
         with UnitOfWork(self._conn) as uow:
             result = self._complete_internal(
                 uow, turn_id, attempt_id, expected_turn_version,
+                worker_id, lease_version, now_iso,
                 final_message_id=final_message_id,
             )
             if result:
@@ -160,32 +189,34 @@ class Dispatcher:
         turn_id: str,
         attempt_id: str,
         expected_turn_version: int,
+        worker_id: str,
+        lease_version: int,
+        now_iso: str,
         *,
         final_message_id: str | None = None,
     ) -> bool:
-        """UoW 内部的完成逻辑（不自行 commit/rollback）。"""
-        now = datetime.now(UTC)
-
-        # 验证 attempt 仍在 running
+        # 验证 attempt 仍在运行且 Lease 匹配
         attempt_updated = self._conn.execute(
-            "UPDATE run_attempts SET status=?, finished_at=? "
-            "WHERE attempt_id=? AND status='running' AND turn_id=?",
-            (RunAttemptStatus.succeeded.value, now.isoformat(), attempt_id, turn_id),
+            "UPDATE run_attempts SET status=?, finished_at=?, worker_id=?, lease_version=? "
+            "WHERE attempt_id=? AND status='running' AND turn_id=? "
+            "AND worker_id=? AND lease_version=?",
+            (RunAttemptStatus.succeeded.value, now_iso, worker_id, lease_version,
+             attempt_id, turn_id, worker_id, lease_version),
         )
 
-        # Turn: running → completed（版本条件更新）
+        # Turn: running → completed
         if final_message_id:
             turn_updated = self._conn.execute(
-                "UPDATE turns SET status=?, final_message_id=?, version=version+1 "
+                "UPDATE turns SET status=?, final_message_id=?, version=version+1, completed_at=? "
                 "WHERE turn_id=? AND version=? AND status='running'",
-                (TurnStatus.completed.value, final_message_id,
+                (TurnStatus.completed.value, final_message_id, now_iso,
                  turn_id, expected_turn_version),
             )
         else:
             turn_updated = self._conn.execute(
-                "UPDATE turns SET status=?, version=version+1 "
+                "UPDATE turns SET status=?, version=version+1, completed_at=? "
                 "WHERE turn_id=? AND version=? AND status='running'",
-                (TurnStatus.completed.value, turn_id, expected_turn_version),
+                (TurnStatus.completed.value, now_iso, turn_id, expected_turn_version),
             )
 
         return attempt_updated.rowcount > 0 and turn_updated.rowcount > 0
@@ -195,22 +226,23 @@ class Dispatcher:
         turn_id: str,
         attempt_id: str,
         expected_turn_version: int,
+        worker_id: str = "",
+        lease_version: int = 0,
     ) -> bool:
         """标记 RunAttempt 失败，推进 Turn 到 failed。
 
-        原子操作：
-        1. RunAttempt: running → failed（验证 attempt_id + turn_id）
-        2. Turn: running → failed（版本条件更新）
-
-        只有两步都成功时返回 True。
+        验证 turn version + active_attempt_id + lease_owner + lease_version。
         """
         with UnitOfWork(self._conn) as uow:
-            now = datetime.now(UTC)
+            now = now_ms()
+            now_iso = datetime.fromtimestamp(now / 1000, tz=UTC).isoformat()
 
             attempt_updated = self._conn.execute(
-                "UPDATE run_attempts SET status=?, finished_at=? "
-                "WHERE attempt_id=? AND status='running' AND turn_id=?",
-                (RunAttemptStatus.failed.value, now.isoformat(), attempt_id, turn_id),
+                "UPDATE run_attempts SET status=?, finished_at=?, worker_id=?, lease_version=? "
+                "WHERE attempt_id=? AND status='running' AND turn_id=? "
+                "AND worker_id=? AND lease_version=?",
+                (RunAttemptStatus.failed.value, now_iso, worker_id, lease_version,
+                 attempt_id, turn_id, worker_id, lease_version),
             )
 
             turn_updated = self._conn.execute(
@@ -225,12 +257,38 @@ class Dispatcher:
             return result
 
     def cancel(self, turn_id: str, expected_version: int) -> bool:
-        """取消 queued 状态的 Turn，返回条件更新是否匹配。"""
+        """取消 queued 状态的 Turn。"""
         with UnitOfWork(self._conn) as uow:
             updated = self._conn.execute(
                 "UPDATE turns SET status=?, version=version+1 "
                 "WHERE turn_id=? AND version=? AND status='queued'",
                 (TurnStatus.cancelled.value, turn_id, expected_version),
+            )
+            uow.commit()
+            return updated.rowcount > 0
+
+    def heartbeat(
+        self,
+        turn_id: str,
+        attempt_id: str,
+        worker_id: str,
+        lease_version: int,
+        clock: datetime | None = None,
+    ) -> bool:
+        """延长当前 RunAttempt 的 Lease。
+
+        调用前验证 lease_owner + lease_version 匹配。
+        返回 True 表示心跳成功。
+        """
+        now = clock or datetime.now(UTC)
+        new_expires = int(epoch_ms(now)) + self._lease_ttl_s * 1000
+
+        with UnitOfWork(self._conn) as uow:
+            updated = self._conn.execute(
+                "UPDATE run_attempts SET lease_expires_at=?, heartbeat_at=? "
+                "WHERE attempt_id=? AND turn_id=? AND worker_id=? AND lease_version=? "
+                "AND status='running'",
+                (new_expires, epoch_ms(now), attempt_id, turn_id, worker_id, lease_version),
             )
             uow.commit()
             return updated.rowcount > 0

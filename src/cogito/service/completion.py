@@ -131,6 +131,8 @@ class TurnCompletionService:
                 turn.turn_id,
                 attempt.attempt_id,
                 turn.version,
+                worker_id=attempt.worker_id,
+                lease_version=attempt.lease_version,
                 final_message_id=message.message_id,
                 _uow=uow,
             )

@@ -27,8 +27,9 @@ class TestDefaultConfig:
         r = repr(c)
         assert "Config(" in r
         assert "StorageConfig(" in r
-        assert "RuntimeConfig()" in r
-        assert "InteractionConfig()" in r
+        assert "RuntimeConfig(" in r
+        assert "InteractionConfig(" in r
+        assert "bind_host" in r
 
     def test_path_resolution(self):
         c = Config()
@@ -106,6 +107,7 @@ class TestSaveDefault:
             assert "[storage]" in content
             assert "[runtime]" in content
             assert "[interaction]" in content
+            assert "[worker]" in content
             assert "workspace_path" in content
 
     def test_save_default_has_no_api_keys(self):

@@ -1,0 +1,44 @@
+# Cogito 配置示例
+# 复制本文件为 config.toml 并按需修改
+# API Key 等敏感信息通过 secret:// 引用 .env 文件
+#
+# 配置层级 (CONFIG-PROFILES / 1):
+#   built-in defaults → profile file → local override → env override
+
+workspace_path = ".workspace"
+
+[storage]
+db_path = "data/cogito.db"
+enable_wal = true
+busy_timeout = 5000
+payload_dir = "data/payload"
+
+[runtime]
+profile = "personal"
+timezone = "Asia/Shanghai"
+instance_id = ""
+
+[interaction]
+bind_host = "127.0.0.1"
+allow_remote = false
+validate_origin = true
+
+[worker]
+# Lease/心跳/恢复参数（必满足：lease_duration > heartbeat_interval）
+concurrency = 1
+lease_duration_seconds = 300
+heartbeat_interval_seconds = 60
+outbox_lease_ttl_seconds = 120
+delivery_lease_ttl_seconds = 120
+recovery_grace_period_seconds = 30
+
+# ── 以下节已声明但尚未定型，保留仅保证不报错 ──
+[agent]
+# max_iterations = 8
+# model_provider = "primary"
+
+[model]
+# main = { provider = "deepseek", model = "deepseek-v4-flash" }
+
+[channel]
+# gateway_url = "http://127.0.0.1:8080"

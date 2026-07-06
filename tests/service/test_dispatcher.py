@@ -231,6 +231,8 @@ class TestComplete:
             claimed.turn.turn_id,
             claimed.attempt.attempt_id,
             claimed.turn.version,  # now version is the post-claim version (3)
+            worker_id=claimed.attempt.worker_id,
+            lease_version=claimed.attempt.lease_version,
             final_message_id="final_msg_1",
         )
         assert ok is True
@@ -264,10 +266,11 @@ class TestComplete:
             claimed.turn.turn_id,
             claimed.attempt.attempt_id,
             stale_version,
+            worker_id=claimed.attempt.worker_id,
+            lease_version=claimed.attempt.lease_version,
             final_message_id="final_msg_1",
         )
-        # The UPDATE won't match, but the run_attempt update still goes through
-        # This is ok - the turn stays running and can be retried
+        # stale version → complete returns False, turn stays running
         row = db.execute(
             "SELECT status FROM turns WHERE turn_id=?",
             (claimed.turn.turn_id,),
@@ -292,6 +295,8 @@ class TestFail:
             claimed.turn.turn_id,
             claimed.attempt.attempt_id,
             claimed.turn.version,
+            worker_id=claimed.attempt.worker_id,
+            lease_version=claimed.attempt.lease_version,
         )
         assert ok is True
 
@@ -529,7 +534,9 @@ class TestFullCycle:
 
         # Fail
         dispatcher.fail(claimed.turn.turn_id, claimed.attempt.attempt_id,
-                        claimed.turn.version)
+                        claimed.turn.version,
+                        worker_id=claimed.attempt.worker_id,
+                        lease_version=claimed.attempt.lease_version)
 
         # Retry: re-queue and claim again
         from cogito.domain.state_machines import can_transition_turn

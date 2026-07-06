@@ -11,6 +11,7 @@ pending → sending → sent
 可靠性语义：
 - lease_next 仅领取 pending 或已到期的 retry_scheduled
 - 条件更新验证 lease_owner + lease_version
+- lease_expires_at = now + TTL（不等于 now）
 - 外部结果明确失败时按策略重试
 - 外部结果 unknown 时只能 reconcile，不能自动重试
 - 达到 MAX_TENTATIVE 后精确进入 failed
@@ -23,6 +24,7 @@ from datetime import UTC, datetime
 from typing import NamedTuple, Protocol
 
 from cogito.service.unit_of_work import UnitOfWork
+from cogito.store.time_utils import epoch_ms
 
 # ── Gateway Protocol ──
 
@@ -64,6 +66,10 @@ DELIVERY_BACKOFF_BASE = 10
 DELIVERY_BACKOFF_MULTIPLIER = 3
 DELIVERY_MAX_BACKOFF = 3600
 
+# ── Lease TTL ──
+
+DELIVERY_LEASE_TTL_S = 120
+
 
 class DeliveryLease(NamedTuple):
     delivery_id: str
@@ -83,19 +89,20 @@ def compute_delivery_backoff(attempt_count: int) -> float:
 class DeliveryWorker:
     """投递 Worker。"""
 
-    def __init__(self, conn: sqlite3.Connection, gateway: Gateway) -> None:
+    def __init__(self, conn: sqlite3.Connection, gateway: Gateway, lease_ttl_s: int = DELIVERY_LEASE_TTL_S) -> None:
         self._conn = conn
         self._gateway = gateway
+        self._lease_ttl_s = lease_ttl_s
 
     def lease_next(self, worker_id: str, clock: datetime | None = None) -> DeliveryLease | None:
         """领取下一个待投递的 Delivery。
 
-        可领取：
-        - status = 'pending'（新投递）
-        - status = 'retry_scheduled' AND next_attempt_at <= now（重试到期）
+        可领取：pending 或已到期的 retry_scheduled。
+        lease_expires_at = now + TTL。
         """
         now = clock or datetime.now(UTC)
-        now_iso = now.isoformat()
+        now_int = epoch_ms(now)
+        lease_expires = now_int + self._lease_ttl_s * 1000
 
         with UnitOfWork(self._conn) as uow:
             row = self._conn.execute("""
@@ -109,7 +116,7 @@ class DeliveryWorker:
                 )
                 ORDER BY created_at ASC
                 LIMIT 1
-            """, (now_iso,)).fetchone()
+            """, (now_int,)).fetchone()
 
             if row is None:
                 return None
@@ -121,7 +128,7 @@ class DeliveryWorker:
                 "UPDATE deliveries SET status='sending', lease_owner=?, "
                 "lease_version=lease_version+1, attempt_count=?, lease_expires_at=? "
                 "WHERE delivery_id=? AND status=? AND lease_version=?",
-                (worker_id, new_attempt_count, now_iso,
+                (worker_id, new_attempt_count, lease_expires,
                  row["delivery_id"], row["status"], old_version),
             )
             if updated.rowcount == 0:
@@ -135,7 +142,7 @@ class DeliveryWorker:
                 "INSERT INTO delivery_attempts (attempt_id, delivery_id, attempt_no, status, "
                 "started_at, lease_owner, lease_version) "
                 "VALUES (?, ?, ?, 'sending', ?, ?, ?)",
-                (attempt_id, row["delivery_id"], attempt_no, now, worker_id, old_version + 1),
+                (attempt_id, row["delivery_id"], attempt_no, now_int, worker_id, old_version + 1),
             )
 
             uow.commit()
@@ -154,24 +161,16 @@ class DeliveryWorker:
         """发送 Delivery。
 
         验证 lease_owner + lease_version 后才提交结果。
-
-        返回值：
-        - 'sent' — 发送成功
-        - 'failed' — 外部明确失败（可重试）
-        - 'unknown' — 外部结果未知（仅可 reconcile，不可自动重试）
-        - 'stale' — Lease 不匹配，拒绝提交
         """
         target = lease.target_snapshot
         content_ref = lease.content_ref or ""
 
-        # Gateway 调用在事务外
         result = self._gateway.send(target, content_ref)
 
         now = clock or datetime.now(UTC)
-        now_iso = now.isoformat()
+        now_int = epoch_ms(now)
 
         with UnitOfWork(self._conn) as uow:
-            # 验证 Lease 有效性
             current = self._conn.execute(
                 "SELECT status, lease_owner, lease_version FROM deliveries WHERE delivery_id=?",
                 (lease.delivery_id,),
@@ -196,7 +195,7 @@ class DeliveryWorker:
                 self._conn.execute(
                     "UPDATE delivery_attempts SET status='succeeded', finished_at=? "
                     "WHERE attempt_id=?",
-                    (now_iso, attempt_id),
+                    (now_int, attempt_id),
                 )
                 uow.commit()
                 return "sent"
@@ -211,15 +210,16 @@ class DeliveryWorker:
                 else:
                     delay = compute_delivery_backoff(lease.attempt_count)
                     next_at = datetime.fromtimestamp(now.timestamp() + delay, tz=UTC)
+                    next_at_int = epoch_ms(next_at)
                     self._conn.execute(
                         "UPDATE deliveries SET status='retry_scheduled', next_attempt_at=? "
                         "WHERE delivery_id=? AND lease_owner=? AND lease_version=?",
-                        (next_at.isoformat(), lease.delivery_id, worker_id, lease.lease_version),
+                        (next_at_int, lease.delivery_id, worker_id, lease.lease_version),
                     )
                 self._conn.execute(
                     "UPDATE delivery_attempts SET status='failed', finished_at=? "
                     "WHERE attempt_id=?",
-                    (now_iso, attempt_id),
+                    (now_int, attempt_id),
                 )
                 uow.commit()
                 return "failed"
@@ -233,16 +233,13 @@ class DeliveryWorker:
             self._conn.execute(
                 "UPDATE delivery_attempts SET status='failed', finished_at=? "
                 "WHERE attempt_id=?",
-                (now_iso, attempt_id),
+                (now_int, attempt_id),
             )
             uow.commit()
             return "unknown"
 
     def reconcile(self, delivery_id: str, platform_message_id: str, worker_id: str = "") -> bool:
-        """Reconcile 路径：外部成功但本地结果 unknown → 标记为 sent。
-
-        必须从 status='unknown' 转换。若指定 worker_id 则验证 Lease 归属。
-        """
+        """Reconcile 路径：unknown → sent。"""
         with UnitOfWork(self._conn) as uow:
             if worker_id:
                 updated = self._conn.execute(

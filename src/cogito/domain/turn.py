@@ -44,6 +44,8 @@ class Turn:
         active_attempt_id: str | None = None,
         final_message_id: str | None = None,
         created_at: datetime | None = None,
+        next_attempt_at: datetime | None = None,
+        completed_at: datetime | None = None,
     ) -> None:
         self.turn_id = turn_id or uuid.uuid4().hex
         self.session_id = session_id
@@ -55,6 +57,8 @@ class Turn:
         self.active_attempt_id = active_attempt_id
         self.final_message_id = final_message_id
         self.created_at = created_at or datetime.now(UTC)
+        self.next_attempt_at = next_attempt_at
+        self.completed_at = completed_at
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -68,6 +72,8 @@ class Turn:
             "active_attempt_id": self.active_attempt_id,
             "final_message_id": self.final_message_id,
             "created_at": self.created_at.isoformat(),
+            "next_attempt_at": self.next_attempt_at.isoformat() if self.next_attempt_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
         }
 
     @classmethod
@@ -106,6 +112,11 @@ class RunAttempt:
         checkpoint_ref: str | None = None,
         started_at: datetime | None = None,
         finished_at: datetime | None = None,
+        worker_id: str = "",
+        lease_version: int = 1,
+        lease_expires_at: datetime | None = None,
+        heartbeat_at: datetime | None = None,
+        error_ref: str = "",
     ) -> None:
         self.attempt_id = attempt_id or uuid.uuid4().hex
         self.turn_id = turn_id
@@ -114,6 +125,11 @@ class RunAttempt:
         self.checkpoint_ref = checkpoint_ref
         self.started_at = started_at
         self.finished_at = finished_at
+        self.worker_id = worker_id
+        self.lease_version = lease_version
+        self.lease_expires_at = lease_expires_at
+        self.heartbeat_at = heartbeat_at
+        self.error_ref = error_ref
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -124,6 +140,9 @@ class RunAttempt:
             "checkpoint_ref": self.checkpoint_ref,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "worker_id": self.worker_id,
+            "lease_version": self.lease_version,
+            "error_ref": self.error_ref,
         }
 
     @classmethod
@@ -136,7 +155,19 @@ class RunAttempt:
             checkpoint_ref=data.get("checkpoint_ref"),
             started_at=datetime.fromisoformat(data["started_at"]) if data.get("started_at") else None,
             finished_at=datetime.fromisoformat(data["finished_at"]) if data.get("finished_at") else None,
+            worker_id=data.get("worker_id", ""),
+            lease_version=data.get("lease_version", 1),
+            error_ref=data.get("error_ref", ""),
         )
+
+    def is_lease_valid(self, clock: datetime | None = None) -> bool:
+        """检查 Lease 是否有效。"""
+        if not self.worker_id or self.status != RunAttemptStatus.running:
+            return False
+        if self.lease_expires_at is None:
+            return True  # 无过期时间视为有效
+        now = clock or datetime.now(UTC)
+        return now < self.lease_expires_at
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, RunAttempt):

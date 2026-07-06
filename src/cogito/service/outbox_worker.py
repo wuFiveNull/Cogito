@@ -12,6 +12,7 @@ pending → leased → published
 - lease_next 仅领取 pending 或已到期的 retry_scheduled
 - 条件更新验证 lease_owner + lease_version
 - 指数退避计算 next_attempt_at
+- lease_expires_at = now + TTL（不等于 now）
 - 达到 MAX_TENTATIVE 后精确进入 dead_letter
 """
 
@@ -22,6 +23,7 @@ from datetime import UTC, datetime
 from typing import NamedTuple
 
 from cogito.service.unit_of_work import UnitOfWork
+from cogito.store.time_utils import epoch_ms
 
 # ── 重试策略 ──
 
@@ -30,7 +32,9 @@ BACKOFF_BASE_SECONDS = 10
 BACKOFF_MULTIPLIER = 3
 MAX_BACKOFF_SECONDS = 3600
 
-# ── Lease ──
+# ── Lease TTL（可被 Config 覆盖）──
+
+OUTBOX_LEASE_TTL_S = 120
 
 
 class OutboxLease(NamedTuple):
@@ -58,25 +62,17 @@ def compute_backoff(attempt_count: int) -> float:
 
 
 class OutboxWorker:
-    """Outbox 发布 Worker。
+    """Outbox 发布 Worker。"""
 
-    每个 OutboxEvent 按 (aggregate_type, aggregate_id, aggregate_version) 有序发布。
-    """
-
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, lease_ttl_s: int = OUTBOX_LEASE_TTL_S) -> None:
         self._conn = conn
+        self._lease_ttl_s = lease_ttl_s
 
     def lease_next(self, worker_id: str, clock: datetime | None = None) -> OutboxLease | None:
-        """领取下一个待发布的 Outbox Event（同聚合有序）。
-
-        可领取条件：
-        - status = 'pending'（新事件）
-        - status = 'retry_scheduled' AND next_attempt_at <= now（重试到期）
-
-        领取使用条件更新：只有 status 和 version 匹配时才成功。
-        """
+        """领取下一个待发布的 Outbox Event（同聚合有序）。"""
         now = clock or datetime.now(UTC)
-        now_iso = now.isoformat()
+        now_int = epoch_ms(now)
+        lease_expires = now_int + self._lease_ttl_s * 1000
 
         with UnitOfWork(self._conn) as uow:
             row = self._conn.execute("""
@@ -97,12 +93,11 @@ class OutboxWorker:
                 )
                 ORDER BY o1.aggregate_type, o1.aggregate_id, o1.aggregate_version
                 LIMIT 1
-            """, (now_iso,)).fetchone()
+            """, (now_int,)).fetchone()
 
             if row is None:
                 return None
 
-            # 条件更新：status+version 匹配时才成功
             old_version = row["lease_version"]
             new_attempt_count = row["attempt_count"] + 1
 
@@ -110,7 +105,7 @@ class OutboxWorker:
                 "UPDATE outbox_events SET status='leased', lease_owner=?, "
                 "lease_version=lease_version+1, attempt_count=?, lease_expires_at=? "
                 "WHERE event_id=? AND status=? AND lease_version=?",
-                (worker_id, new_attempt_count, now_iso,
+                (worker_id, new_attempt_count, lease_expires,
                  row["event_id"], row["status"], old_version),
             )
             if updated.rowcount == 0:
@@ -139,7 +134,7 @@ class OutboxWorker:
     def publish(self, lease: OutboxLease, worker_id: str) -> bool:
         """标记 OutboxEvent 为已发布。
 
-        验证 lease_owner 和 lease_version 匹配，确保只有当前持有 Worker 可提交。
+        验证 lease_owner + lease_version 匹配，确保只有当前持有 Worker 可提交。
         """
         with UnitOfWork(self._conn) as uow:
             updated = self._conn.execute(
@@ -155,7 +150,7 @@ class OutboxWorker:
 
         验证 lease_owner + lease_version。
         若 attempt_count >= MAX_TENTATIVE → dead_letter。
-        否则按指数退避设置 next_attempt_at。
+        否则按指数退避设置 next_attempt_at（epoch ms）。
         """
         now = clock or datetime.now(UTC)
 
@@ -171,20 +166,18 @@ class OutboxWorker:
 
             delay_seconds = compute_backoff(lease.attempt_count)
             next_at = datetime.fromtimestamp(now.timestamp() + delay_seconds, tz=UTC)
+            next_at_int = epoch_ms(next_at)
 
             updated = self._conn.execute(
                 "UPDATE outbox_events SET status='retry_scheduled', next_attempt_at=? "
                 "WHERE event_id=? AND lease_owner=? AND lease_version=? AND status='leased'",
-                (next_at.isoformat(), lease.event_id, worker_id, lease.lease_version),
+                (next_at_int, lease.event_id, worker_id, lease.lease_version),
             )
             uow.commit()
             return updated.rowcount > 0
 
     def dead_letter(self, event_id: str, worker_id: str = "", lease_version: int = 0) -> bool:
-        """直接移入 dead letter。
-
-        若指定 worker_id+lease_version，则验证条件；否则无条件（管理操作）。
-        """
+        """直接移入 dead letter。"""
         with UnitOfWork(self._conn) as uow:
             if worker_id:
                 updated = self._conn.execute(
