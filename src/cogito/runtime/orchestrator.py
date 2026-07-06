@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 
+from cogito.capability import CapabilityRegistry
+from cogito.capability.executor import ToolExecutor
 from cogito.model.router import ModelRouter
 from cogito.runtime.clock import Clock, ProductionClock
 from cogito.runtime.context import ContextBuilder
@@ -52,6 +54,9 @@ class Orchestrator:
         model_role: str = "main",
         heartbeat_interval_s: int = 30,
         max_input_tokens: int = 64000,
+        registry: CapabilityRegistry | None = None,
+        executor: ToolExecutor | None = None,
+        toolsets: set[str] | None = None,
     ) -> None:
         self._conn = conn
         self._model_role = model_role
@@ -67,7 +72,12 @@ class Orchestrator:
         self._context_builder = ContextBuilder(
             conn, clock=self._clock, max_input_tokens=max_input_tokens,
         )
-        self._loop = AgentLoop(router)
+        self._loop = AgentLoop(
+            router,
+            registry=registry,
+            executor=executor,
+            toolsets=toolsets,
+        )
         self._completion = TurnCompletionService(conn, clock=self._clock)
 
     def _now_ms(self) -> int:

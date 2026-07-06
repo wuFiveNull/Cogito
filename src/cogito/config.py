@@ -28,6 +28,7 @@ KNOWN_SECTIONS = frozenset({
     "capability", "sandbox", "worker", "scheduler",
     "connector", "proactive", "security",
     "observability", "retention", "backup", "plugins",
+    "capability",
 })
 
 # 兼容别名映射：旧名 → 新名
@@ -52,6 +53,7 @@ MODEL_FIELDS = frozenset({
 
 AGENT_FIELDS = frozenset({
     "system_prompt", "max_output_tokens", "context_memory_window", "tools",
+    "enabled_toolsets", "disabled_toolsets", "mode",
 })
 
 # ── 已声明但尚未定型节（内容暂不校验，仅允许存在）──
@@ -60,6 +62,7 @@ _TOLERATED_SECTIONS = frozenset({
     "capability", "sandbox", "scheduler",
     "connector", "proactive", "security",
     "observability", "retention", "backup", "plugins",
+    "capability",
 })
 
 
@@ -302,11 +305,15 @@ class AgentConfig:
     - agent.max_tokens → max_output_tokens
     - agent.context.memory_window → context_memory_window
     - agent.tools 保留但不启用
+    - agent.enabled_toolsets / agent.disabled_toolsets 控制 Toolset
     """
     system_prompt: str = "You are Cogito, a helpful AI assistant."
     max_output_tokens: int = 4096
     context_memory_window: int = 50
     tools: list[str] = field(default_factory=list)
+    enabled_toolsets: list[str] = field(default_factory=list)
+    disabled_toolsets: list[str] = field(default_factory=list)
+    mode: str = "reactive"
 
     def __repr__(self) -> str:
         return (
@@ -331,7 +338,44 @@ class AgentConfig:
             max_output_tokens=int(max_tokens) if max_tokens is not None else 4096,
             context_memory_window=int(memory_window),
             tools=list(raw.get("tools", [])),
+            enabled_toolsets=list(raw.get("enabled_toolsets", [])),
+            disabled_toolsets=list(raw.get("disabled_toolsets", [])),
+            mode=str(raw.get("mode", "reactive")),
         )
+
+
+@dataclass
+class MCPServerEntry:
+    """MCP Server 配置项。"""
+    name: str = ""
+    transport: str = "stdio"
+    command: str = ""
+    args: list[str] = field(default_factory=list)
+    url: str = ""
+    enabled: bool = True
+    toolset: str = "mcp"
+
+
+@dataclass
+class CapabilityConfig:
+    """Capability 配置（MCP servers 等）。"""
+    mcp_servers: list[MCPServerEntry] = field(default_factory=list)
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> CapabilityConfig:
+        servers_raw = raw.get("mcp", {}).get("servers", {})
+        servers = []
+        for name, cfg in servers_raw.items():
+            servers.append(MCPServerEntry(
+                name=str(name),
+                transport=str(cfg.get("transport", "stdio")),
+                command=str(cfg.get("command", "")),
+                args=list(cfg.get("args", [])),
+                url=str(cfg.get("url", "")),
+                enabled=bool(cfg.get("enabled", True)),
+                toolset=str(cfg.get("toolset", "mcp")),
+            ))
+        return cls(mcp_servers=servers)
 
 
 # =============================================================================
@@ -350,6 +394,7 @@ class Config:
     worker: WorkerConfig = field(default_factory=WorkerConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    capability: CapabilityConfig = field(default_factory=CapabilityConfig)
 
     def __repr__(self) -> str:
         return (
@@ -464,6 +509,9 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
         agent_raw = resolved.get("agent", {})
         agent = AgentConfig._from_raw(agent_raw)
 
+        capability_raw = resolved.get("capability", {})
+        capability = CapabilityConfig._from_raw(capability_raw)
+
         return cls(
             workspace_path=str(resolved.get("workspace_path", ".workspace")),
             storage=storage,
@@ -472,4 +520,5 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
             worker=worker,
             model=model,
             agent=agent,
+            capability=capability,
         )

@@ -2,12 +2,15 @@
 
 提供固定响应、预设序列和错误模拟能力。
 所有测试应使用 Stub Provider，不依赖在线模型。
+
+Phase 2: 支持工具调用模拟。
 """
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from typing import Any
 
 from cogito.model.contracts import (
     ContentPart,
@@ -23,7 +26,12 @@ from cogito.model.provider import HealthStatus, ModelProvider
 
 
 class StubScenario:
-    """Stub Provider 的预设行为。"""
+    """Stub Provider 的预设行为。
+
+    tool_calls: 预设的工具调用响应列表。
+        当 finish_reason=tool_calls 且 tool_calls 非空时，
+        返回预设的 tool_calls。
+    """
 
     def __init__(
         self,
@@ -33,6 +41,7 @@ class StubScenario:
         latency_ms: int = 50,
         error: ErrorEnvelope | None = None,
         invalid_output: bool = False,
+        tool_calls: tuple[dict[str, Any], ...] = (),
     ) -> None:
         self.response_text = response_text
         self.finish_reason = finish_reason
@@ -40,6 +49,7 @@ class StubScenario:
         self.latency_ms = latency_ms
         self.error = error
         self.invalid_output = invalid_output
+        self.tool_calls = tool_calls
 
 
 class StubModelProvider(ModelProvider):
@@ -49,6 +59,7 @@ class StubModelProvider(ModelProvider):
     - 多次调用返回预设序列
     - 支持模拟 timeout、rate_limit 等错误
     - 记录收到的请求（便于断言）
+    - 支持工具调用模拟（Phase 2）
     """
 
     def __init__(self, scenarios: list[StubScenario] | None = None) -> None:
@@ -69,11 +80,17 @@ class StubModelProvider(ModelProvider):
             ContentPart(part_type="text", text=scenario.response_text),
         )
 
+        # 工具调用
+        tool_calls = ()
+        if scenario.finish_reason == FinishReason.tool_calls:
+            tool_calls = scenario.tool_calls
+
         return ModelResponse(
             request_id=request.request_id,
             provider_request_id=uuid.uuid4().hex,
             model_id="stub-model",
             content_parts=parts,
+            tool_calls=tool_calls,
             finish_reason=scenario.finish_reason,
             usage=scenario.usage,
             latency_ms=scenario.latency_ms,
@@ -89,8 +106,8 @@ class StubModelProvider(ModelProvider):
             max_output_tokens=4096,
             modalities=("text",),
             supports_streaming=False,
-            supports_tools=False,
-            supports_parallel_tools=False,
+            supports_tools=True,
+            supports_parallel_tools=True,
             supports_json_schema=False,
             supports_prompt_cache=False,
         )

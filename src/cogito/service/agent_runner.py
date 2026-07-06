@@ -20,6 +20,8 @@ import asyncio
 import sqlite3
 from enum import StrEnum
 
+from cogito.capability import CapabilityRegistry
+from cogito.capability.executor import ToolExecutor
 from cogito.config import Config, ModelConfig
 from cogito.model.provider import ModelProvider
 from cogito.model.router import ModelRouter
@@ -29,6 +31,15 @@ from cogito.runtime.loop import AgentLoop, LoopResultType
 from cogito.service.completion import TurnCompletionService
 from cogito.service.dispatcher import Dispatcher
 from cogito.store.time_utils import epoch_ms
+
+# ── 默认模式-Toolset 映射 (AGENT-COGNITION / 2.2) ──
+
+MODE_TOOLSETS: dict[str, set[str]] = {
+    "reactive": {"core", "memory", "terminal", "search", "disk"},
+    "proactive": {"core", "memory", "message"},
+    "scheduled": {"core", "memory", "schedule"},
+    "maintenance": {"core", "memory", "disk"},
+}
 
 
 class RunOutcome(StrEnum):
@@ -53,6 +64,9 @@ class AgentRunner:
         max_input_tokens: int = 64000,
         system_prompt: str = "You are Cogito, a helpful AI assistant.",
         context_memory_window: int = 50,
+        registry: CapabilityRegistry | None = None,
+        executor: ToolExecutor | None = None,
+        toolsets: set[str] | None = None,
     ) -> None:
         self._conn = conn
         self._router = router
@@ -61,12 +75,20 @@ class AgentRunner:
         self._heartbeat_interval_s = heartbeat_interval_s
         self._system_prompt = system_prompt
         self._context_memory_window = context_memory_window
+        self._registry = registry
+        self._executor = executor
+        self._toolsets = toolsets or set()
 
         self._dispatcher = Dispatcher(conn, clock=self._clock)
         self._context_builder = ContextBuilder(
             conn, clock=self._clock, max_input_tokens=max_input_tokens,
         )
-        self._loop = AgentLoop(router)
+        self._loop = AgentLoop(
+            router,
+            registry=registry,
+            executor=executor,
+            toolsets=toolsets,
+        )
         self._completion = TurnCompletionService(conn, clock=self._clock)
 
     async def run_once(self, worker_id: str, cancel_flag: callable | None = None) -> RunOutcome:
@@ -250,14 +272,18 @@ def build_agent_runner(
     connection: sqlite3.Connection,
     provider: ModelProvider | None = None,
     clock: Clock | None = None,
+    registry: CapabilityRegistry | None = None,
+    toolsets: set[str] | None = None,
 ) -> AgentRunner:
     """构建 AgentRunner。
 
     Args:
         config: 系统配置。
         connection: SQLite 连接。
-        provider: 可选的 ModelProvider。未传时根据配置创建 OpenAI-compatible Provider。
+        provider: 可选的 ModelProvider。
         clock: 可选的时钟实现。
+        registry: 可选的 CapabilityRegistry。未传时自动创建并发现内置工具。
+        toolsets: 启用的 Toolset。未传时使用 reactive 默认。
 
     Returns: 配置好的 AgentRunner 实例。
     """
@@ -273,6 +299,29 @@ def build_agent_runner(
         role_map={"main": "main"},
     )
 
+    # 创建 Registry 并发现内置工具
+    resolved_registry = registry
+    if resolved_registry is None:
+        from cogito.capability import CapabilityRegistry
+        from cogito.tools.registry import discover_builtin_tools
+        resolved_registry = CapabilityRegistry()
+        discover_builtin_tools(resolved_registry)
+
+    # 创建 Executor
+    executor = ToolExecutor(resolved_registry)
+
+    # 解析 Toolset（默认 reactive）
+    resolved_toolsets = toolsets
+    if resolved_toolsets is None:
+        agent_mode = config.agent.mode if hasattr(config.agent, 'mode') else "reactive"
+        resolved_toolsets = MODE_TOOLSETS.get(agent_mode, {"core"})
+
+    # 配置覆盖
+    if config.agent.enabled_toolsets:
+        resolved_toolsets = set(config.agent.enabled_toolsets)
+    if config.agent.disabled_toolsets:
+        resolved_toolsets -= set(config.agent.disabled_toolsets)
+
     return AgentRunner(
         conn=connection,
         router=router,
@@ -282,6 +331,9 @@ def build_agent_runner(
         max_input_tokens=config.agent.max_output_tokens * 8,
         system_prompt=config.agent.system_prompt,
         context_memory_window=config.agent.context_memory_window,
+        registry=resolved_registry,
+        executor=executor,
+        toolsets=resolved_toolsets,
     )
 
 
@@ -303,3 +355,38 @@ def _create_provider(model_cfg: ModelConfig) -> ModelProvider:
         base_url=endpoint.base_url,
         timeout_seconds=endpoint.timeout_seconds,
     )
+
+
+async def start_mcp_servers(
+    config: Config,
+    registry: CapabilityRegistry,
+) -> MCPServerManager | None:
+    """从配置启动 MCP Server 并注册工具。"""
+    if not config.capability.mcp_servers:
+        return None
+
+    from cogito.capability.mcp.manager import MCPServerManager
+
+    manager = MCPServerManager(registry)
+    for entry in config.capability.mcp_servers:
+        if not entry.enabled:
+            continue
+
+        from cogito.capability.mcp import MCPServerConfig
+
+        mcp_cfg = MCPServerConfig(
+            name=entry.name,
+            transport=entry.transport,
+            command=entry.command,
+            args=entry.args,
+            url=entry.url,
+            enabled=entry.enabled,
+            toolset=entry.toolset,
+        )
+        try:
+            await manager.start_server(mcp_cfg)
+        except Exception as e:
+            # MCP Server 启动失败不影响整体启动
+            pass
+
+    return manager

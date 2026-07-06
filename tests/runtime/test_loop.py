@@ -138,8 +138,8 @@ class TestAgentLoop:
         assert result.result_type == LoopResultType.cancelled
 
     @pytest.mark.asyncio
-    async def test_tool_call_returns_unsupported(self):
-        """Tool Call 在未启用阶段安全失败。"""
+    async def test_tool_call_without_executor_returns_error(self):
+        """没有 Executor 时 Tool Call 返回 error。"""
         provider = StubModelProvider([StubScenario(
             response_text="",
             finish_reason=FinishReason.tool_calls,
@@ -151,7 +151,7 @@ class TestAgentLoop:
         loop = AgentLoop(router)
         result = await loop.run(_make_snapshot())
 
-        assert result.result_type == LoopResultType.unsupported_tool
+        assert result.result_type == LoopResultType.error
 
     @pytest.mark.asyncio
     async def test_provider_error_returns_error_result(self):

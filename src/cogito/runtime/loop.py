@@ -2,20 +2,24 @@
 
 AGENT-LOOP / 2. LoopState：循环内状态和可恢复字段。
 AGENT-LOOP / 3. 单轮协议：统一 ModelResponse 输出类型。
+AGENT-LOOP / 4. Tool Call：执行并迭代。
 AGENT-LOOP / 5. 输出校验与修复：无效输出最多修复一次。
 AGENT-LOOP / 6. 终止条件。
-
-当前阶段只处理 FinalResponse、Refusal、InvalidOutput 和 Provider terminal error。
-Provider 返回 Tool Call 时返回明确的"不支持 Tool"受控失败。
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
+from cogito.capability.executor import ToolExecutor
+from cogito.capability.models import ToolContext, ToolResult
+from cogito.capability.registry import CapabilityRegistry
 from cogito.model.contracts import (
     ContentPart,
     FinishReason,
@@ -35,10 +39,10 @@ class LoopResultType(StrEnum):
     error = "error"
     cancelled = "cancelled"
     max_iterations = "max_iterations"
+    max_tool_calls = "max_tool_calls"
     max_tokens = "max_tokens"
     max_runtime = "max_runtime"
     repetition = "repetition"
-    unsupported_tool = "unsupported_tool"
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,7 @@ class LoopResult:
     usage: Usage = field(default_factory=Usage)
     latency_ms: int = 0
     iterations: int = 0
+    tool_call_count: int = 0
     error_message: str = ""
     finish_reason: FinishReason = FinishReason.stop
 
@@ -69,7 +74,6 @@ class LoopState:
     iteration_no: int = 0
     context_snapshot_id: str = ""
     messages: list[dict[str, Any]] = field(default_factory=list)
-    completed_tool_call_ids: set[str] = field(default_factory=set)
     pending_tool_calls: list[dict[str, Any]] = field(default_factory=list)
     partial_output_ref: str = ""
     usage: Usage = field(default_factory=Usage)
@@ -77,28 +81,45 @@ class LoopState:
     started_at: datetime | None = None
     last_iteration_at: datetime | None = None
     total_latency_ms: int = 0
+    # Tool calling
+    tool_call_count: int = 0
+    tool_signatures: list[tuple[str, str]] = field(default_factory=list)
 
 
 class AgentLoop:
     """模型执行循环。
 
-    MVP 只处理：
-    1. 构建 ModelRequest（从 ContextSnapshot）
+    流程：
+    1. 构建 ModelRequest（含 tools）
     2. 调用 Provider
-    3. 检查响应（FinalResponse/Refusal/InvalidOutput/ToolCall）
-    4. 终止条件检查
-    5. 输出修复（InvalidOutput → 最多修复一次）
+    3. 检查响应
+       a. FinalResponse → 返回
+       b. Refusal → 返回
+       c. ToolCalls → 执行工具，结果加入 messages，继续
+       d. Invalid → 修复一次 / 返回
+       e. Error → 返回
+    4. 终止条件（cancel, max_iterations, max_runtime, max_tokens, repetition）
     """
 
     def __init__(
         self,
         router: ModelRouter,
+        registry: CapabilityRegistry | None = None,
+        executor: ToolExecutor | None = None,
+        toolsets: set[str] | None = None,
         max_iterations: int = 10,
+        max_tool_calls: int = 50,
+        max_repeated_tool_signature: int = 3,
         max_runtime_s: int = 120,
         max_total_tokens: int = 32000,
     ) -> None:
         self._router = router
+        self._registry = registry
+        self._executor = executor
+        self._toolsets = toolsets or set()
         self._max_iterations = max_iterations
+        self._max_tool_calls = max_tool_calls
+        self._max_repeated_tool_signature = max_repeated_tool_signature
         self._max_runtime = timedelta(seconds=max_runtime_s)
         self._max_total_tokens = max_total_tokens
 
@@ -131,6 +152,13 @@ class AgentLoop:
             if state.iteration_no > self._max_iterations:
                 return self._make_result(LoopResultType.max_iterations, state,
                                          f"Exceeded max iterations ({self._max_iterations})")
+
+            # ── 终止条件检查（Tool 调用次数）──
+            if state.tool_call_count >= self._max_tool_calls:
+                return self._make_result(
+                    LoopResultType.max_tool_calls, state,
+                    f"Exceeded max tool calls ({self._max_tool_calls})",
+                )
 
             # ── 终止条件检查（运行时间）──
             elapsed = state.last_iteration_at - state.started_at
@@ -166,6 +194,10 @@ class AgentLoop:
             state.usage = state.usage + response.usage
             state.total_latency_ms += iter_latency
 
+            # 将 assistant 响应加入消息历史
+            assistant_msg = self._make_assistant_message(response)
+            state.messages.append(assistant_msg)
+
             # ── 检查响应 ──
             result = self._classify_response(response)
 
@@ -184,19 +216,29 @@ class AgentLoop:
                     content_parts=list(response.content_parts),
                 )
             elif result == "_tool_call":
-                # 当前阶段不支持 Tool，返回受控失败
-                return self._make_result(
-                    LoopResultType.unsupported_tool, state,
-                    "Tool calls are not supported in this version",
-                )
+                # 执行工具调用
+                if not self._executor:
+                    return self._make_result(
+                        LoopResultType.error, state,
+                        "Tool calls not supported: no executor configured",
+                        finish_reason=FinishReason.error,
+                    )
+                loop_detected = await self._execute_tool_calls(state, response)
+                if loop_detected:
+                    return self._make_result(
+                        LoopResultType.repetition, state,
+                        "Loop detected: repeated tool call signature",
+                    )
+                continue  # 继续下一轮迭代
             elif result == "_invalid":
                 if output_repaired:
                     return self._make_result(
                         LoopResultType.invalid_output, state,
                         "Invalid output after repair attempt",
                     )
-                # 修复一次
+                # 修复一次：从消息中移除无效的 assistant 回复，重新请求
                 output_repaired = True
+                state.messages.pop()  # 移除无效回复
                 continue
 
             # fallback
@@ -206,7 +248,10 @@ class AgentLoop:
     def _build_request(
         self, state: LoopState, context: ContextSnapshot,
     ) -> ModelRequest:
-        """从 ContextSnapshot 和 LoopState 构建 ModelRequest。"""
+        """从 ContextSnapshot、LoopState 和 Registry 构建 ModelRequest。
+
+        注入系统提示词、历史消息和可用工具 Schema。
+        """
         messages = []
         for item in context.items:
             role = "system" if item.item_type == "system_policy" else "user"
@@ -214,13 +259,116 @@ class AgentLoop:
                 "role": role,
                 "content": item.content,
             })
-        # 添加历史消息
+        # 添加历史消息（含 tool 结果）
         messages.extend(state.messages)
+
+        # 注入工具 Schema
+        tools = ()
+        if self._registry and self._toolsets:
+            tools = tuple(self._registry.get_openai_schemas(self._toolsets))
 
         return ModelRequest(
             messages=messages,
+            tools=tools,
             stream=False,
         )
+
+    def _make_assistant_message(
+        self, response: ModelResponse,
+    ) -> dict[str, Any]:
+        """将模型回复格式化为 assistant 消息。"""
+        msg: dict[str, Any] = {
+            "role": "assistant",
+            "content": response.text,
+        }
+        if response.tool_calls:
+            msg["tool_calls"] = [
+                {
+                    "id": tc["id"],
+                    "type": tc.get("type", "function"),
+                    "function": {
+                        "name": tc["function"]["name"],
+                        "arguments": tc["function"]["arguments"],
+                    },
+                }
+                for tc in response.tool_calls
+            ]
+        return msg
+
+    async def _execute_tool_calls(
+        self, state: LoopState, response: ModelResponse,
+    ) -> bool:
+        """执行模型返回的 Tool Calls。
+
+        返回 True 表示检测到循环（重复签名），应终止。
+        """
+        if not self._executor:
+            return False
+
+        tool_calls = response.tool_calls
+        if not tool_calls:
+            return False
+
+        # 本轮已完成 ID 集合（防止同批次内重复）
+        round_completed: set[str] = set()
+
+        for tc in tool_calls:
+            tool_call_id = tc.get("id", "")
+            tool_name = tc["function"]["name"]
+            raw_arguments = tc["function"]["arguments"]
+
+            # 本轮内跳过已完成的
+            if tool_call_id in round_completed:
+                continue
+            round_completed.add(tool_call_id)
+
+            # 反序列化参数
+            try:
+                arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+            except json.JSONDecodeError:
+                arguments = {}
+
+            # 签名检测（重复调用保护）
+            sig = (tool_name, self._canonical_args(raw_arguments))
+            state.tool_signatures.append(sig)
+
+            # 检查是否超过重复阈值
+            consecutive = 1
+            for i in range(len(state.tool_signatures) - 2, -1, -1):
+                if state.tool_signatures[i] == sig:
+                    consecutive += 1
+                else:
+                    break
+            if consecutive >= self._max_repeated_tool_signature:
+                return True  # loop detected
+
+            # 执行工具
+            ctx = ToolContext(
+                attempt_id=state.attempt_id,
+                trace_id=state.turn_id,
+                tool_call_id=tool_call_id,
+            )
+
+            result = await self._executor.execute(
+                tool_call_id, tool_name, arguments, ctx,
+            )
+
+            state.tool_call_count += 1
+
+            # 格式化 tool result 消息
+            tool_msg = ToolExecutor.format_tool_message(tool_call_id, result)
+            state.messages.append(tool_msg)
+
+        return False
+
+    @staticmethod
+    def _canonical_args(raw_arguments: str) -> str:
+        """对参数做规范化，用于签名比较。"""
+        try:
+            obj = json.loads(raw_arguments)
+            return hashlib.md5(json.dumps(obj, sort_keys=True).encode()).hexdigest()
+        except (json.JSONDecodeError, TypeError):
+            return raw_arguments
 
     def _classify_response(self, response: ModelResponse) -> str:
         """分类 ModelResponse 类型。"""
@@ -264,9 +412,6 @@ class AgentLoop:
             usage=usage or state.usage,
             latency_ms=state.total_latency_ms,
             iterations=state.iteration_no,
+            tool_call_count=state.tool_call_count,
             finish_reason=finish_reason,
         )
-
-
-# 运行时类型修复
-from collections.abc import Callable  # noqa: E402

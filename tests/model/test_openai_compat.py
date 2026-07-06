@@ -238,15 +238,6 @@ class TestNetworkErrors:
 
 class TestUnsupported:
     @pytest.mark.asyncio
-    async def test_tool_call_raises_error(self):
-        provider = _make_provider([_success_response("Tool call")])
-        request = _make_request({"tools": ({"name": "test_tool"},)})
-
-        with pytest.raises(ModelProviderError) as exc:
-            await provider.generate(request)
-        assert exc.value.envelope.category == ErrorCategory.invalid_request
-
-    @pytest.mark.asyncio
     async def test_streaming_raises_error(self):
         provider = _make_provider([_success_response("Stream")])
         request = _make_request({"stream": True})
@@ -254,6 +245,162 @@ class TestUnsupported:
         with pytest.raises(ModelProviderError) as exc:
             await provider.generate(request)
         assert exc.value.envelope.category == ErrorCategory.invalid_request
+
+
+# =============================================================================
+# 工具调用（Phase 2）
+# =============================================================================
+
+
+class TestToolCalls:
+    def _tool_response(self, content: str = "") -> httpx.Response:
+        return httpx.Response(
+            status_code=200,
+            json={
+                "id": "chatcmpl-tool",
+                "model": "test-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": content,
+                            "tool_calls": [
+                                {
+                                    "id": "call_abc123",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "echo",
+                                        "arguments": '{"text": "hello"}',
+                                    },
+                                },
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 10},
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_tool_calls_in_request_payload(self):
+        """tools 参数正确发送到请求体。"""
+        sent_payload = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            nonlocal sent_payload
+            sent_payload = json.loads(request.content)
+            return self._tool_response("")
+
+        transport = httpx.MockTransport(capture)
+        provider = _make_provider()
+        provider._client = httpx.AsyncClient(
+            transport=transport,
+            base_url=provider._base_url,
+            timeout=httpx.Timeout(5),
+        )
+
+        request = _make_request({
+            "tools": ({
+                "type": "function",
+                "function": {
+                    "name": "echo",
+                    "description": "Echo text",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },),
+        })
+        await provider.generate(request)
+
+        assert "tools" in sent_payload
+        assert len(sent_payload["tools"]) == 1
+        assert sent_payload["tools"][0]["function"]["name"] == "echo"
+
+    @pytest.mark.asyncio
+    async def test_parse_tool_calls_response(self):
+        provider = _make_provider([self._tool_response("I'll use echo")])
+        request = _make_request({
+            "tools": ({
+                "type": "function",
+                "function": {"name": "echo", "description": "", "parameters": {}},
+            },),
+        })
+
+        response = await provider.generate(request)
+        assert response.finish_reason == FinishReason.tool_calls
+        assert len(response.tool_calls) == 1
+
+        tc = response.tool_calls[0]
+        assert tc["id"] == "call_abc123"
+        assert tc["type"] == "function"
+        assert tc["function"]["name"] == "echo"
+        assert tc["function"]["arguments"] == '{"text": "hello"}'
+
+    @pytest.mark.asyncio
+    async def test_parse_tool_calls_with_content(self):
+        """模型同时返回文本和 tool_calls。"""
+        provider = _make_provider([self._tool_response("I will help you.")])
+        request = _make_request({"tools": ({},)})
+
+        response = await provider.generate(request)
+        assert response.finish_reason == FinishReason.tool_calls
+        assert "I will help you" in response.text
+        assert len(response.tool_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_tool_calls_not_raises_error(self):
+        """请求中带 tools 不再报错。"""
+        provider = _make_provider([_success_response("OK")])
+        request = _make_request({"tools": ({
+            "type": "function",
+            "function": {"name": "test", "parameters": {}},
+        },)})
+
+        # 不应抛出异常
+        response = await provider.generate(request)
+        assert response.finish_reason == FinishReason.stop
+        assert response.text == "OK"
+
+    @pytest.mark.asyncio
+    async def test_parallel_tool_calls(self):
+        """多个并行 tool_calls。"""
+        response_data = {
+            "id": "chatcmpl-parallel",
+            "model": "test-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "echo", "arguments": '{"text": "a"}'},
+                            },
+                            {
+                                "id": "call_2",
+                                "type": "function",
+                                "function": {"name": "echo", "arguments": '{"text": "b"}'},
+                            },
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 30, "completion_tokens": 20},
+        }
+
+        provider = _make_provider([httpx.Response(status_code=200, json=response_data)])
+        request = _make_request({"tools": ({}, {})})
+
+        response = await provider.generate(request)
+        assert response.finish_reason == FinishReason.tool_calls
+        assert len(response.tool_calls) == 2
+        assert response.tool_calls[0]["id"] == "call_1"
+        assert response.tool_calls[1]["id"] == "call_2"
 
 
 # =============================================================================

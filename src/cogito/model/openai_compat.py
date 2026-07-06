@@ -73,13 +73,6 @@ class OpenAICompatProvider(ModelProvider):
         5. 解析响应
         """
         # ── 1. 校验 ──
-        if request.tools:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.invalid_request,
-                message="Tool calls are not supported in this version",
-                retryable=False,
-            ))
-
         if request.stream:
             raise ModelProviderError(ErrorEnvelope(
                 category=ErrorCategory.invalid_request,
@@ -152,8 +145,8 @@ class OpenAICompatProvider(ModelProvider):
             max_output_tokens=4096,
             modalities=("text",),
             supports_streaming=False,
-            supports_tools=False,
-            supports_parallel_tools=False,
+            supports_tools=True,
+            supports_parallel_tools=True,
             supports_json_schema=False,
             supports_prompt_cache=False,
         )
@@ -186,7 +179,10 @@ class OpenAICompatProvider(ModelProvider):
     # ── 内部方法 ──
 
     def _build_payload(self, request: ModelRequest) -> dict[str, Any]:
-        """构建 OpenAI-compatible 请求体。"""
+        """构建 OpenAI-compatible 请求体。
+
+        支持 tools（在 Phase 2 启用）。
+        """
         messages = []
         for msg in request.messages:
             role = msg.get("role", "user")
@@ -199,6 +195,9 @@ class OpenAICompatProvider(ModelProvider):
             "stream": False,
         }
 
+        if request.tools:
+            payload["tools"] = list(request.tools)
+
         if request.max_output_tokens is not None:
             payload["max_tokens"] = request.max_output_tokens
         if request.temperature is not None:
@@ -209,7 +208,10 @@ class OpenAICompatProvider(ModelProvider):
     def _parse_response(
         self, request_id: str, data: dict[str, Any],
     ) -> ModelResponse:
-        """解析 OpenAI-compatible 响应体。"""
+        """解析 OpenAI-compatible 响应体。
+
+        支持 tool_calls 解析（Phase 2）。
+        """
         try:
             choice = data["choices"][0]
             message = choice.get("message", {})
@@ -233,6 +235,19 @@ class OpenAICompatProvider(ModelProvider):
             cached_tokens=usage_data.get("cached_tokens", 0),
         )
 
+        # 解析 tool_calls
+        raw_tool_calls = message.get("tool_calls", [])
+        tool_calls: list[dict[str, Any]] = []
+        for tc in raw_tool_calls:
+            tool_calls.append({
+                "id": tc.get("id", ""),
+                "type": tc.get("type", "function"),
+                "function": {
+                    "name": tc.get("function", {}).get("name", ""),
+                    "arguments": tc.get("function", {}).get("arguments", "{}"),
+                },
+            })
+
         parts = (ContentPart(
             part_type=ContentPartType.text,
             text=content,
@@ -244,6 +259,7 @@ class OpenAICompatProvider(ModelProvider):
             provider_request_id=data.get("id", ""),
             model_id=data.get("model", self._model),
             content_parts=parts,
+            tool_calls=tuple(tool_calls),
             finish_reason=finish_reason,
             usage=usage,
         )

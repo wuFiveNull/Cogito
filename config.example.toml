@@ -36,6 +36,9 @@ recovery_grace_period_seconds = 30
 [agent]
 # max_iterations = 8
 # model_provider = "primary"
+# mode = "reactive"                    # reactive | proactive | scheduled | maintenance
+# enabled_toolsets = ["core", "terminal", "memory", "search"]
+# disabled_toolsets = []
 
 [model]
 # main = { provider = "deepseek", model = "deepseek-v4-flash" }

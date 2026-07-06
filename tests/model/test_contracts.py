@@ -276,7 +276,8 @@ class TestStubProvider:
         caps = provider.capabilities()
         assert caps.context_window == 128000
         assert caps.max_output_tokens == 4096
-        assert caps.supports_tools is False
+        assert caps.supports_tools is True
+        assert caps.supports_parallel_tools is True
 
     @pytest.mark.asyncio
     async def test_health(self):
