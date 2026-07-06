@@ -8,19 +8,15 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
-from datetime import datetime, timedelta, timezone
-from typing import Any
 
 from cogito.model.contracts import (
     ContentPart,
-    ErrorCategory,
     ErrorEnvelope,
     FinishReason,
     ModelCapabilities,
     ModelRequest,
     ModelResponse,
     Usage,
-    normalize_finish_reason,
 )
 from cogito.model.provider import HealthStatus, ModelProvider
 

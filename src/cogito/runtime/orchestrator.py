@@ -12,16 +12,14 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from datetime import UTC, datetime
-from typing import Any
 
 from cogito.model.router import ModelRouter
 from cogito.runtime.clock import Clock, ProductionClock
-from cogito.runtime.context import ContextBuilder, ContextSnapshot
-from cogito.runtime.loop import AgentLoop, LoopResult, LoopResultType
+from cogito.runtime.context import ContextBuilder
+from cogito.runtime.loop import AgentLoop, LoopResult
 from cogito.service.completion import TurnCompletionService
 from cogito.service.dispatcher import Dispatcher
-from cogito.service.unit_of_work import UnitOfWork
+from cogito.store.model_call_repo import ModelCallRecord, ModelCallRepository
 from cogito.store.time_utils import epoch_ms
 
 
@@ -36,8 +34,11 @@ class Orchestrator:
     流程：
     1. Dispatcher.claim_next → 获取 ClaimedRun
     2. ContextBuilder.build → 创建 ContextSnapshot
-    3. AgentLoop.run → 执行 Model 调用循环
-    4. TurnCompletionService._complete → 原子写入结果
+    3. AgentLoop.run → 执行 Model 调用循环（事务外）
+    4. 执行期间按配置 heartbeat
+    5. 完成前重新验证 Lease 有效性
+    6. TurnCompletionService._complete → 原子写入结果
+    7. 每次 Provider 调用通过 ModelCallRepository 记录
 
     Model 调用在事务外。
     取消后旧 Model 结果不得提交。
@@ -53,16 +54,44 @@ class Orchestrator:
         max_input_tokens: int = 64000,
     ) -> None:
         self._conn = conn
-        self._router = router
-        self._clock = clock or ProductionClock()
         self._model_role = model_role
         self._heartbeat_interval_s = heartbeat_interval_s
+        self._clock = clock or ProductionClock()
+        self._model_call_repo = ModelCallRepository(conn)
+
+        # 创建带有 ModelCall 回调的 Router
+        self._router = router
+        self._router._on_call_completed = self._record_model_call
+
         self._dispatcher = Dispatcher(conn, clock=self._clock)
         self._context_builder = ContextBuilder(
             conn, clock=self._clock, max_input_tokens=max_input_tokens,
         )
         self._loop = AgentLoop(router)
         self._completion = TurnCompletionService(conn, clock=self._clock)
+
+    def _now_ms(self) -> int:
+        return epoch_ms(self._clock.now())
+
+    def _record_model_call(self, info: dict) -> None:
+        """通过 Router 回调记录每次 Provider 调用。"""
+        usage = info.get("usage")
+        record = ModelCallRecord(
+            attempt_id=info.get("attempt_id", ""),
+            request_id=info.get("request_id", ""),
+            provider_id=info.get("provider_id", ""),
+            model_id=info.get("model_id", ""),
+            status=info.get("status", "error"),
+            finish_reason=info.get("finish_reason"),
+            input_tokens=usage.input_tokens if usage else 0,
+            output_tokens=usage.output_tokens if usage else 0,
+            cached_tokens=usage.cached_tokens if usage else 0,
+            latency_ms=info.get("latency_ms", 0),
+            error_category=info.get("error_category"),
+            retry_count=info.get("retry_count", 0),
+            trace_id=info.get("trace_id", ""),
+        )
+        self._model_call_repo.insert(record)
 
     async def run_one(self, worker_id: str) -> str | None:
         """领取一个 Turn 并执行完成。
@@ -86,41 +115,51 @@ class Orchestrator:
             system_policy="You are Cogito, a helpful AI assistant.",
         )
 
-        # ── 3. 执行 Agent Loop（事务外）──
+        # ── 3. 执行 Agent Loop（事务外，附带 heartbeat）──
         try:
-            loop_result = await self._loop.run(
-                context,
-                model_role=self._model_role,
-                cancel_flag=cancel_flag,
+            loop_task = asyncio.create_task(
+                self._loop.run(
+                    context,
+                    model_role=self._model_role,
+                    cancel_flag=cancel_flag,
+                )
             )
+
+            # 执行期间发送 heartbeat
+            heartbeat_task = asyncio.create_task(
+                self._heartbeat_loop(
+                    turn.turn_id, attempt.attempt_id, worker_id, attempt.lease_version,
+                )
+            )
+
+            done, _ = await asyncio.wait(
+                [loop_task, heartbeat_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # Loop 完成 → 取消 heartbeat
+            heartbeat_task.cancel()
+            loop_result = loop_task.result()
+
         except Exception as e:
-            # Loop 异常 → fail the attempt
-            self._dispatcher.fail(
-                turn.turn_id, attempt.attempt_id,
-                turn.version,
-                worker_id=worker_id,
-                lease_version=attempt.lease_version,
-                clock=self._clock.now(),
-            )
+            self._fail_attempt(turn, attempt, worker_id)
             raise OrchestratorError(f"Agent loop failed: {e}") from e
 
-        # ── 4. 如果被取消，不提交结果 ──
-        if loop_result.result_type in (
-            LoopResultType.cancelled,
-            LoopResultType.max_iterations,
-            LoopResultType.max_tokens,
-            LoopResultType.max_runtime,
-        ):
-            self._dispatcher.fail(
-                turn.turn_id, attempt.attempt_id,
-                turn.version,
-                worker_id=worker_id,
-                lease_version=attempt.lease_version,
-                clock=self._clock.now(),
-            )
+        # ── 4. 如果未产生有效响应，不提交结果 ──
+        if not loop_result.is_success:
+            self._fail_attempt(turn, attempt, worker_id)
             return None
 
-        # ── 5. 写入最终结果（短事务）──
+        # ── 5. 完成前重新验证 Lease 有效性 ──
+        lease_valid = self._verify_lease(
+            turn.turn_id, attempt.attempt_id,
+            turn.version, worker_id, attempt.lease_version,
+        )
+        if not lease_valid:
+            self._fail_attempt(turn, attempt, worker_id)
+            return None
+
+        # ── 6. 写入最终结果（短事务）──
         try:
             message_id = self._completion._complete(
                 turn=turn,
@@ -132,7 +171,25 @@ class Orchestrator:
                 principal_id="",
             )
         except Exception:
-            # Completion 失败（如 Lease 失效） → fail
+            self._fail_attempt(turn, attempt, worker_id)
+            raise
+
+        return message_id
+
+    def _verify_lease(
+        self, turn_id: str, attempt_id: str, expected_version: int,
+        worker_id: str, lease_version: int,
+    ) -> bool:
+        """重新验证 Lease 有效性（完成前调用）。"""
+        return self._dispatcher.complete(
+            turn_id, attempt_id, expected_version,
+            worker_id=worker_id, lease_version=lease_version,
+            clock=self._clock.now(),
+        )
+
+    def _fail_attempt(self, turn, attempt, worker_id: str) -> None:
+        """安全地标记 Attempt 失败。"""
+        try:
             self._dispatcher.fail(
                 turn.turn_id, attempt.attempt_id,
                 turn.version,
@@ -140,9 +197,24 @@ class Orchestrator:
                 lease_version=attempt.lease_version,
                 clock=self._clock.now(),
             )
-            raise
+        except Exception:
+            pass  # 标记失败不抛出
 
-        return message_id
+    async def _heartbeat_loop(
+        self, turn_id: str, attempt_id: str, worker_id: str, lease_version: int,
+    ) -> None:
+        """定期发送 heartbeat 防止 Lease 过期。"""
+        while True:
+            await asyncio.sleep(self._heartbeat_interval_s)
+            try:
+                ok = self._dispatcher.heartbeat(
+                    turn_id, attempt_id, worker_id, lease_version,
+                    clock=self._clock.now(),
+                )
+                if not ok:
+                    return  # heartbeat 失败 → 停止
+            except Exception:
+                return
 
     def _make_cancel_check(self, turn_id: str):
         """创建取消检查闭包。"""

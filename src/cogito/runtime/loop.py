@@ -11,22 +11,18 @@ Provider 返回 Tool Call 时返回明确的"不支持 Tool"受控失败。
 
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
 from cogito.model.contracts import (
     ContentPart,
-    ErrorCategory,
-    ErrorEnvelope,
     FinishReason,
     ModelRequest,
     ModelResponse,
     Usage,
 )
-from cogito.model.provider import ModelProvider
 from cogito.model.router import ModelRouter, RouterError
 from cogito.runtime.context import ContextSnapshot
 
@@ -116,7 +112,7 @@ class AgentLoop:
         state = LoopState(
             turn_id=context.turn_id,
             context_snapshot_id=context.snapshot_id,
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
             iteration_no=0,
         )
 
@@ -124,7 +120,7 @@ class AgentLoop:
 
         while True:
             state.iteration_no += 1
-            state.last_iteration_at = datetime.now(timezone.utc)
+            state.last_iteration_at = datetime.now(UTC)
 
             # ── 检查取消 ──
             if cancel_flag and cancel_flag():
@@ -152,12 +148,12 @@ class AgentLoop:
 
             # ── 调用 Provider ──
             try:
-                iter_start = datetime.now(timezone.utc)
+                iter_start = datetime.now(UTC)
                 response = await self._router.generate(
                     request, model_role=model_role,
                 )
                 iter_latency = int(
-                    (datetime.now(timezone.utc) - iter_start).total_seconds() * 1000
+                    (datetime.now(UTC) - iter_start).total_seconds() * 1000
                 )
             except RouterError as e:
                 return self._make_result(

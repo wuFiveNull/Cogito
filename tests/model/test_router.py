@@ -7,8 +7,8 @@ import pytest
 from cogito.model.contracts import (
     ErrorCategory,
     ErrorEnvelope,
-    ModelRequest,
     FinishReason,
+    ModelRequest,
 )
 from cogito.model.router import ModelRouter, RouterError
 from cogito.model.stub_provider import StubModelProvider, StubScenario

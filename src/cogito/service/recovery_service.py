@@ -19,7 +19,7 @@ recover_stale_turns 原子保证：
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime
+from datetime import datetime
 
 from cogito.domain.turn import RunAttemptStatus, TurnStatus
 from cogito.runtime.clock import Clock, ProductionClock

@@ -17,7 +17,7 @@ complete/fail/heartbeat 必须验证：
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import NamedTuple
 
 from cogito.domain.state_machines import validate_transition_turn

@@ -837,7 +837,7 @@ class TestDeliveryFaultWindow:
         """Gateway 前 Lease 已过期：不应调用 Gateway。"""
         from cogito.runtime.clock import FakeClock
 
-        did = _insert_delivery(db, content_ref="msg_1")
+        _insert_delivery(db, content_ref="msg_1")
         clock = FakeClock(start=datetime(2026, 1, 15, 12, 0, 0, tzinfo=UTC))
         gateway = FakeGateway()
         worker = DeliveryWorker(db, gateway, clock=clock)
@@ -1024,7 +1024,6 @@ class TestDeliveryLeaseValidation:
 
     def test_null_lease_cannot_complete(self, db: sqlite3.Connection):
         """NULL Lease 不能 complete/fail/heartbeat。"""
-        from cogito.runtime.clock import FakeClock
 
         with db:
             db.execute("INSERT INTO turns (turn_id, session_id, status, created_at) "
@@ -1050,9 +1049,8 @@ class TestDeliveryLeaseValidation:
 
     def test_expired_lease_cannot_submit(self, db: sqlite3.Connection):
         """到期后不可提交。"""
-        from cogito.runtime.clock import FakeClock
-
         import cogito.domain.turn as turn_mod
+        from cogito.runtime.clock import FakeClock
         from cogito.service.dispatcher import Dispatcher
 
         turn = turn_mod.Turn(session_id="s1", status=turn_mod.TurnStatus.queued)
@@ -1094,7 +1092,7 @@ class TestDeliveryLeaseValidation:
     def test_old_owner_cannot_submit(self, db: sqlite3.Connection):
         """旧 owner 不得提交。"""
         _create_session(db, "s1", "c1")
-        turn = _create_queued_turn(db, "s1")
+        _create_queued_turn(db, "s1")  # noqa: F841
         dispatcher = Dispatcher(db)
         claimed = dispatcher.claim_next("worker1")
         assert claimed is not None

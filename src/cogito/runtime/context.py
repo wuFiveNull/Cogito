@@ -11,8 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from dataclasses import dataclass
 from typing import Any
 
 from cogito.runtime.clock import Clock, ProductionClock
@@ -174,7 +173,10 @@ class ContextBuilder:
             message_upper_bound=message_upper_bound,
             selection_policy_version=self._policy_version,
             items=tuple(items),
-            excluded_summary=f"Excluded {len(excluded)} items: {', '.join(excluded[:10])}" if excluded else "",
+            excluded_summary=(
+                f"Excluded {len(excluded)} items: {', '.join(excluded[:10])}"
+                if excluded else ""
+            ),
             total_tokens=total_tokens,
             created_at=epoch_ms(self._clock.now()),
         )

@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime
 
 from cogito.domain.events import DomainEvent
 from cogito.domain.message import ContentPart, Message, MessageDirection, MessageRole

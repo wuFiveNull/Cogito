@@ -26,9 +26,7 @@ from cogito.model.contracts import (
     classify_error,
     normalize_finish_reason,
 )
-from cogito.model.provider import ModelProvider, HealthStatus
 from cogito.model.stub_provider import StubModelProvider, StubScenario
-
 
 # =============================================================================
 # 模型契约测试

@@ -7,10 +7,10 @@ MODEL-ADAPTER / 3. ModelResponse
 
 from __future__ import annotations
 
-from typing import AsyncIterator, Protocol
+from collections.abc import AsyncIterator
+from typing import Protocol
 
 from cogito.model.contracts import (
-    ErrorEnvelope,
     ModelCapabilities,
     ModelRequest,
     ModelResponse,

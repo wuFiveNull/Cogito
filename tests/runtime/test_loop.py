@@ -13,18 +13,12 @@
 
 from __future__ import annotations
 
-import asyncio
-from datetime import timedelta
-
 import pytest
 
 from cogito.model.contracts import (
-    ContentPart,
     ErrorCategory,
     ErrorEnvelope,
     FinishReason,
-    ModelRequest,
-    ModelResponse,
     Usage,
 )
 from cogito.model.router import ModelRouter

@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from cogito.runtime.context import ContextBuilder, ContextSnapshot
+from cogito.runtime.context import ContextBuilder
 from cogito.store.migration import migrate
 from cogito.store.time_utils import epoch_ms
 
