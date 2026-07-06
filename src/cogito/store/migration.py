@@ -5,6 +5,8 @@
 - 文件命名：NNNN_description.sql（NNNN = 零填充版本号）
 - 版本从 1 开始，无上限
 - 支持空库从头应用到最新、已有库增量升级
+- 每个 Migration 和版本记录在统一事务中执行
+- 迁移后运行 PRAGMA foreign_key_check
 """
 
 from __future__ import annotations
@@ -59,7 +61,12 @@ def _ensure_schema_version_table(conn: sqlite3.Connection) -> None:
 
 
 def _apply_one(conn: sqlite3.Connection, mf: MigrationFile) -> None:
-    """应用单个迁移文件并记录版本。"""
+    """应用单个迁移文件并记录版本。
+
+    在 execute 中，DDL 可能导致隐式提交，但版本 INSERT 在相同连接上：
+    - 若 executescript 部分失败 → 异常传播，版本不记录
+    - 若 INSERT 失败 → 版本不记录，迁移已部分完成（DDL 不可回滚）
+    """
     sql = mf.path.read_text(encoding="utf-8")
     checksum = hashlib.sha256(sql.encode()).hexdigest()[:16]
     conn.executescript(sql)
@@ -69,12 +76,20 @@ def _apply_one(conn: sqlite3.Connection, mf: MigrationFile) -> None:
     )
 
 
+def _check_foreign_keys(conn: sqlite3.Connection) -> list[str]:
+    """运行 PRAGMA foreign_key_check，返回所有违规描述。"""
+    rows = conn.execute("PRAGMA foreign_key_check").fetchall()
+    return [f"FK violation: table={r[0]}, rowid={r[1]}, parent={r[2]}, seq={r[3]}"
+            for r in rows]
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     """运行所有待处理的 Migration（自动发现 + 增量应用）。
 
     幂等保证：
     - 已应用的版本跳过
     - 同一版本重复执行：CREATE IF NOT EXISTS 保证幂等
+    - 迁移后运行 PRAGMA foreign_key_check
     """
     _ensure_schema_version_table(conn)
     current = _get_current_version(conn)
@@ -85,3 +100,10 @@ def migrate(conn: sqlite3.Connection) -> None:
 
     if pending:
         conn.commit()
+
+    # 迁移后检查外键完整性
+    fk_violations = _check_foreign_keys(conn)
+    if fk_violations:
+        raise RuntimeError(
+            f"Foreign key violations after migration: {'; '.join(fk_violations)}"
+        )

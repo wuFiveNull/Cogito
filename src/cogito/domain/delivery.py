@@ -30,6 +30,19 @@ class DeliveryAttemptStatus(StrEnum):
     failed = "failed"
 
 
+class ReceiptKind(StrEnum):
+    """Delivery Receipt 类型。
+
+    STREAMING-DELIVERY / 3. 状态机：
+    - confirmed: Gateway 返回明确成功，Lease 仍有效
+    - uncertain: Gateway 已调用但本地提交条件失效（Lease 过期、版本变化、Recovery 介入）
+    - reconciled: 人工或自动对账后确认平台结果
+    """
+    confirmed = "confirmed"
+    uncertain = "uncertain"
+    reconciled = "reconciled"
+
+
 class Delivery:
     """向某个目标发送内容的独立生命周期。"""
 
@@ -141,3 +154,66 @@ class DeliveryAttempt:
 
     def __repr__(self) -> str:
         return f"DeliveryAttempt({self.attempt_id}, delivery={self.delivery_id}, #{self.attempt_no}, {self.status})"
+
+
+class DeliveryReceipt:
+    """Delivery 发送结果的持久化证据。
+
+    每对 (delivery_id, delivery_attempt_id, operation_seq) 唯一。
+    """
+
+    def __init__(
+        self,
+        receipt_id: str | None = None,
+        delivery_id: str = "",
+        delivery_attempt_id: str = "",
+        operation_seq: int = 1,
+        request_hash: str = "",
+        receipt_kind: ReceiptKind = ReceiptKind.uncertain,
+        platform_message_id: str | None = None,
+        safe_result: str | None = None,
+        observed_at: datetime | None = None,
+        lease_version: int = 0,
+    ) -> None:
+        self.receipt_id = receipt_id or uuid.uuid4().hex
+        self.delivery_id = delivery_id
+        self.delivery_attempt_id = delivery_attempt_id
+        self.operation_seq = operation_seq
+        self.request_hash = request_hash
+        self.receipt_kind = ReceiptKind(receipt_kind)
+        self.platform_message_id = platform_message_id
+        self.safe_result = safe_result
+        self.observed_at = observed_at or datetime.now(UTC)
+        self.lease_version = lease_version
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "receipt_id": self.receipt_id,
+            "delivery_id": self.delivery_id,
+            "delivery_attempt_id": self.delivery_attempt_id,
+            "operation_seq": self.operation_seq,
+            "request_hash": self.request_hash,
+            "receipt_kind": self.receipt_kind.value,
+            "platform_message_id": self.platform_message_id,
+            "safe_result": self.safe_result,
+            "observed_at": self.observed_at.isoformat() if self.observed_at else None,
+            "lease_version": self.lease_version,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> DeliveryReceipt:
+        return cls(
+            receipt_id=data["receipt_id"],
+            delivery_id=data["delivery_id"],
+            delivery_attempt_id=data.get("delivery_attempt_id", ""),
+            operation_seq=data.get("operation_seq", 1),
+            request_hash=data.get("request_hash", ""),
+            receipt_kind=ReceiptKind(data.get("receipt_kind", "uncertain")),
+            platform_message_id=data.get("platform_message_id"),
+            safe_result=data.get("safe_result"),
+            observed_at=datetime.fromisoformat(data["observed_at"]) if data.get("observed_at") else None,
+            lease_version=data.get("lease_version", 0),
+        )
+
+    def __repr__(self) -> str:
+        return f"DeliveryReceipt({self.receipt_id}, {self.receipt_kind}, delivery={self.delivery_id})"

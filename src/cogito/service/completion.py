@@ -16,8 +16,10 @@ from datetime import UTC, datetime
 from cogito.domain.events import DomainEvent
 from cogito.domain.message import ContentPart, Message, MessageDirection, MessageRole
 from cogito.domain.turn import RunAttempt, Turn
+from cogito.runtime.clock import Clock, ProductionClock
 from cogito.service.dispatcher import Dispatcher
 from cogito.service.unit_of_work import UnitOfWork
+from cogito.store.time_utils import epoch_ms
 
 
 class TurnCompletionService:
@@ -25,9 +27,10 @@ class TurnCompletionService:
 
     STUB_REPLY_TEXT = "Hello! I'm Cogito, your personal agent. I'm currently in stub mode — this is an automated reply."
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, clock: Clock | None = None) -> None:
         self._conn = conn
-        self._dispatcher = Dispatcher(conn)
+        self._clock = clock or ProductionClock()
+        self._dispatcher = Dispatcher(conn, clock=self._clock)
 
     def complete_with_stub(
         self,
@@ -96,6 +99,7 @@ class TurnCompletionService:
             if delivery_target:
                 import uuid
                 delivery_id = uuid.uuid4().hex
+                now_int = epoch_ms(self._clock.now())
                 self._conn.execute(
                     "INSERT INTO deliveries (delivery_id, target_snapshot, content_ref, "
                     "status, idempotency_key, created_at) "
@@ -105,11 +109,11 @@ class TurnCompletionService:
                      message.message_id,
                      "pending",
                      f"delivery_{message.message_id}",
-                     datetime.now(UTC).isoformat()),
+                     now_int),
                 )
 
             # 3. 写入 TurnCompleted Event Outbox
-            now = datetime.now(UTC)
+            now = self._clock.now()
             uow.outbox.insert(DomainEvent(
                 event_type="TurnCompleted",
                 aggregate_type="turn",

@@ -27,6 +27,7 @@ from cogito.domain.principal import (
     PrincipalType,
 )
 from cogito.domain.turn import Turn, TurnStatus
+from cogito.store.time_utils import epoch_ms
 
 # =============================================================================
 # InboxRepository
@@ -375,9 +376,9 @@ class TurnRepository:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (turn.turn_id, turn.session_id, turn.input_message_id,
              turn.status.value, turn.priority, turn.version,
-             turn.cancel_requested_at.isoformat() if turn.cancel_requested_at else None,
+             epoch_ms(turn.cancel_requested_at),
              turn.active_attempt_id, turn.final_message_id,
-             turn.created_at.isoformat()),
+             epoch_ms(turn.created_at)),
         )
 
     def update_status(
@@ -411,5 +412,5 @@ class OutboxRepository:
              event.aggregate_id, event.aggregate_version,
              event.payload_ref, event.content_hash, event.schema_version,
              event.correlation_id, event.causation_id, event.origin,
-             event.trust_label, event.occurred_at.isoformat()),
+             event.trust_label, epoch_ms(event.occurred_at)),
         )

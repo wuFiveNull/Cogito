@@ -22,6 +22,7 @@ import sqlite3
 from datetime import UTC, datetime
 from typing import NamedTuple
 
+from cogito.runtime.clock import Clock, ProductionClock
 from cogito.service.unit_of_work import UnitOfWork
 from cogito.store.time_utils import epoch_ms
 
@@ -64,13 +65,18 @@ def compute_backoff(attempt_count: int) -> float:
 class OutboxWorker:
     """Outbox 发布 Worker。"""
 
-    def __init__(self, conn: sqlite3.Connection, lease_ttl_s: int = OUTBOX_LEASE_TTL_S) -> None:
+    def __init__(self, conn: sqlite3.Connection, lease_ttl_s: int = OUTBOX_LEASE_TTL_S,
+                 clock: Clock | None = None) -> None:
         self._conn = conn
         self._lease_ttl_s = lease_ttl_s
+        self._clock = clock or ProductionClock()
+
+    def _now(self, override: datetime | None = None) -> datetime:
+        return override if override is not None else self._clock.now()
 
     def lease_next(self, worker_id: str, clock: datetime | None = None) -> OutboxLease | None:
         """领取下一个待发布的 Outbox Event（同聚合有序）。"""
-        now = clock or datetime.now(UTC)
+        now = self._now(clock)
         now_int = epoch_ms(now)
         lease_expires = now_int + self._lease_ttl_s * 1000
 
@@ -136,8 +142,7 @@ class OutboxWorker:
 
         验证 lease_owner + lease_version + lease_expires_at > now。
         """
-        now = clock or datetime.now(UTC)
-        now_int = epoch_ms(now)
+        now_int = epoch_ms(self._now(clock))
 
         with UnitOfWork(self._conn) as uow:
             updated = self._conn.execute(
@@ -154,7 +159,7 @@ class OutboxWorker:
 
         验证 lease_owner + lease_version + lease_expires_at > now。
         """
-        now = clock or datetime.now(UTC)
+        now = self._now(clock)
         now_int = epoch_ms(now)
 
         with UnitOfWork(self._conn) as uow:

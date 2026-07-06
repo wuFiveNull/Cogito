@@ -22,6 +22,7 @@ from typing import NamedTuple
 
 from cogito.domain.state_machines import validate_transition_turn
 from cogito.domain.turn import RunAttempt, RunAttemptStatus, Turn, TurnStatus
+from cogito.runtime.clock import Clock, ProductionClock
 from cogito.service.unit_of_work import UnitOfWork
 from cogito.store.time_utils import epoch_ms, from_epoch_ms
 
@@ -36,9 +37,14 @@ class ClaimedRun(NamedTuple):
 class Dispatcher:
     """Turn 调度器 —— 领取、运行、完成、心跳。"""
 
-    def __init__(self, conn: sqlite3.Connection, lease_ttl_s: int = DEFAULT_LEASE_TTL_S) -> None:
+    def __init__(self, conn: sqlite3.Connection, lease_ttl_s: int = DEFAULT_LEASE_TTL_S,
+                 clock: Clock | None = None) -> None:
         self._conn = conn
         self._lease_ttl_s = lease_ttl_s
+        self._clock = clock or ProductionClock()
+
+    def _now(self, override: datetime | None = None) -> datetime:
+        return override if override is not None else self._clock.now()
 
     def claim_next(self, worker_id: str, clock: datetime | None = None) -> ClaimedRun | None:
         """领取 queued Turn，创建带有效 Lease 的 RunAttempt。
@@ -49,7 +55,7 @@ class Dispatcher:
         3. 创建 RunAttempt（含 Lease = now + TTL）
         4. 推进 Turn/Attempt 到 running
         """
-        now = clock or datetime.now(UTC)
+        now = self._now(clock)
         lease_expires_ms = epoch_ms(now) + self._lease_ttl_s * 1000
 
         with UnitOfWork(self._conn) as uow:
@@ -150,8 +156,7 @@ class Dispatcher:
         - RunAttempt.lease_version = lease_version
         - RunAttempt.lease_expires_at > now
         """
-        now = clock or datetime.now(UTC)
-        now_ms_val = epoch_ms(now)
+        now_ms_val = epoch_ms(self._now(clock))
 
         if _uow is not None:
             return self._complete_internal(
@@ -222,8 +227,7 @@ class Dispatcher:
         clock: datetime | None = None,
     ) -> bool:
         """标记 RunAttempt 失败。全量条件验证同 complete。"""
-        now = clock or datetime.now(UTC)
-        now_ms_val = epoch_ms(now)
+        now_ms_val = epoch_ms(self._now(clock))
 
         with UnitOfWork(self._conn) as uow:
             attempt_updated = self._conn.execute(
@@ -273,7 +277,7 @@ class Dispatcher:
         仅当 Lease 尚未过期时续期。已过期 Lease 返回 False。
         验证：worker_id + lease_version + lease_expires_at > now。
         """
-        now = clock or datetime.now(UTC)
+        now = self._now(clock)
         new_expires_ms = epoch_ms(now) + self._lease_ttl_s * 1000
 
         with UnitOfWork(self._conn) as uow:

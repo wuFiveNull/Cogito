@@ -183,6 +183,21 @@ CREATE TABLE IF NOT EXISTS delivery_attempts (
     UNIQUE(delivery_id, attempt_no)
 );
 
+CREATE TABLE IF NOT EXISTS delivery_receipts (
+    receipt_id          TEXT PRIMARY KEY,
+    delivery_id         TEXT NOT NULL REFERENCES deliveries(delivery_id),
+    delivery_attempt_id TEXT NOT NULL DEFAULT '',
+    operation_seq       INTEGER NOT NULL DEFAULT 1,
+    request_hash        TEXT NOT NULL DEFAULT '',
+    receipt_kind        TEXT NOT NULL DEFAULT 'uncertain'
+                        CHECK(receipt_kind IN ('confirmed', 'uncertain', 'reconciled')),
+    platform_message_id TEXT,
+    safe_result         TEXT,
+    observed_at         INTEGER NOT NULL,
+    lease_version       INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(delivery_id, delivery_attempt_id, operation_seq)
+);
+
 -- ── Capability ────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS tool_calls (
@@ -230,6 +245,29 @@ CREATE TABLE IF NOT EXISTS memory_items (
     goal_deadline   TEXT,
     goal_progress   REAL,
     created_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS model_calls (
+    model_call_id       TEXT PRIMARY KEY,
+    attempt_id          TEXT NOT NULL DEFAULT '',
+    request_id          TEXT NOT NULL DEFAULT '',
+    provider_id         TEXT NOT NULL DEFAULT '',
+    model_id            TEXT NOT NULL DEFAULT '',
+    status              TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(status IN ('pending','running','success','error','cancelled')),
+    request_hash        TEXT NOT NULL DEFAULT '',
+    request_payload_ref TEXT,
+    response_payload_ref TEXT,
+    finish_reason       TEXT,
+    input_tokens        INTEGER NOT NULL DEFAULT 0,
+    output_tokens       INTEGER NOT NULL DEFAULT 0,
+    cached_tokens       INTEGER NOT NULL DEFAULT 0,
+    latency_ms          INTEGER NOT NULL DEFAULT 0,
+    error_category      TEXT,
+    retry_count         INTEGER NOT NULL DEFAULT 0,
+    started_at          INTEGER,
+    completed_at        INTEGER,
+    trace_id            TEXT NOT NULL DEFAULT ''
 );
 
 -- ── Ops ───────────────────────────────────────────────────

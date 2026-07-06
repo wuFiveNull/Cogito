@@ -25,9 +25,12 @@ from cogito.service.delivery_worker import (
     DeliveryWorker,
     FakeGateway,
 )
+from cogito.service.dispatcher import Dispatcher
 from cogito.service.outbox_worker import OutboxWorker, compute_backoff
 from cogito.service.recovery_service import RecoveryService
 from cogito.store.migration import migrate
+from cogito.store.time_utils import epoch_ms
+from tests.service.test_dispatcher import _create_queued_turn, _create_session
 
 # ── Fixtures ──
 
@@ -52,7 +55,7 @@ def _insert_outbox_events(conn: sqlite3.Connection, events: list[dict]) -> None:
             (ev["event_id"], ev.get("event_type", "TestEvent"),
              ev.get("aggregate_type", "turn"), ev.get("aggregate_id", "t1"),
              ev.get("aggregate_version", 1), ev.get("status", "pending"),
-             ev.get("created_at", datetime.now(UTC).isoformat())),
+             ev.get("created_at", epoch_ms(datetime.now(UTC)))),
         )
     conn.commit()
 
@@ -69,7 +72,7 @@ def _insert_delivery(conn: sqlite3.Connection, **overrides: object) -> str:
          overrides.get("content_ref", "msg_ref"),
          overrides.get("status", "pending"),
          overrides.get("idempotency_key", f"key_{delivery_id[:8]}"),
-         overrides.get("created_at", datetime.now(UTC).isoformat())),
+         overrides.get("created_at", epoch_ms(datetime.now(UTC)))),
     )
     conn.commit()
     return delivery_id
@@ -820,3 +823,302 @@ class TestDeliveryBackoff:
         assert b2 == DELIVERY_BACKOFF_BASE * DELIVERY_BACKOFF_MULTIPLIER
         assert b3 == DELIVERY_BACKOFF_BASE * (DELIVERY_BACKOFF_MULTIPLIER ** 2)
         assert b1 < b2 < b3
+
+
+# =============================================================================
+# 故障窗口测试：Delivery 二次校验 + Clock
+# =============================================================================
+
+
+class TestDeliveryFaultWindow:
+    """测试外部调用窗口中的各种故障场景。（PR 8.3-A/8.3-E）"""
+
+    def test_gateway_not_called_when_lease_expired_before(self, db: sqlite3.Connection):
+        """Gateway 前 Lease 已过期：不应调用 Gateway。"""
+        from cogito.runtime.clock import FakeClock
+
+        did = _insert_delivery(db, content_ref="msg_1")
+        clock = FakeClock(start=datetime(2026, 1, 15, 12, 0, 0, tzinfo=UTC))
+        gateway = FakeGateway()
+        worker = DeliveryWorker(db, gateway, clock=clock)
+
+        # Lease 在时间 12:00, TTL=120s, 过期时间 = 12:02
+        lease = worker.lease_next("w1", clock=clock.now())
+        assert lease is not None
+
+        # 时间推进到 12:03（已过期）
+        clock.advance_minutes(3)
+
+        # 预验证应检测到过期，不调用 Gateway
+        result = worker.deliver(lease, "w1", clock=clock.now())
+        assert result == "stale"
+        assert len(gateway.sent) == 0
+
+    def test_gateway_called_during_lease_expiry_goes_unknown(self, db: sqlite3.Connection):
+        """Gateway 调用期间 Lease 自然过期：Delivery = unknown。"""
+        from cogito.runtime.clock import FakeClock
+
+        did = _insert_delivery(db, content_ref="msg_expire")
+        clock = FakeClock(start=datetime(2026, 1, 15, 12, 0, 0, tzinfo=UTC))
+
+        class ExpiryGateway:
+            """在 send 期间推进 FakeClock 使 Lease 过期。"""
+            def __init__(self, clk: FakeClock):
+                self.sent: list[tuple[str, str]] = []
+                self._clock = clk
+
+            def send(self, target: str, content_ref: str) -> bool | None:
+                self.sent.append((target, content_ref))
+                # 推进时间使 Lease 过期（12:00 → 12:05，Lease 12:02 过期）
+                self._clock.advance_minutes(5)
+                return True
+
+        gateway = ExpiryGateway(clock)
+        worker = DeliveryWorker(db, gateway, clock=clock)
+
+        lease = worker.lease_next("w1", clock=clock.now())
+        assert lease is not None
+
+        # 不传 clock 参数 —— deliver 内部调用 self._clock.now()
+        # 第一次读取 12:00（有效），Gateway 推进到 12:05，第二次读取 12:05（过期）
+        result = worker.deliver(lease, "w1")
+        assert result == "unknown"
+        assert len(gateway.sent) == 1
+
+        # Delivery 进入了 unknown
+        row = db.execute(
+            "SELECT status FROM deliveries WHERE delivery_id=?", (did,)
+        ).fetchone()
+        assert row["status"] == "unknown"
+
+        # 检查存在 uncertain Receipt
+        receipts = db.execute(
+            "SELECT receipt_kind FROM delivery_receipts WHERE delivery_id=?", (did,)
+        ).fetchall()
+        assert any(r["receipt_kind"] == "uncertain" for r in receipts)
+
+    def test_recovery_race_during_gateway_goes_unknown(self, db: sqlite3.Connection):
+        """Gateway 调用期间 Recovery 推进版本：Delivery = unknown。"""
+        from cogito.runtime.clock import FakeClock
+
+        did = _insert_delivery(db, content_ref="msg_race")
+        clock = FakeClock(start=datetime(2026, 1, 15, 12, 0, 0, tzinfo=UTC))
+
+        class RaceGateway:
+            """在 send 期间模拟 Recovery 推进版本。"""
+            def __init__(self, conn: sqlite3.Connection):
+                self.sent: list[tuple[str, str]] = []
+                self._conn = conn
+
+            def send(self, target: str, content_ref: str) -> bool | None:
+                self.sent.append((target, content_ref))
+                # Recovery 推进版本并释放 Lease
+                self._conn.execute(
+                    "UPDATE deliveries SET status='unknown', lease_owner=NULL, "
+                    "lease_expires_at=NULL, lease_version=lease_version+1 "
+                    "WHERE delivery_id=?", (did,)
+                )
+                self._conn.commit()
+                return True
+
+        gateway = RaceGateway(db)
+        worker = DeliveryWorker(db, gateway, clock=clock)
+
+        lease = worker.lease_next("w1", clock=clock.now())
+        assert lease is not None
+
+        result = worker.deliver(lease, "w1", clock=clock.now())
+        assert result == "unknown"
+        assert len(gateway.sent) == 1
+
+    def test_uncertain_receipt_on_success_with_expired_lease(self, db: sqlite3.Connection):
+        """Gateway 成功后 Lease 过期：存在 uncertain Receipt。"""
+        from cogito.runtime.clock import FakeClock
+
+        did = _insert_delivery(db, content_ref="msg_rec")
+        clock = FakeClock(start=datetime(2026, 1, 15, 12, 0, 0, tzinfo=UTC))
+
+        class SuccessWithExpiryGateway:
+            def __init__(self, clk: FakeClock):
+                self.sent: list[tuple[str, str]] = []
+                self._clock = clk
+
+            def send(self, target: str, content_ref: str) -> bool | None:
+                self.sent.append((target, content_ref))
+                self._clock.advance_minutes(5)  # expire the lease
+                return True
+
+        gateway = SuccessWithExpiryGateway(clock)
+        worker = DeliveryWorker(db, gateway, clock=clock)
+
+        lease = worker.lease_next("w1", clock=clock.now())
+        assert lease is not None
+
+        # 不传 clock 参数：pre-call = 12:00（有效），post-call = 12:05（过期）
+        result = worker.deliver(lease, "w1")
+        assert result == "unknown"
+
+        # 验证存在 uncertain Receipt
+        receipts = db.execute(
+            "SELECT receipt_kind, safe_result FROM delivery_receipts WHERE delivery_id=?",
+            (did,),
+        ).fetchall()
+        assert len(receipts) >= 1
+        assert receipts[0]["receipt_kind"] == "uncertain"
+
+    def test_reconcile_creates_reconciled_receipt(self, db: sqlite3.Connection):
+        """Reconcile 写入 reconciled Receipt。"""
+        did = _insert_delivery(db, status="unknown")
+        worker = DeliveryWorker(db, FakeGateway())
+
+        ok = worker.reconcile(did, "ext_msg_2")
+        assert ok is True
+
+        receipts = db.execute(
+            "SELECT receipt_kind, platform_message_id FROM delivery_receipts WHERE delivery_id=?",
+            (did,),
+        ).fetchall()
+        assert len(receipts) >= 1
+        assert any(r["receipt_kind"] == "reconciled" for r in receipts)
+
+    def test_confirmed_receipt_on_successful_delivery(self, db: sqlite3.Connection):
+        """成功投递写入 confirmed Receipt。"""
+        did = _insert_delivery(db, content_ref="msg_conf")
+        gateway = FakeGateway()
+        worker = DeliveryWorker(db, gateway)
+
+        lease = worker.lease_next("w1")
+        result = worker.deliver(lease, "w1")
+        assert result == "sent"
+
+        receipts = db.execute(
+            "SELECT receipt_kind FROM delivery_receipts WHERE delivery_id=?",
+            (did,),
+        ).fetchall()
+        assert any(r["receipt_kind"] == "confirmed" for r in receipts)
+
+    def test_confirmed_receipt_not_reverted(self, db: sqlite3.Connection):
+        """confirmed Receipt 存在时 Recovery 不回退 Delivery。"""
+        did = _insert_delivery(db, content_ref="msg_conf2")
+        gateway = FakeGateway()
+        worker = DeliveryWorker(db, gateway)
+
+        lease = worker.lease_next("w1")
+        result = worker.deliver(lease, "w1")
+        assert result == "sent"
+
+        # Recovery 不应将 sent 回退
+        from cogito.service.recovery_service import RecoveryService
+        recovery = RecoveryService(db)
+        count = recovery.recover_delivery_leases()
+        assert count == 0
+
+        row = db.execute(
+            "SELECT status FROM deliveries WHERE delivery_id=?", (did,)
+        ).fetchone()
+        assert row["status"] == "sent"
+
+
+class TestDeliveryLeaseValidation:
+    """Lease 有效性校验测试。（PR 8.3-E）"""
+
+    def test_null_lease_cannot_complete(self, db: sqlite3.Connection):
+        """NULL Lease 不能 complete/fail/heartbeat。"""
+        from cogito.runtime.clock import FakeClock
+
+        with db:
+            db.execute("INSERT INTO turns (turn_id, session_id, status, created_at) "
+                       "VALUES ('t_null', 's1', 'running', 1736942520000)")
+            db.execute("INSERT INTO run_attempts (attempt_id, turn_id, attempt_no, status, "
+                       "worker_id, lease_version, lease_expires_at) "
+                       "VALUES ('a_null', 't_null', 1, 'running', 'w1', 0, NULL)")
+
+        from cogito.service.dispatcher import Dispatcher
+        dispatcher = Dispatcher(db)
+
+        # complete with NULL lease
+        ok = dispatcher.complete("t_null", "a_null", 0, worker_id="w1", lease_version=0)
+        assert ok is False  # NULL lease → rejected
+
+        # fail with NULL lease
+        ok = dispatcher.fail("t_null", "a_null", 0, worker_id="w1", lease_version=0)
+        assert ok is False
+
+        # heartbeat with NULL lease
+        ok = dispatcher.heartbeat("t_null", "a_null", "w1", 0)
+        assert ok is False
+
+    def test_expired_lease_cannot_submit(self, db: sqlite3.Connection):
+        """到期后不可提交。"""
+        from cogito.runtime.clock import FakeClock
+
+        import cogito.domain.turn as turn_mod
+        from cogito.service.dispatcher import Dispatcher
+
+        turn = turn_mod.Turn(session_id="s1", status=turn_mod.TurnStatus.queued)
+        db.execute(
+            "INSERT INTO turns (turn_id, session_id, input_message_id, status, priority, version, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (turn.turn_id, turn.session_id, turn.input_message_id,
+             turn.status.value, turn.priority, turn.version,
+             1736942520000),
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO conversations (conversation_id, conversation_type, platform_conversation_id) "
+            "VALUES ('c1', 'private', 'c1')"
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO sessions (session_id, conversation_id, context_partition_key, created_at) "
+            "VALUES ('s1', 'c1', 'c1', 1736942520000)"
+        )
+        db.commit()
+
+        dispatcher = Dispatcher(db)
+        clock = FakeClock(start=datetime(2026, 1, 15, 12, 0, 0, tzinfo=UTC))
+
+        # 领取并在过期后提交
+        claimed = dispatcher.claim_next("w1", clock=clock.now())
+        assert claimed is not None
+
+        clock.advance_minutes(5)  # 超过 TTL 120s
+
+        ok = dispatcher.complete(
+            claimed.turn.turn_id, claimed.attempt.attempt_id,
+            claimed.turn.version,
+            worker_id=claimed.attempt.worker_id,
+            lease_version=claimed.attempt.lease_version,
+            clock=clock.now(),
+        )
+        assert ok is False
+
+    def test_old_owner_cannot_submit(self, db: sqlite3.Connection):
+        """旧 owner 不得提交。"""
+        _create_session(db, "s1", "c1")
+        turn = _create_queued_turn(db, "s1")
+        dispatcher = Dispatcher(db)
+        claimed = dispatcher.claim_next("worker1")
+        assert claimed is not None
+
+        ok = dispatcher.complete(
+            claimed.turn.turn_id, claimed.attempt.attempt_id,
+            claimed.turn.version,
+            worker_id="WRONG_OWNER",
+            lease_version=claimed.attempt.lease_version,
+        )
+        assert ok is False
+
+    def test_old_version_cannot_submit(self, db: sqlite3.Connection):
+        """旧 lease_version 不得提交。"""
+        _create_session(db, "s1", "c1")
+        _create_queued_turn(db, "s1")
+        dispatcher = Dispatcher(db)
+        claimed = dispatcher.claim_next("worker1")
+        assert claimed is not None
+
+        ok = dispatcher.complete(
+            claimed.turn.turn_id, claimed.attempt.attempt_id,
+            claimed.turn.version,
+            worker_id=claimed.attempt.worker_id,
+            lease_version=999,  # 错误的版本
+        )
+        assert ok is False

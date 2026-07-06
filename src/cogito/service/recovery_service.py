@@ -22,6 +22,7 @@ import sqlite3
 from datetime import UTC, datetime
 
 from cogito.domain.turn import RunAttemptStatus, TurnStatus
+from cogito.runtime.clock import Clock, ProductionClock
 from cogito.service.unit_of_work import UnitOfWork
 from cogito.store.time_utils import epoch_ms
 
@@ -29,12 +30,15 @@ from cogito.store.time_utils import epoch_ms
 class RecoveryService:
     """启动恢复扫描和定期 Lease 清理。"""
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, clock: Clock | None = None) -> None:
         self._conn = conn
+        self._clock = clock or ProductionClock()
+
+    def _now(self, override: datetime | None = None) -> datetime:
+        return override if override is not None else self._clock.now()
 
     def recover_outbox_leases(self, clock: datetime | None = None) -> int:
-        now = clock or datetime.now(UTC)
-        now_ms_val = epoch_ms(now)
+        now_ms_val = epoch_ms(self._now(clock))
 
         with UnitOfWork(self._conn) as uow:
             rows = self._conn.execute(
@@ -61,8 +65,7 @@ class RecoveryService:
         return count
 
     def recover_delivery_leases(self, clock: datetime | None = None) -> int:
-        now = clock or datetime.now(UTC)
-        now_ms_val = epoch_ms(now)
+        now_ms_val = epoch_ms(self._now(clock))
 
         with UnitOfWork(self._conn) as uow:
             rows = self._conn.execute(
@@ -101,8 +104,7 @@ class RecoveryService:
         Attempt UPDATE 的 lease_version/lease_expires_at 条件不匹配，行数=0，
         Turn 不会被修改。
         """
-        now = clock or datetime.now(UTC)
-        now_ms_val = epoch_ms(now)
+        now_ms_val = epoch_ms(self._now(clock))
 
         with UnitOfWork(self._conn) as uow:
             rows = self._conn.execute("""

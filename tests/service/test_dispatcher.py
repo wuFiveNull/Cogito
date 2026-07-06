@@ -9,6 +9,7 @@ from cogito.domain.turn import RunAttemptStatus, Turn, TurnStatus
 from cogito.service.completion import TurnCompletionService
 from cogito.service.dispatcher import Dispatcher
 from cogito.store.migration import migrate
+from cogito.store.time_utils import epoch_ms
 
 # ── Fixtures ──
 
@@ -39,7 +40,7 @@ def _create_queued_turn(conn: sqlite3.Connection, session_id: str = "s1", priori
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (turn.turn_id, turn.session_id, turn.input_message_id,
          turn.status.value, turn.priority, turn.version,
-         turn.created_at.isoformat()),
+         epoch_ms(turn.created_at)),
     )
     conn.commit()
     return turn
@@ -57,7 +58,7 @@ def _create_session(conn: sqlite3.Connection, session_id: str = "s1",
         "INSERT OR IGNORE INTO sessions (session_id, conversation_id, context_partition_key, created_at) "
         "VALUES (?, ?, ?, ?)",
         (session_id, conversation_id, context_partition_key,
-         datetime.now(UTC).isoformat()),
+         epoch_ms(datetime.now(UTC))),
     )
     conn.commit()
 
