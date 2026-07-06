@@ -1,0 +1,11 @@
+00_guides        索引、术语、ADR
+01_architecture  总体架构、领域契约、全局不变量、依赖边界
+02_runtime       执行、Session、Agent Loop、检索、记忆、模型
+03_capabilities  Capability、Tool、MCP、Plugin、Sandbox
+04_background    Task、Event、Connector、主动推送、Drift
+05_interaction   LangBot、Message、Delivery、Approval、Command
+06_infrastructure 存储、配置、数据库、本地部署与恢复
+07_quality       安全、可观察性、审计、测试、回放、评估
+
+完整文件列表和权威层级以 manifest.json 与
+markdown/00_guides/00_文档索引与Agent阅读指南.md 为准。
