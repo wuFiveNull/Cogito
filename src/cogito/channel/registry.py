@@ -25,6 +25,66 @@ ADAPTERS: dict[str, AdapterSpec] = {
         module="cogito.channel.adapters.qqofficial",
         class_name="QQOfficialAdapter",
     ),
+    "wecom": AdapterSpec(
+        module="cogito.channel.adapters.wecom",
+        class_name="WecomAdapter",
+    ),
+    "wecombot": AdapterSpec(
+        module="cogito.channel.adapters.wecombot",
+        class_name="WecomBotAdapter",
+    ),
+    "wecomcs": AdapterSpec(
+        module="cogito.channel.adapters.wecomcs",
+        class_name="WecomCSAdapter",
+    ),
+    "dingtalk": AdapterSpec(
+        module="cogito.channel.adapters.dingtalk",
+        class_name="DingTalkAdapter",
+    ),
+    "discord": AdapterSpec(
+        module="cogito.channel.adapters.discord",
+        class_name="DiscordAdapter",
+    ),
+    "kook": AdapterSpec(
+        module="cogito.channel.adapters.kook",
+        class_name="KookAdapter",
+    ),
+    "lark": AdapterSpec(
+        module="cogito.channel.adapters.lark",
+        class_name="LarkAdapter",
+    ),
+    "line": AdapterSpec(
+        module="cogito.channel.adapters.line",
+        class_name="LINEAdapter",
+    ),
+    "matrix": AdapterSpec(
+        module="cogito.channel.adapters.matrix",
+        class_name="MatrixAdapter",
+    ),
+    "slack": AdapterSpec(
+        module="cogito.channel.adapters.slack",
+        class_name="SlackAdapter",
+    ),
+    "aiocqhttp": AdapterSpec(
+        module="cogito.channel.adapters.aiocqhttp",
+        class_name="AiocqhttpAdapter",
+    ),
+    "satori": AdapterSpec(
+        module="cogito.channel.adapters.satori",
+        class_name="SatoriAdapter",
+    ),
+    "openclaw_weixin": AdapterSpec(
+        module="cogito.channel.adapters.openclaw_weixin",
+        class_name="OpenClawWeixinAdapter",
+    ),
+    "officialaccount": AdapterSpec(
+        module="cogito.channel.adapters.officialaccount",
+        class_name="OfficialAccountAdapter",
+    ),
+    "wechatpad": AdapterSpec(
+        module="cogito.channel.adapters.wechatpad",
+        class_name="WeChatPadAdapter",
+    ),
 }
 
 

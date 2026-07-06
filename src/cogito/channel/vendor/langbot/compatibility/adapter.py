@@ -1,7 +1,8 @@
 """LangBot compatibility: Abstract adapter base classes.
 
 Minimal stub that lets copied LangBot adapters run inside Cogito.
-Replaces `langbot_plugin.api.definition.abstract.platform.adapter`.
+Replaces `langbot_plugin.api.definition.abstract.platform.adapter`
+and `langbot_plugin.api.definition.abstract.platform.event_logger`.
 """
 from __future__ import annotations
 
@@ -19,28 +20,24 @@ class AbstractMessageConverter(ABC):
     """消息转换器 —— 在 MessageChain 和平台格式之间转换。"""
 
     @staticmethod
-    @abstractmethod
     async def yiri2target(message_chain: MessageChain, *args, **kwargs) -> list[dict]:
-        ...
+        raise NotImplementedError
 
     @staticmethod
-    @abstractmethod
     async def target2yiri(*args, **kwargs) -> MessageChain | Any:
-        ...
+        raise NotImplementedError
 
 
 class AbstractEventConverter(ABC):
     """事件转换器 —— 在平台事件和 LangBot 事件之间转换。"""
 
     @staticmethod
-    @abstractmethod
     async def yiri2target(event: MessageEvent, *args, **kwargs) -> Any:
-        ...
+        raise NotImplementedError
 
     @staticmethod
-    @abstractmethod
     async def target2yiri(*args, **kwargs) -> MessageEvent | Any:
-        ...
+        raise NotImplementedError
 
 
 class AbstractMessagePlatformAdapter(pydantic.BaseModel, ABC):

@@ -1,19 +1,15 @@
-"""Telegram Adapter — 从 LangBot v4.10.5 复制。
+"""Telegram Adapter — Cogito 原生实现。
 
-本地修改：
-- 所有 langbot_plugin.* imports → cogito.channel.vendor.langbot.compatibility.*
-- langbot.pkg.utils.httpclient → cogito.channel.utils.httpclient
-- langbot.pkg.platform.logger → cogito.channel.vendor.langbot.compatibility.logger
-- 新增 Cogito ChannelAdapter 接口方法 (set_inbound_handler, send)
+从 LangBot 4.10.5 复制并重写为 Cogito ChannelAdapter。
+- 直接实现 ChannelAdapter (不依赖 LangBot 抽象类)
+- 入站消息直接构造 Cogito Inbound (不经过 LangBot Event类型)
+- 保留 yiri2target 用于出站消息转换
 """
 from __future__ import annotations
 
 import base64
-import time
-import traceback
 import typing
 
-import pydantic
 import telegram
 import telegram.ext
 import telegramify_markdown
@@ -21,19 +17,20 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
 from cogito.channel.utils import httpclient
-from cogito.channel.vendor.langbot.compatibility import adapter as abstract_platform_adapter
-from cogito.channel.vendor.langbot.compatibility import entities as platform_entities
-from cogito.channel.vendor.langbot.compatibility import events as platform_events
 from cogito.channel.vendor.langbot.compatibility import message as platform_message
-from cogito.channel.vendor.langbot.compatibility.logger import EventLogger
-from cogito.inbound.models import InboundHandler
-
-# ── 消息转换 ──
+from cogito.inbound.models import Inbound, InboundContent, InboundHandler, InboundRoute
 
 
-class TelegramMessageConverter(abstract_platform_adapter.AbstractMessageConverter):
+class TelegramMessageConverter:
+    """消息转换器 —— 将 Cogito MessageChain 转换为 Telegram API 格式。
+
+    从 LangBot TelegramMessageConverter 复制。
+    仅保留出站方向 (yiri2target)，入站直接构造 Inbound。
+    """
+
     @staticmethod
     async def yiri2target(message_chain: platform_message.MessageChain, bot: telegram.Bot) -> list[dict]:
+        """将 MessageChain 转换为 Telegram API 组件列表。"""
         components = []
 
         for component in message_chain:
@@ -41,7 +38,6 @@ class TelegramMessageConverter(abstract_platform_adapter.AbstractMessageConverte
                 components.append({'type': 'text', 'text': component.text})
             elif isinstance(component, platform_message.Image):
                 photo_bytes = None
-
                 if component.base64:
                     photo_bytes = base64.b64decode(component.base64)
                 elif component.url:
@@ -51,11 +47,9 @@ class TelegramMessageConverter(abstract_platform_adapter.AbstractMessageConverte
                 elif component.path:
                     with open(component.path, 'rb') as f:
                         photo_bytes = f.read()
-
                 components.append({'type': 'photo', 'photo': photo_bytes})
             elif isinstance(component, platform_message.File):
                 file_bytes = None
-
                 if component.base64:
                     b64_data = component.base64
                     if ';base64,' in b64_data:
@@ -68,7 +62,6 @@ class TelegramMessageConverter(abstract_platform_adapter.AbstractMessageConverte
                 elif component.path:
                     with open(component.path, 'rb') as f:
                         file_bytes = f.read()
-
                 file_name = getattr(component, 'name', None) or 'file'
                 components.append({'type': 'document', 'document': file_bytes, 'filename': file_name})
             elif isinstance(component, platform_message.Forward):
@@ -77,231 +70,163 @@ class TelegramMessageConverter(abstract_platform_adapter.AbstractMessageConverte
 
         return components
 
-    @staticmethod
-    async def target2yiri(message: telegram.Message, bot: telegram.Bot, bot_account_id: str):
-        message_components = []
 
-        def parse_message_text(text: str) -> list[platform_message.MessageComponent]:
-            msg_components = []
-
-            if f'@{bot_account_id}' in text:
-                msg_components.append(platform_message.At(target=bot_account_id))
-                text = text.replace(f'@{bot_account_id}', '')
-            msg_components.append(platform_message.Plain(text=text))
-
-            return msg_components
-
-        if message.text:
-            message_text = message.text
-            message_components.extend(parse_message_text(message_text))
-
-        if message.photo:
-            if message.caption:
-                message_components.extend(parse_message_text(message.caption))
-
-            file = await message.photo[-1].get_file()
-
-            file_bytes = None
-            file_format = ''
-
-            async with httpclient.get_session(trust_env=True).get(file.file_path) as response:
-                file_bytes = await response.read()
-                file_format = 'image/jpeg'
-
-            message_components.append(
-                platform_message.Image(
-                    base64=f'data:{file_format};base64,{base64.b64encode(file_bytes).decode("utf-8")}'
-                )
-            )
-
-        if message.voice:
-            if message.caption:
-                message_components.extend(parse_message_text(message.caption))
-
-            file = await message.voice.get_file()
-
-            file_bytes = None
-            file_format = message.voice.mime_type or 'audio/ogg'
-
-            async with httpclient.get_session(trust_env=True).get(file.file_path) as response:
-                file_bytes = await response.read()
-
-            message_components.append(
-                platform_message.Voice(
-                    base64=f'data:{file_format};base64,{base64.b64encode(file_bytes).decode("utf-8")}',
-                    length=message.voice.duration,
-                )
-            )
-
-        if message.document:
-            if message.caption:
-                message_components.extend(parse_message_text(message.caption))
-
-            file = await message.document.get_file()
-            file_name = message.document.file_name or 'document'
-            file_size = message.document.file_size or 0
-            file_format = message.document.mime_type or 'application/octet-stream'
-
-            file_bytes = None
-            async with httpclient.get_session(trust_env=True).get(file.file_path) as response:
-                file_bytes = await response.read()
-
-            message_components.append(
-                platform_message.File(
-                    name=file_name,
-                    size=file_size,
-                    base64=f'data:{file_format};base64,{base64.b64encode(file_bytes).decode("utf-8")}',
-                )
-            )
-
-        return platform_message.MessageChain(message_components)
-
-    @staticmethod
-    async def target2yiri_no_media(message: telegram.Message, bot: telegram.Bot, bot_account_id: str):
-        """快速转换仅文本消息（避免媒体下载）。"""
-        message_components = []
-        if message.text:
-            text = message.text
-            if f'@{bot_account_id}' in text:
-                message_components.append(platform_message.At(target=bot_account_id))
-                text = text.replace(f'@{bot_account_id}', '')
-            if text.strip():
-                message_components.append(platform_message.Plain(text=text))
-        return platform_message.MessageChain(message_components)
-
-
-# ── 事件转换 ──
-
-
-class TelegramEventConverter(abstract_platform_adapter.AbstractEventConverter):
-    @staticmethod
-    async def yiri2target(event: platform_events.MessageEvent, bot: telegram.Bot):
-        return event.source_platform_object
-
-    @staticmethod
-    async def target2yiri(event: Update, bot: telegram.Bot, bot_account_id: str):
-        lb_message = await TelegramMessageConverter.target2yiri(event.message, bot, bot_account_id)
-
-        if event.effective_chat.type == 'private':
-            return platform_events.FriendMessage(
-                sender=platform_entities.Friend(
-                    id=event.effective_chat.id,
-                    nickname=event.effective_chat.first_name,
-                    remark=str(event.effective_chat.id),
-                ),
-                message_chain=lb_message,
-                time=event.message.date.timestamp(),
-                source_platform_object=event,
-            )
-        elif event.effective_chat.type == 'group' or 'supergroup':
-            return platform_events.GroupMessage(
-                sender=platform_entities.GroupMember(
-                    id=event.effective_chat.id,
-                    member_name=event.effective_chat.title,
-                    permission=platform_entities.Permission.Member,
-                    group=platform_entities.Group(
-                        id=event.effective_chat.id,
-                        name=event.effective_chat.title,
-                        permission=platform_entities.Permission.Member,
-                    ),
-                    special_title='',
-                ),
-                message_chain=lb_message,
-                time=event.message.date.timestamp(),
-                source_platform_object=event,
-            )
-
-
-# ── Adapter ──
-
-
-class TelegramAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
+class TelegramAdapter:
     """Telegram 平台适配器。
 
-    实现 Chat ChannelAdapter 协议，接收 Telegram 消息并转为 Cogito Inbound。
+    从 Telegram Update 直接构造 Cogito Inbound。
+    不依赖 LangBot 抽象类、Event 类型或 Entity 类型。
     """
 
-    bot: telegram.Bot = pydantic.Field(exclude=True)
-    application: telegram.ext.Application = pydantic.Field(exclude=True)
+    def __init__(self, config: dict, logger: typing.Any = None) -> None:
+        self.adapter_id = str(config.get('uuid', config.get('token', 'telegram')[:8]))
+        self.channel_type = 'telegram'
+        self.config = config
+        self._inbound_handler: InboundHandler | None = None
+        self._logger = logger
 
-    message_converter: TelegramMessageConverter = TelegramMessageConverter()
-    event_converter: TelegramEventConverter = TelegramEventConverter()
+        self.bot: telegram.Bot | None = None
+        self.application: telegram.ext.Application | None = None
+        self._msg_stream_id: dict = {}
+        self._seq: int = 1
 
-    config: dict
-    msg_stream_id: dict
-    seq: int
+        self._build_application(config)
 
-    # Cogito: 入站消息处理器
-    _inbound_handler: InboundHandler | None = None
+    def _build_application(self, config: dict) -> None:
+        """创建 Telegram Application 并注册消息处理器。"""
+        application = ApplicationBuilder().token(config['token']).build()
+        self.bot = application.bot
 
-    listeners: dict[
-        type[platform_events.Event],
-        typing.Callable[[platform_events.Event, abstract_platform_adapter.AbstractMessagePlatformAdapter], None],
-    ] = {}
+        async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+            if update.message and update.message.from_user and update.message.from_user.is_bot:
+                return
+            await self._on_update(update)
 
-    # ── Cogito ChannelAdapter 接口方法 ──
+        application.add_handler(
+            MessageHandler(
+                filters.TEXT | filters.COMMAND | filters.PHOTO | filters.VOICE | filters.Document.ALL,
+                callback,
+            )
+        )
+        self.application = application
+
+    # ── Cogito ChannelAdapter 接口 ──
 
     def set_inbound_handler(self, handler: InboundHandler) -> None:
-        """设置 Cogito 的入站消息处理器。"""
+        """设置入站消息处理器。"""
         self._inbound_handler = handler
+
+    async def start(self) -> None:
+        """启动 Telegram Bot polling。"""
+        await self.application.initialize()
+        self.bot_account_id = (await self.bot.get_me()).username
+        await self.application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        await self.application.start()
+
+    async def stop(self) -> None:
+        """停止 Telegram Bot。"""
+        if self.application and self.application.running:
+            await self.application.stop()
+            if self.application.updater:
+                await self.application.updater.stop()
 
     async def send(self, conversation_id: str, message: str, reply_to_message_id: str | None = None) -> dict:
         """发送文本消息到 Telegram。"""
-        args = {
-            "chat_id": int(conversation_id),
-            "text": message,
-        }
+        args = {'chat_id': int(conversation_id), 'text': message}
         if reply_to_message_id:
-            args["reply_to_message_id"] = int(reply_to_message_id)
+            args['reply_to_message_id'] = int(reply_to_message_id)
         sent = await self.bot.send_message(**args)
-        return {"platform_message_id": str(sent.message_id)}
+        return {'platform_message_id': str(sent.message_id)}
 
-    # ── 原有 LangBot 生命周期方法 ──
+    # ── 入站消息处理 ──
 
-    def __init__(self, config: dict, logger: abstract_platform_adapter.AbstractEventLogger | None = None):
-        self.adapter_id = str(config.get('uuid', config.get('token', 'telegram')[:8]))
-        self.channel_type = 'telegram'
+    async def _on_update(self, update: Update) -> None:
+        """处理 Telegram Update，直接构造 Cogito Inbound。"""
+        if self._inbound_handler is None:
+            return
 
-        async def telegram_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            if update.message.from_user.is_bot:
-                return
+        message = update.message
+        if message is None:
+            return
 
-            try:
-                lb_event = await self.event_converter.target2yiri(update, self.bot, self.bot_account_id)
-                if self._inbound_handler is not None:
-                    from cogito.channel.bridge import langbot_event_to_inbound
-                    inbound = await langbot_event_to_inbound(
-                        lb_event, self.channel_type, self.adapter_id,
-                    )
-                    await self._inbound_handler(inbound)
-                elif type(lb_event) in self.listeners:
-                    await self.listeners[type(lb_event)](lb_event, self)
-            except Exception:
-                if logger:
-                    await logger.error(f'Error in telegram callback: {traceback.format_exc()}')
+        # 提取会话信息
+        chat = update.effective_chat
+        if chat is None:
+            return
+        conversation_id = str(chat.id)
+        sender_id = str(message.from_user.id) if message.from_user else conversation_id
+        message_id = str(message.message_id)
+        reply_to_id = str(message.reply_to_message.message_id) if message.reply_to_message else None
 
-        application = ApplicationBuilder().token(config['token']).build()
-        bot = application.bot
-        application.add_handler(
-            MessageHandler(
-                filters.TEXT | (filters.COMMAND) | filters.PHOTO | filters.VOICE | filters.Document.ALL,
-                telegram_callback,
-            )
+        # 提取消息内容
+        content = self._extract_content(message)
+
+        # 构造 Inbound
+        inbound = Inbound(
+            channel='telegram',
+            channel_instance_id=self.adapter_id,
+            conversation_id=conversation_id,
+            sender_id=sender_id,
+            message_id=message_id,
+            reply_to_message_id=reply_to_id,
+            content=content,
+            timestamp=int(message.date.timestamp()),
+            metadata={'chat_type': chat.type or 'private'},
+            route=InboundRoute(
+                adapter_id=self.adapter_id,
+                channel_type='telegram',
+                conversation_id=conversation_id,
+                source_message_id=message_id,
+                raw={
+                    'chat_id': conversation_id,
+                    'message_id': message_id,
+                    'sender_id': sender_id,
+                },
+            ),
         )
-        super().__init__(
-            config=config,
-            logger=logger or EventLogger('channel.telegram'),
-            msg_stream_id={},
-            seq=1,
-            bot=bot,
-            application=application,
-            bot_account_id='',
-            listeners={},
-        )
 
-    async def send_message(self, target_type: str, target_id: str, message: platform_message.MessageChain):
+        await self._inbound_handler(inbound)
+
+    def _extract_content(self, message: telegram.Message) -> list[InboundContent]:
+        """从 Telegram Message 提取 InboundContent 列表。"""
+        result: list[InboundContent] = []
+
+        if message.text:
+            result.append(InboundContent(type='text', data=message.text))
+
+        if message.caption:
+            result.append(InboundContent(type='text', data=message.caption))
+
+        if message.photo:
+            # 入站图片只记录引用，不立即下载
+            result.append(InboundContent(
+                type='image',
+                data=f'photo:{message.photo[-1].file_id}',
+            ))
+
+        if message.voice:
+            result.append(InboundContent(
+                type='voice',
+                data=f'voice:{message.voice.file_id}',
+                mime=message.voice.mime_type or 'audio/ogg',
+            ))
+
+        if message.document:
+            result.append(InboundContent(
+                type='file',
+                data=f'document:{message.document.file_id}',
+                mime=message.document.mime_type or 'application/octet-stream',
+                name=message.document.file_name or 'file',
+                size=message.document.file_size or 0,
+            ))
+
+        return result
+
+    # ── 出站消息 (保留 LangBot 兼容) ──
+
+    async def send_message(self, target_type: str, target_id: str, message: platform_message.MessageChain) -> None:
+        """LangBot 兼容：发送 MessageChain 到指定目标。"""
         components = await TelegramMessageConverter.yiri2target(message, self.bot)
-
         chat_id_str, _, thread_id_str = str(target_id).partition('#')
         chat_id: int | str = int(chat_id_str) if chat_id_str.lstrip('-').isdigit() else chat_id_str
         message_thread_id = int(thread_id_str) if thread_id_str and thread_id_str.isdigit() else None
@@ -321,184 +246,40 @@ class TelegramAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
                 await self.bot.send_message(**args)
             elif component_type == 'photo':
                 photo = component.get('photo')
-                if photo is None:
-                    continue
-                args['photo'] = telegram.InputFile(photo)
-                await self.bot.send_photo(**args)
+                if photo is not None:
+                    args['photo'] = telegram.InputFile(photo)
+                    await self.bot.send_photo(**args)
             elif component_type == 'document':
                 doc = component.get('document')
-                if doc is None:
-                    continue
-                filename = component.get('filename', 'file')
-                args['document'] = telegram.InputFile(doc, filename=filename)
-                await self.bot.send_document(**args)
+                if doc is not None:
+                    args['document'] = telegram.InputFile(doc, filename=component.get('filename', 'file'))
+                    await self.bot.send_document(**args)
 
-    async def reply_message(
-        self,
-        message_source: platform_events.MessageEvent,
-        message: platform_message.MessageChain,
-        quote_origin: bool = False,
-    ):
-        assert isinstance(message_source.source_platform_object, Update)
+    async def reply_message(self, message_source, message: platform_message.MessageChain, quote_origin: bool = False) -> None:
+        """LangBot 兼容：回复消息。"""
+        if not isinstance(message_source.source_platform_object, Update):
+            return
+        update = message_source.source_platform_object
         components = await TelegramMessageConverter.yiri2target(message, self.bot)
 
         for component in components:
-            if component['type'] == 'text':
-                if self.config.get('markdown_card', False):
-                    content = telegramify_markdown.markdownify(content=component['text'])
-                else:
-                    content = component['text']
-                args = {
-                    'chat_id': message_source.source_platform_object.effective_chat.id,
-                    'text': content,
-                }
-                if self.config.get('markdown_card', False):
-                    args['parse_mode'] = 'MarkdownV2'
+            if component['type'] != 'text':
+                continue
+            content = telegramify_markdown.markdownify(content=component['text']) if self.config.get('markdown_card', False) else component['text']
+            args = {'chat_id': update.effective_chat.id, 'text': content}
+            if self.config.get('markdown_card', False):
+                args['parse_mode'] = 'MarkdownV2'
+            if update.message and update.message.message_thread_id:
+                args['message_thread_id'] = update.message.message_thread_id
+            if quote_origin:
+                args['reply_to_message_id'] = update.message.id
+            await self.bot.send_message(**args)
 
-        if message_source.source_platform_object.message.message_thread_id:
-            args['message_thread_id'] = message_source.source_platform_object.message.message_thread_id
-
-        if quote_origin:
-            args['reply_to_message_id'] = message_source.source_platform_object.message.id
-
-        await self.bot.send_message(**args)
-
-    def _process_markdown(self, text: str) -> str:
-        if self.config.get('markdown_card', False):
-            return telegramify_markdown.markdownify(content=text)
-        return text
-
-    def _build_message_args(self, chat_id: int, text: str, message_thread_id: int = None, **extra_args) -> dict:
-        args = {'chat_id': chat_id, 'text': self._process_markdown(text), **extra_args}
-        if message_thread_id:
-            args['message_thread_id'] = message_thread_id
-        if self.config.get('markdown_card', False):
-            args['parse_mode'] = 'MarkdownV2'
-        return args
-
-    async def create_message_card(self, message_id, event):
-        assert isinstance(event.source_platform_object, Update)
-        update = event.source_platform_object
-        chat_id = update.effective_chat.id
-        chat_type = update.effective_chat.type
-        message_thread_id = update.message.message_thread_id
-
-        if chat_type == 'private':
-            draft_id = int(time.time() * 1000)
-            self.msg_stream_id[message_id] = ('private', draft_id)
-            args = self._build_message_args(chat_id, 'Thinking...', message_thread_id, draft_id=draft_id)
-            await self.bot.send_message_draft(**args)
-        else:
-            args = self._build_message_args(chat_id, 'Thinking...', message_thread_id)
-            send_msg = await self.bot.send_message(**args)
-            self.msg_stream_id[message_id] = ('group', send_msg.message_id)
-        return True
-
-    async def reply_message_chunk(
-        self,
-        message_source: platform_events.MessageEvent,
-        bot_message,
-        message: platform_message.MessageChain,
-        quote_origin: bool = False,
-        is_final: bool = False,
-    ):
-        message_id = bot_message.resp_message_id
-        msg_seq = bot_message.msg_sequence
-        assert isinstance(message_source.source_platform_object, Update)
-        update = message_source.source_platform_object
-        chat_id = update.effective_chat.id
-        message_thread_id = update.message.message_thread_id
-
-        if message_id not in self.msg_stream_id:
-            return
-
-        chat_mode, draft_id = self.msg_stream_id[message_id]
-        components = await TelegramMessageConverter.yiri2target(message, self.bot)
-
-        if not components or components[0]['type'] != 'text':
-            if is_final and bot_message.tool_calls is None:
-                self.msg_stream_id.pop(message_id)
-            return
-
-        content = components[0]['text']
-
-        if chat_mode == 'private':
-            args = self._build_message_args(chat_id, content, message_thread_id, draft_id=draft_id)
-            await self.bot.send_message_draft(**args)
-            if is_final and bot_message.tool_calls is None:
-                del args['draft_id']
-                await self.bot.send_message(**args)
-                self.msg_stream_id.pop(message_id)
-        else:
-            stream_id = draft_id
-            if (msg_seq - 1) % 8 == 0 or is_final:
-                args = {
-                    'message_id': stream_id,
-                    'chat_id': chat_id,
-                    'text': self._process_markdown(content),
-                }
-                if self.config.get('markdown_card', False):
-                    args['parse_mode'] = 'MarkdownV2'
-                await self.bot.edit_message_text(**args)
-            if is_final and bot_message.tool_calls is None:
-                self.msg_stream_id.pop(message_id)
-
-    def get_launcher_id(self, event: platform_events.MessageEvent) -> str | None:
-        if not isinstance(event.source_platform_object, Update):
-            return None
-        message = event.source_platform_object.message
-        if not message:
-            return None
-        if message.message_thread_id:
-            if isinstance(event, platform_events.GroupMessage):
-                return f'{event.group.id}#{message.message_thread_id}'
-            elif isinstance(event, platform_events.FriendMessage):
-                return f'{event.sender.id}#{message.message_thread_id}'
-        return None
-
-    async def is_stream_output_supported(self) -> bool:
-        return bool(self.config.get('enable-stream-reply', False))
-
-    async def is_muted(self, group_id: int) -> bool:
-        return False
-
-    def register_listener(
-        self,
-        event_type: type[platform_events.Event],
-        callback: typing.Callable[
-            [platform_events.Event, abstract_platform_adapter.AbstractMessagePlatformAdapter], None
-        ],
-    ):
-        self.listeners[event_type] = callback
-
-    def unregister_listener(
-        self,
-        event_type: type[platform_events.Event],
-        callback: typing.Callable[
-            [platform_events.Event, abstract_platform_adapter.AbstractMessagePlatformAdapter], None
-        ],
-    ):
-        self.listeners.pop(event_type)
-
-    async def start(self) -> None:
-        """Cogito ChannelAdapter 接口：启动适配器。"""
-        await self.application.initialize()
-        self.bot_account_id = (await self.bot.get_me()).username
-        await self.application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-        await self.application.start()
-
-    async def run_async(self):
-        """LangBot 兼容接口：启动适配器。"""
+    async def run_async(self) -> None:
+        """LangBot 兼容。"""
         await self.start()
 
-    async def stop(self) -> None:
-        """Cogito ChannelAdapter 接口：停止适配器。"""
-        if self.application.running:
-            await self.application.stop()
-            if self.application.updater:
-                await self.application.updater.stop()
-
     async def kill(self) -> bool:
-        """LangBot 兼容接口：停止适配器。"""
+        """LangBot 兼容。"""
         await self.stop()
         return True
