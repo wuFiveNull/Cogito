@@ -38,8 +38,9 @@ class TestMigration:
         from cogito.store.migration import migrate
         migrate(empty_db)
         migrate(empty_db)  # second run
-        count = empty_db.execute("SELECT COUNT(*) FROM _schema_version").fetchone()[0]
-        assert count == 1  # only one version record
+        rows = empty_db.execute("SELECT version FROM _schema_version ORDER BY version").fetchall()
+        versions = [r[0] for r in rows]
+        assert versions == [1, 2]  # both migration versions applied exactly once
 
     def test_unique_constraints(self, in_memory_db):
         """Test a sample unique constraint."""

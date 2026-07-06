@@ -9,13 +9,15 @@ from typing import Any
 
 
 class TurnStatus(StrEnum):
-    created = "created"
+    accepted = "accepted"
+    queued = "queued"
     running = "running"
     waiting_user = "waiting_user"
     waiting_external = "waiting_external"
     completed = "completed"
     cancelled = "cancelled"
     failed = "failed"
+    expired = "expired"
 
 
 class RunAttemptStatus(StrEnum):
@@ -34,8 +36,10 @@ class Turn:
         self,
         turn_id: str | None = None,
         session_id: str = "",
-        status: TurnStatus = TurnStatus.created,
+        input_message_id: str = "",
+        status: TurnStatus = TurnStatus.accepted,
         priority: int = 80,
+        version: int = 1,
         cancel_requested_at: datetime | None = None,
         active_attempt_id: str | None = None,
         final_message_id: str | None = None,
@@ -43,8 +47,10 @@ class Turn:
     ) -> None:
         self.turn_id = turn_id or uuid.uuid4().hex
         self.session_id = session_id
+        self.input_message_id = input_message_id
         self.status = TurnStatus(status)
         self.priority = priority
+        self.version = version
         self.cancel_requested_at = cancel_requested_at
         self.active_attempt_id = active_attempt_id
         self.final_message_id = final_message_id
@@ -54,8 +60,10 @@ class Turn:
         return {
             "turn_id": self.turn_id,
             "session_id": self.session_id,
+            "input_message_id": self.input_message_id,
             "status": self.status.value,
             "priority": self.priority,
+            "version": self.version,
             "cancel_requested_at": self.cancel_requested_at.isoformat() if self.cancel_requested_at else None,
             "active_attempt_id": self.active_attempt_id,
             "final_message_id": self.final_message_id,
@@ -67,8 +75,10 @@ class Turn:
         return cls(
             turn_id=data["turn_id"],
             session_id=data.get("session_id", ""),
-            status=TurnStatus(data.get("status", "created")),
+            input_message_id=data.get("input_message_id", ""),
+            status=TurnStatus(data.get("status", "accepted")),
             priority=data.get("priority", 80),
+            version=data.get("version", 1),
             cancel_requested_at=datetime.fromisoformat(data["cancel_requested_at"]) if data.get("cancel_requested_at") else None,
             active_attempt_id=data.get("active_attempt_id"),
             final_message_id=data.get("final_message_id"),

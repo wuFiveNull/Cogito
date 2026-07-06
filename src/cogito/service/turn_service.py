@@ -8,11 +8,10 @@ from cogito.contracts.envelope import ChannelEnvelope
 
 
 class TurnAccepted:
-    """Result of accepting a turn."""
+    """Result of accepting a turn — no attempt_id since Dispatcher creates RunAttempt."""
 
-    def __init__(self, turn_id: str, attempt_id: str, message_id: str) -> None:
+    def __init__(self, turn_id: str, message_id: str) -> None:
         self.turn_id = turn_id
-        self.attempt_id = attempt_id
         self.message_id = message_id
 
 
@@ -29,7 +28,7 @@ class TurnService(Protocol):
     """Turn 生命周期管理接口。"""
 
     async def accept(self, envelope: ChannelEnvelope) -> TurnAccepted:
-        """接受 Channel 入站消息，创建 Turn + RunAttempt。"""
+        """接受 Channel 入站消息，创建 Turn（不创建 RunAttempt）。"""
         ...
 
     async def cancel(self, turn_id: str, reason: str) -> None:

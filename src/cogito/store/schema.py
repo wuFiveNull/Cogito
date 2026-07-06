@@ -96,8 +96,10 @@ CREATE TABLE IF NOT EXISTS inbound_inbox (
 CREATE TABLE IF NOT EXISTS turns (
     turn_id             TEXT PRIMARY KEY,
     session_id          TEXT NOT NULL DEFAULT '',
-    status              TEXT NOT NULL DEFAULT 'created' CHECK(status IN ('created','running','waiting_user','waiting_external','completed','cancelled','failed')),
+    input_message_id    TEXT NOT NULL DEFAULT '',
+    status              TEXT NOT NULL DEFAULT 'accepted' CHECK(status IN ('accepted','queued','running','waiting_user','waiting_external','completed','cancelled','failed')),
     priority            INTEGER NOT NULL DEFAULT 80,
+    version             INTEGER NOT NULL DEFAULT 1,
     cancel_requested_at TEXT,
     active_attempt_id   TEXT,
     final_message_id    TEXT,
