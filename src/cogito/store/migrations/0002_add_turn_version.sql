@@ -7,6 +7,8 @@
 --    - Add version column (optimistic concurrency)
 --    - Expand status CHECK to accepted/queued/expired
 --    - Remove 'created' status
+-- 2. Recreate run_attempts / turn_checkpoints with FK to new turns table
+--    (SQLite auto-rewrites FK on RENAME TABLE, so we must fix them)
 
 PRAGMA foreign_keys=OFF;
 
@@ -30,6 +32,32 @@ INSERT INTO turns (turn_id, session_id, status, priority, cancel_requested_at, a
            CASE WHEN status = 'created' THEN 'accepted' ELSE status END,
            priority, cancel_requested_at, active_attempt_id, final_message_id, created_at
     FROM turns_v1;
+
+-- Recreate run_attempts with FK to new turns table
+ALTER TABLE run_attempts RENAME TO run_attempts_v1;
+CREATE TABLE run_attempts (
+    attempt_id      TEXT PRIMARY KEY,
+    turn_id         TEXT NOT NULL REFERENCES turns(turn_id),
+    attempt_no      INTEGER NOT NULL DEFAULT 1,
+    status          TEXT NOT NULL DEFAULT 'created' CHECK(status IN ('created','running','succeeded','failed','cancelled','abandoned')),
+    checkpoint_ref  TEXT,
+    started_at      TEXT,
+    finished_at     TEXT,
+    UNIQUE(turn_id, attempt_no)
+);
+INSERT INTO run_attempts SELECT * FROM run_attempts_v1;
+DROP TABLE run_attempts_v1;
+
+-- Recreate turn_checkpoints with FK to new turns table
+ALTER TABLE turn_checkpoints RENAME TO turn_checkpoints_v1;
+CREATE TABLE turn_checkpoints (
+    checkpoint_id TEXT PRIMARY KEY,
+    turn_id       TEXT NOT NULL REFERENCES turns(turn_id),
+    data          TEXT NOT NULL DEFAULT '{}',
+    created_at    TEXT NOT NULL
+);
+INSERT INTO turn_checkpoints SELECT * FROM turn_checkpoints_v1;
+DROP TABLE turn_checkpoints_v1;
 
 DROP TABLE turns_v1;
 
