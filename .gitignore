@@ -18,6 +18,7 @@ env/
 
 # Project config (contains API keys)
 config/config.toml
+config.toml
 
 # Runtime workspace
 .workspace/

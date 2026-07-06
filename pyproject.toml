@@ -1,0 +1,27 @@
+[project]
+name = "cogito"
+version = "0.1.0"
+description = "Cogito — 主动式个人 Agent 框架"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "hunriiz" }]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.11"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
