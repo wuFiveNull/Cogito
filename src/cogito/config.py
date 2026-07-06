@@ -37,7 +37,7 @@ COMPAT_ALIASES: dict[str, str] = {
 }
 
 # ── 已定型节内的已知字段（校验未知字段）──
-STORAGE_FIELDS = frozenset({"db_path", "enable_wal", "busy_timeout", "payload_dir"})
+STORAGE_FIELDS = frozenset({"db_path", "enable_wal", "busy_timeout", "payload_dir", "profile_name"})
 RUNTIME_FIELDS = frozenset({"profile", "timezone", "instance_id"})
 INTERACTION_FIELDS = frozenset({"bind_host", "allow_remote", "validate_origin"})
 WORKER_FIELDS = frozenset({
@@ -113,6 +113,10 @@ class StorageConfig:
             busy_timeout=int(raw.get("busy_timeout", 5000)),
             payload_dir=str(raw.get("payload_dir", "data/payload")),
         )
+
+    def get_profile_name(self) -> str | None:
+        """Return deprecated storage.profile_name if set (for Config.load compat)."""
+        return None
 
 
 # =============================================================================
@@ -321,8 +325,22 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
                 f"Known: {', '.join(sorted(known_all))}"
             )
 
-        storage = StorageConfig._from_raw(resolved.get("storage", {}))
-        runtime = RuntimeConfig._from_raw(resolved.get("runtime", {}))
+        storage_raw = dict(resolved.get("storage", {}))
+        storage_profile = storage_raw.pop("profile_name", None)
+        storage = StorageConfig._from_raw(storage_raw)
+
+        runtime_raw = dict(resolved.get("runtime", {}))
+        # 兼容：storage.profile_name → runtime.profile
+        if storage_profile is not None:
+            if "profile" not in runtime_raw:
+                runtime_raw["profile"] = str(storage_profile)
+            warnings.warn(
+                "Config field 'storage.profile_name' is deprecated, use 'runtime.profile' instead. "
+                "Both fields present: 'runtime.profile' takes precedence.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        runtime = RuntimeConfig._from_raw(runtime_raw)
         interaction = InteractionConfig._from_raw(resolved.get("interaction", {}))
         worker_raw = resolved.get("worker", {})
         worker = WorkerConfig._from_raw(worker_raw) if worker_raw else WorkerConfig()

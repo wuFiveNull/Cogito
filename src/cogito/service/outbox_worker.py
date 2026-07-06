@@ -143,7 +143,7 @@ class OutboxWorker:
             updated = self._conn.execute(
                 "UPDATE outbox_events SET status='published' "
                 "WHERE event_id=? AND lease_owner=? AND lease_version=? AND status='leased' "
-                "AND (lease_expires_at IS NULL OR lease_expires_at > ?)",
+                "AND lease_expires_at IS NOT NULL AND lease_expires_at > ?",
                 (lease.event_id, worker_id, lease.lease_version, now_int),
             )
             uow.commit()
@@ -162,7 +162,7 @@ class OutboxWorker:
                 updated = self._conn.execute(
                     "UPDATE outbox_events SET status='dead_letter' "
                     "WHERE event_id=? AND lease_owner=? AND lease_version=? AND status='leased' "
-                    "AND (lease_expires_at IS NULL OR lease_expires_at > ?)",
+                    "AND lease_expires_at IS NOT NULL AND lease_expires_at > ?",
                     (lease.event_id, worker_id, lease.lease_version, now_int),
                 )
                 uow.commit()
@@ -175,7 +175,7 @@ class OutboxWorker:
             updated = self._conn.execute(
                 "UPDATE outbox_events SET status='retry_scheduled', next_attempt_at=? "
                 "WHERE event_id=? AND lease_owner=? AND lease_version=? AND status='leased' "
-                "AND (lease_expires_at IS NULL OR lease_expires_at > ?)",
+                "AND lease_expires_at IS NOT NULL AND lease_expires_at > ?",
                 (next_at_int, lease.event_id, worker_id, lease.lease_version, now_int),
             )
             uow.commit()

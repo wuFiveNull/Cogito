@@ -187,7 +187,7 @@ class Dispatcher:
             "UPDATE run_attempts SET status=?, finished_at=? "
             "WHERE attempt_id=? AND status='running' AND turn_id=? "
             "AND worker_id=? AND lease_version=? "
-            "AND (lease_expires_at IS NULL OR lease_expires_at > ?)",
+            "AND lease_expires_at IS NOT NULL AND lease_expires_at > ?",
             (RunAttemptStatus.succeeded.value, now_ms_val,
              attempt_id, turn_id, worker_id, lease_version, now_ms_val),
         )
@@ -230,7 +230,7 @@ class Dispatcher:
                 "UPDATE run_attempts SET status=?, finished_at=? "
                 "WHERE attempt_id=? AND status='running' AND turn_id=? "
                 "AND worker_id=? AND lease_version=? "
-                "AND (lease_expires_at IS NULL OR lease_expires_at > ?)",
+                "AND lease_expires_at IS NOT NULL AND lease_expires_at > ?",
                 (RunAttemptStatus.failed.value, now_ms_val,
                  attempt_id, turn_id, worker_id, lease_version, now_ms_val),
             )
@@ -281,7 +281,7 @@ class Dispatcher:
                 "UPDATE run_attempts SET lease_expires_at=?, heartbeat_at=? "
                 "WHERE attempt_id=? AND turn_id=? AND worker_id=? AND lease_version=? "
                 "AND status='running' "
-                "AND (lease_expires_at IS NULL OR lease_expires_at > ?)",
+                "AND lease_expires_at IS NOT NULL AND lease_expires_at > ?",
                 (new_expires_ms, epoch_ms(now),
                  attempt_id, turn_id, worker_id, lease_version,
                  epoch_ms(now)),

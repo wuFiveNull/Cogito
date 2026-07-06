@@ -142,6 +142,8 @@ class RunAttempt:
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "worker_id": self.worker_id,
             "lease_version": self.lease_version,
+            "lease_expires_at": self.lease_expires_at.isoformat() if self.lease_expires_at else None,
+            "heartbeat_at": self.heartbeat_at.isoformat() if self.heartbeat_at else None,
             "error_ref": self.error_ref,
         }
 
@@ -157,6 +159,8 @@ class RunAttempt:
             finished_at=datetime.fromisoformat(data["finished_at"]) if data.get("finished_at") else None,
             worker_id=data.get("worker_id", ""),
             lease_version=data.get("lease_version", 1),
+            lease_expires_at=datetime.fromisoformat(data["lease_expires_at"]) if data.get("lease_expires_at") else None,
+            heartbeat_at=datetime.fromisoformat(data["heartbeat_at"]) if data.get("heartbeat_at") else None,
             error_ref=data.get("error_ref", ""),
         )
 

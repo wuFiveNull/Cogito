@@ -8,6 +8,12 @@
 
 恢复操作必须使用条件更新，重新验证 lease_version + lease_expires_at，
 防止与 heartbeat 产生竞态（Worker 在 SELECT→UPDATE 间续期 Lease）。
+
+recover_stale_turns 原子保证：
+1. SELECT 保存 attempt 的 lease_version 和原 lease_expires_at
+2. Attempt UPDATE 条件验证 lease_version + lease_expires_at 未变化
+3. 只有 Attempt 更新成功后才更新 Turn
+4. Turn UPDATE 同时验证 active_attempt_id
 """
 
 from __future__ import annotations
@@ -27,11 +33,6 @@ class RecoveryService:
         self._conn = conn
 
     def recover_outbox_leases(self, clock: datetime | None = None) -> int:
-        """回收过期的 Outbox Lease。
-
-        条件 UPDATE 重新验证 lease_version + lease_expires_at < now。
-        若 Worker 在 SELECT 后续期，UPDATE 因 version/expires 不匹配而失败。
-        """
         now = clock or datetime.now(UTC)
         now_ms_val = epoch_ms(now)
 
@@ -60,11 +61,6 @@ class RecoveryService:
         return count
 
     def recover_delivery_leases(self, clock: datetime | None = None) -> int:
-        """回收过期的 Delivery Lease。
-
-        sending + 过期 → unknown（不可回 pending）。
-        条件 UPDATE 重新验证 lease_version + lease_expires_at。
-        """
         now = clock or datetime.now(UTC)
         now_ms_val = epoch_ms(now)
 
@@ -95,15 +91,23 @@ class RecoveryService:
     def recover_stale_turns(self, clock: datetime | None = None) -> int:
         """标记无有效执行权的 running Turn/RunAttempt 为 abandoned。
 
-        只恢复 Lease 已过期的 Attempt（不干扰有效 Lease）。
-        条件 UPDATE 重新验证 attempt 状态、lease_version 和过期时间。
+        原子操作：
+        1. SELECT 出 lease_version 和 lease_expires_at 用于条件更新
+        2. Attempt UPDATE 验证 lease_version + lease_expires_at 未变化 + 仍过期
+        3. 只有 Attempt rowcount > 0 才更新 Turn
+        4. Turn UPDATE 验证 version + active_attempt_id
+
+        Worker 在 SELECT 和 UPDATE 之间 heartbeat 成功时，
+        Attempt UPDATE 的 lease_version/lease_expires_at 条件不匹配，行数=0，
+        Turn 不会被修改。
         """
         now = clock or datetime.now(UTC)
         now_ms_val = epoch_ms(now)
 
         with UnitOfWork(self._conn) as uow:
             rows = self._conn.execute("""
-                SELECT t.turn_id, t.version, t.active_attempt_id, a.attempt_id
+                SELECT t.turn_id, t.version, t.active_attempt_id,
+                       a.attempt_id, a.lease_version, a.lease_expires_at
                 FROM turns t
                 JOIN run_attempts a ON a.attempt_id = t.active_attempt_id
                 WHERE t.status = 'running'
@@ -116,22 +120,29 @@ class RecoveryService:
 
             count = 0
             for row in rows:
-                # 条件标记 RunAttempt：验证 status + lease_expires_at
-                self._conn.execute(
+                # Step 1: 条件标记 Attempt — 验证 lease_version + lease_expires_at 仍匹配且过期
+                attempt_updated = self._conn.execute(
                     "UPDATE run_attempts SET status=?, finished_at=?, lease_version=lease_version+1 "
                     "WHERE attempt_id=? AND status='running' "
-                    "AND (lease_expires_at IS NULL OR lease_expires_at < ?)",
+                    "AND lease_version=? "
+                    "AND (lease_expires_at IS NULL OR lease_expires_at = ?)",
                     (RunAttemptStatus.abandoned.value, now_ms_val,
-                     row["active_attempt_id"], now_ms_val),
+                     row["active_attempt_id"],
+                     row["lease_version"], row["lease_expires_at"]),
                 )
 
-                # Turn 回到 queued（条件验证 version 防止竞态）
-                updated = self._conn.execute(
+                # Step 2: 只有 Attempt 更新成功才能修改 Turn
+                if attempt_updated.rowcount == 0:
+                    continue  # heartbeat 续期 — 跳过，不修改 Turn
+
+                # Step 3: 更新 Turn — 验证 version + active_attempt_id
+                turn_updated = self._conn.execute(
                     "UPDATE turns SET status=?, active_attempt_id=NULL, version=version+1 "
-                    "WHERE turn_id=? AND version=? AND status='running'",
-                    (TurnStatus.queued.value, row["turn_id"], row["version"]),
+                    "WHERE turn_id=? AND version=? AND status='running' AND active_attempt_id=?",
+                    (TurnStatus.queued.value,
+                     row["turn_id"], row["version"], row["active_attempt_id"]),
                 )
-                if updated.rowcount > 0:
+                if turn_updated.rowcount > 0:
                     count += 1
 
             if count > 0:
