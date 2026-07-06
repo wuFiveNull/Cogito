@@ -8,21 +8,30 @@ __pycache__/
 .eggs/
 dist/
 build/
+*.egg
+.pytest_cache/
 
 # Virtual environments
 venv/
 .venv/
 env/
 
+# Project config (contains API keys)
+config/config.toml
+
+# Runtime workspace
+.workspace/
+
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Workspace
-.workspace/
+# Environment
+condaenv.*
