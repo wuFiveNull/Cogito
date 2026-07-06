@@ -9,7 +9,7 @@ from typing import Generator
 import pytest
 
 from cogito.store.connection import get_connection
-from cogito.store.migration import migrate, SCHEMA_SQL
+from cogito.store.migration import migrate
 
 
 @pytest.fixture

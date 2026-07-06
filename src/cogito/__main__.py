@@ -30,13 +30,13 @@ def main() -> None:
 def _cmd_init() -> None:
     """Create .workspace/ directory and initialize the database."""
     config = Config.load()
-    workspace = Path(config.workspace.path)
+    workspace = Path(config.workspace_path)
     workspace.mkdir(parents=True, exist_ok=True)
 
     db_path = config.resolve_db_path()
-    payload_dir = Path(config.workspace.payload_dir)
+    payload_dir = Path(config.resolve_payload_dir())
     payload_dir.mkdir(parents=True, exist_ok=True)
-    log_dir = Path(config.workspace.log_dir)
+    log_dir = Path(config.resolve_log_dir())
     log_dir.mkdir(parents=True, exist_ok=True)
 
     conn = get_connection(db_path)
@@ -58,10 +58,10 @@ def _cmd_info() -> None:
     print()
     config = Config.load()
     print(f"Config file:   {DEFAULT_CONFIG_PATH.resolve()}")
-    print(f"Workspace:     {config.workspace.path}")
+    print(f"Workspace:     {config.workspace_path}")
     print(f"Database path: {config.resolve_db_path()}")
-    print(f"Payload dir:   {config.workspace.payload_dir}")
-    print(f"Log dir:       {config.workspace.log_dir}")
+    print(f"Payload dir:   {config.resolve_payload_dir()}")
+    print(f"Log dir:       {config.resolve_log_dir()}")
 
 
 if __name__ == "__main__":
