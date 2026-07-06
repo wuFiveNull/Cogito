@@ -1,6 +1,6 @@
 """Tests for Task and TaskAttempt domain entities."""
 
-from cogito.domain.task import Task, TaskStatus, TaskAttempt, TaskAttemptStatus
+from cogito.domain.task import Task, TaskAttempt, TaskAttemptStatus, TaskStatus
 
 
 class TestTask:

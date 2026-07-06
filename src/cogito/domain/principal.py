@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -40,7 +40,7 @@ class Principal:
         self.principal_id = principal_id or uuid.uuid4().hex
         self.principal_type = PrincipalType(principal_type)
         self.status = PrincipalStatus(status)
-        self.created_at = created_at or datetime.now(timezone.utc)
+        self.created_at = created_at or datetime.now(UTC)
         self.metadata = metadata or {}
 
     def to_dict(self) -> dict[str, Any]:

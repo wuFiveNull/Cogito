@@ -1,15 +1,14 @@
 """Tests for Dispatcher and Turn completion (P3: Dispatcher + Lane + Stub Agent)."""
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
-from cogito.domain.turn import Turn, TurnStatus, RunAttempt, RunAttemptStatus
-from cogito.service.dispatcher import Dispatcher
+from cogito.domain.turn import RunAttemptStatus, Turn, TurnStatus
 from cogito.service.completion import TurnCompletionService
+from cogito.service.dispatcher import Dispatcher
 from cogito.store.migration import migrate
-
 
 # ── Fixtures ──
 
@@ -27,7 +26,6 @@ def db() -> sqlite3.Connection:
 
 def _create_queued_turn(conn: sqlite3.Connection, session_id: str = "s1", priority: int = 80) -> Turn:
     """Helper: insert a queued turn directly into the database."""
-    import uuid
     from cogito.domain.turn import TurnStatus
 
     turn = Turn(
@@ -59,7 +57,7 @@ def _create_session(conn: sqlite3.Connection, session_id: str = "s1",
         "INSERT OR IGNORE INTO sessions (session_id, conversation_id, context_partition_key, created_at) "
         "VALUES (?, ?, ?, ?)",
         (session_id, conversation_id, context_partition_key,
-         datetime.now(timezone.utc).isoformat()),
+         datetime.now(UTC).isoformat()),
     )
     conn.commit()
 
@@ -102,7 +100,7 @@ class TestClaimNext:
         """Lane: same session can't have two running turns."""
         _create_session(db, "s1", "c1")
         t1 = _create_queued_turn(db, "s1")
-        t2 = _create_queued_turn(db, "s1")
+        _create_queued_turn(db, "s1")  # second turn, should be skipped
         db.commit()
 
         dispatcher = Dispatcher(db)
@@ -115,22 +113,22 @@ class TestClaimNext:
         assert r2 is None
 
     def test_priority_ordering(self, db: sqlite3.Connection):
-        """Higher priority turns are claimed first."""
+        """Higher priority (larger number) turns are claimed first."""
         _create_session(db, "s1", "c1")
         _create_session(db, "s2", "c2")
-        low = _create_queued_turn(db, "s1", priority=100)  # low priority
-        high = _create_queued_turn(db, "s2", priority=20)  # high priority
+        high = _create_queued_turn(db, "s1", priority=100)  # high priority
+        _create_queued_turn(db, "s2", priority=20)  # low priority
         db.commit()
 
         dispatcher = Dispatcher(db)
         r1 = dispatcher.claim_next("worker1")
         assert r1 is not None
-        assert r1.turn.turn_id == high.turn_id  # high priority first
+        assert r1.turn.turn_id == high.turn_id  # higher priority first
 
     def test_concurrent_claim_only_one_succeeds(self, db: sqlite3.Connection):
         """Test version check prevents double-claim."""
         _create_session(db)
-        turn = _create_queued_turn(db)
+        _create_queued_turn(db)
 
         # Simulate two dispatchers trying to claim the same turn
         dispatcher1 = Dispatcher(db)
@@ -162,7 +160,6 @@ class TestClaimNext:
     def test_attempt_no_increments(self, db: sqlite3.Connection):
         """When an attempt already exists, next attempt gets incrementing no."""
         _create_session(db)
-        from cogito.domain.turn import RunAttempt, RunAttemptStatus
         turn = _create_queued_turn(db)
 
         # Insert a previous failed attempt
@@ -225,7 +222,7 @@ class TestCancelTurn:
 class TestComplete:
     def test_complete_success(self, db: sqlite3.Connection):
         _create_session(db)
-        turn = _create_queued_turn(db)
+        _create_queued_turn(db)
         dispatcher = Dispatcher(db)
         claimed = dispatcher.claim_next("worker1")
         assert claimed is not None
@@ -256,14 +253,14 @@ class TestComplete:
     def test_stale_version_cannot_complete(self, db: sqlite3.Connection):
         """Submitting with an old version should be a no-op."""
         _create_session(db)
-        turn = _create_queued_turn(db)
+        _create_queued_turn(db)
         dispatcher = Dispatcher(db)
         claimed = dispatcher.claim_next("worker1")
         assert claimed is not None
 
         # Use the stale version (before the claim incremented it)
         stale_version = claimed.turn.version - 1
-        ok = dispatcher.complete(
+        dispatcher.complete(
             claimed.turn.turn_id,
             claimed.attempt.attempt_id,
             stale_version,
@@ -286,7 +283,7 @@ class TestComplete:
 class TestFail:
     def test_fail_marks_both(self, db: sqlite3.Connection):
         _create_session(db)
-        turn = _create_queued_turn(db)
+        _create_queued_turn(db)
         dispatcher = Dispatcher(db)
         claimed = dispatcher.claim_next("worker1")
         assert claimed is not None
@@ -358,7 +355,7 @@ class TestTurnCompletionService:
 
     def test_complete_creates_delivery(self, db: sqlite3.Connection):
         _create_session(db, "s1", "c1")
-        turn = _create_queued_turn(db)
+        _create_queued_turn(db)
 
         dispatcher = Dispatcher(db)
         claimed = dispatcher.claim_next("worker1")
@@ -378,7 +375,7 @@ class TestTurnCompletionService:
 
     def test_complete_creates_outbox_event(self, db: sqlite3.Connection):
         _create_session(db, "s1", "c1")
-        turn = _create_queued_turn(db)
+        _create_queued_turn(db)
 
         dispatcher = Dispatcher(db)
         claimed = dispatcher.claim_next("worker1")
@@ -400,7 +397,7 @@ class TestTurnCompletionService:
 
     def test_turn_completed_after_stub(self, db: sqlite3.Connection):
         _create_session(db, "s1", "c1")
-        turn = _create_queued_turn(db)
+        _create_queued_turn(db)
 
         dispatcher = Dispatcher(db)
         claimed = dispatcher.claim_next("worker1")
@@ -424,10 +421,11 @@ class TestTurnCompletionService:
     def test_rollback_on_failure(self, db: sqlite3.Connection):
         """If completion fails mid-way, nothing should be committed."""
         from unittest.mock import patch
+
         import cogito.service.unit_of_work as uow_mod
 
         _create_session(db, "s1", "c1")
-        turn = _create_queued_turn(db)
+        _create_queued_turn(db)
 
         dispatcher = Dispatcher(db)
         claimed = dispatcher.claim_next("worker1")
@@ -435,7 +433,7 @@ class TestTurnCompletionService:
         # Mock only commit — __exit__ will still auto-rollback
         service = TurnCompletionService(db)
         with patch.object(uow_mod.UnitOfWork, "commit"):
-            result = service.complete_with_stub(
+            service.complete_with_stub(
                 claimed.turn, claimed.attempt,
                 conversation_id="c1", session_id="s1",
                 endpoint_id="ep1", principal_id="p1",
@@ -472,7 +470,7 @@ class TestFullCycle:
             platform_conversation_id="pc1",
             platform_message_id="pm1",
             content_parts=[{"content_type": "text", "inline_data": "Hello Cogito!"}],
-            received_at=datetime.now(timezone.utc).isoformat(),
+            received_at=datetime.now(UTC).isoformat(),
         ))
         assert accept_result.is_new is True
 
@@ -522,7 +520,7 @@ class TestFullCycle:
             platform_sender_id="user1", platform_conversation_id="pc1",
             platform_message_id="pm2",
             content_parts=[{"content_type": "text", "inline_data": "Hello"}],
-            received_at=datetime.now(timezone.utc).isoformat(),
+            received_at=datetime.now(UTC).isoformat(),
         ))
 
         dispatcher = Dispatcher(db)

@@ -1,7 +1,12 @@
 """Tests for Principal and Endpoint domain entities."""
 
-import pytest
-from cogito.domain.principal import Principal, PrincipalType, PrincipalStatus, Endpoint, EndpointStatus
+from cogito.domain.principal import (
+    Endpoint,
+    EndpointStatus,
+    Principal,
+    PrincipalStatus,
+    PrincipalType,
+)
 
 
 class TestPrincipal:

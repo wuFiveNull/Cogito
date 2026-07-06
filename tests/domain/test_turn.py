@@ -1,6 +1,6 @@
 """Tests for Turn and RunAttempt domain entities."""
 
-from cogito.domain.turn import Turn, TurnStatus, RunAttempt, RunAttemptStatus
+from cogito.domain.turn import RunAttempt, RunAttemptStatus, Turn, TurnStatus
 
 
 class TestTurn:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -102,7 +102,7 @@ class Session:
         self.context_partition_key = context_partition_key or conversation_id
         self.reset_generation = reset_generation
         self.status = SessionStatus(status)
-        self.created_at = created_at or datetime.now(timezone.utc)
+        self.created_at = created_at or datetime.now(UTC)
 
     def to_dict(self) -> dict[str, Any]:
         return {

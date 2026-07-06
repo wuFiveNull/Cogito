@@ -26,22 +26,31 @@ python -m cogito info
 
 # 运行测试
 python -m pytest
+
+# 代码检查
+python -m ruff check src tests
+
+# 编译检查
+python -m compileall -q src
 ```
 
 ## 实现状态
-
-当前实现覆盖以下内容：
 
 | 模块 | 状态 | 说明 |
 |---|---|---|
 | 领域实体 | ✅ 完成 | Principal、Conversation、Session、Message、Turn、Task、Delivery、MemoryItem |
 | 状态机 | ✅ 完成 | Turn、RunAttempt、Task、Delivery、Memory 状态转移验证 |
-| 异常层次 | ✅ 完成 | 实体未找到、非法状态转移、并发冲突、幂等违反等 |
-| SQLite 存储 | ✅ 完成 | Schema、连接管理、版本 Migration |
-| CLI | ✅ 基本 | `init` 创建 workspace 和数据库，`info` 显示系统信息 |
-| 入站事务 | ⏳ 待实现 | accept_inbound（P2 阶段） |
-
-详细开发计划见 `plan/` 目录。
+| 异常层次 | ✅ 完成 | 实体未找到、非法状态转移、并发冲突、幂等违反、Lease 错误等 |
+| SQLite 存储 | ✅ 完成 | Schema、连接管理、编号 Migration（v1-v5） |
+| CLI | ✅ 完成 | `init` 创建 workspace 和数据库，`info` 显示系统信息 |
+| 严格配置 | ✅ 完成 | 分层配置模型（runtime/storage/interaction），未知字段报错 |
+| 入站事务 | ✅ 完成 | accept_inbound（Inbox 幂等、Conversation/Session/Message/Turn/Outbox 同事务） |
+| Dispatcher + Lane | ✅ 完成 | 按优先级 DESC 调度、Lane 隔离、原子 RunAttempt 创建 |
+| Stub Agent + TurnCompletion | ✅ 完成 | 固定回复、原子写入 Message + Delivery + Outbox |
+| Outbox Worker | ✅ 完成 | 聚合顺序、Lease/版本校验、指数退避重试、精确 dead_letter |
+| Delivery Worker | ✅ 完成 | Lease/版本校验、失败重试、unknown→reconcile、精确 failed |
+| Recovery Service | ✅ 完成 | 过期 Lease 回收、stale Turn/RunAttempt 重置 |
+| 可靠性测试 | ✅ 完成 | 并发领取、Lease 过期、旧 Worker 拒绝、重试时序、恢复幂等 |
 
 ## 架构概要
 
@@ -57,18 +66,16 @@ interaction-web → agent-api ↔ agent-worker → sqlite + payloads
 
 ## 项目配置
 
-配置文件为 `config.toml`，支持 `database` 和 `workspace` 两个主要配置段：
+配置文件为 `config.toml`，支持分层配置：
 
 ```toml
-[database]
-path = "data/cogito.db"
+workspace_path = ".workspace"
+
+[storage]
+db_path = "data/cogito.db"
 enable_wal = true
 busy_timeout = 5000
-
-[workspace]
-path = ".workspace"
 payload_dir = "data/payload"
-log_dir = "logs"
 ```
 
 ## 许可证

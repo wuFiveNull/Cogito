@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -73,7 +73,10 @@ class ReplyRoute:
             "thread_id": self.thread_id,
             "reply_to_platform_message_id": self.reply_to_platform_message_id,
             "reply_token": self.reply_token,
-            "reply_token_expires_at": self.reply_token_expires_at.isoformat() if self.reply_token_expires_at else None,
+            "reply_token_expires_at": (
+                self.reply_token_expires_at.isoformat()
+                if self.reply_token_expires_at else None
+            ),
             "target_endpoint_ref": self.target_endpoint_ref,
         }
 
@@ -85,7 +88,10 @@ class ReplyRoute:
             thread_id=data.get("thread_id"),
             reply_to_platform_message_id=data.get("reply_to_platform_message_id"),
             reply_token=data.get("reply_token", ""),
-            reply_token_expires_at=datetime.fromisoformat(data["reply_token_expires_at"]) if data.get("reply_token_expires_at") else None,
+            reply_token_expires_at=(
+                datetime.fromisoformat(data["reply_token_expires_at"])
+                if data.get("reply_token_expires_at") else None
+            ),
             target_endpoint_ref=data.get("target_endpoint_ref"),
         )
 
@@ -166,7 +172,7 @@ class ChannelEnvelope:
         if not self.message_id:
             self.message_id = uuid.uuid4().hex
         if not self.received_at:
-            self.received_at = datetime.now(timezone.utc).isoformat()
+            self.received_at = datetime.now(UTC).isoformat()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -204,12 +210,18 @@ class ChannelEnvelope:
             thread_id=data.get("thread_id"),
             content_parts=data.get("content_parts", []),
             platform_message_id=data.get("platform_message_id", ""),
-            reply_route=ReplyRoute.from_dict(data["reply_route"]) if data.get("reply_route") else None,
+            reply_route=(
+                ReplyRoute.from_dict(data["reply_route"])
+                if data.get("reply_route") else None
+            ),
             received_at=data.get("received_at", ""),
             trust_label=data.get("trust_label", "unverified"),
             capability_snapshot=data.get("capability_snapshot", {}),
             raw_payload=data.get("raw_payload"),
-            trace_context=TraceContext.from_dict(data["trace_context"]) if data.get("trace_context") else None,
+            trace_context=(
+                TraceContext.from_dict(data["trace_context"])
+                if data.get("trace_context") else None
+            ),
             metadata=data.get("metadata", {}),
         )
 
@@ -326,4 +338,4 @@ class EventEnvelope:
         if not self.event_id:
             self.event_id = uuid.uuid4().hex
         if not self.occurred_at:
-            self.occurred_at = datetime.now(timezone.utc).isoformat()
+            self.occurred_at = datetime.now(UTC).isoformat()

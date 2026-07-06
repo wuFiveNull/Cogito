@@ -1,13 +1,13 @@
 """Domain entities — 核心领域模型。"""
 
-from .principal import Principal, PrincipalType, PrincipalStatus, Endpoint, EndpointStatus
 from .conversation import Conversation, ConversationType, Session, SessionStatus
-from .message import Message, MessageRole, MessageDirection, ContentPart
-from .turn import Turn, TurnStatus, RunAttempt, RunAttemptStatus
-from .task import Task, TaskStatus, TaskAttempt, TaskAttemptStatus
-from .delivery import Delivery, DeliveryStatus, DeliveryAttempt
-from .memory import MemoryItem, MemoryKind, MemoryStatus
+from .delivery import Delivery, DeliveryAttempt, DeliveryStatus
 from .events import DomainEvent
+from .memory import MemoryItem, MemoryKind, MemoryStatus
+from .message import ContentPart, Message, MessageDirection, MessageRole
+from .principal import Endpoint, EndpointStatus, Principal, PrincipalStatus, PrincipalType
+from .task import Task, TaskAttempt, TaskAttemptStatus, TaskStatus
+from .turn import RunAttempt, RunAttemptStatus, Turn, TurnStatus
 
 __all__ = [
     "Principal", "PrincipalType", "PrincipalStatus", "Endpoint", "EndpointStatus",

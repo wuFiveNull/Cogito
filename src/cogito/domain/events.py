@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -35,7 +35,7 @@ class DomainEvent:
         self.aggregate_version = aggregate_version
         self.payload_ref = payload_ref
         self.payload = payload or {}
-        self.occurred_at = occurred_at or datetime.now(timezone.utc)
+        self.occurred_at = occurred_at or datetime.now(UTC)
         self.ingested_at = ingested_at
         self.content_hash = content_hash
         self.trust_label = trust_label

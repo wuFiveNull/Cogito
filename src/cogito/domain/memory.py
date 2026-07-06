@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -73,7 +73,7 @@ class MemoryItem:
         self.goal_priority = goal_priority
         self.goal_deadline = goal_deadline
         self.goal_progress = goal_progress
-        self.created_at = created_at or datetime.now(timezone.utc)
+        self.created_at = created_at or datetime.now(UTC)
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {

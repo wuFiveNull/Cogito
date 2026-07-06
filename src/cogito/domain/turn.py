@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -54,7 +54,7 @@ class Turn:
         self.cancel_requested_at = cancel_requested_at
         self.active_attempt_id = active_attempt_id
         self.final_message_id = final_message_id
-        self.created_at = created_at or datetime.now(timezone.utc)
+        self.created_at = created_at or datetime.now(UTC)
 
     def to_dict(self) -> dict[str, Any]:
         return {

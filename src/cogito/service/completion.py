@@ -11,8 +11,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 
 from cogito.domain.events import DomainEvent
 from cogito.domain.message import ContentPart, Message, MessageDirection, MessageRole
@@ -106,11 +105,11 @@ class TurnCompletionService:
                      message.message_id,
                      "pending",
                      f"delivery_{message.message_id}",
-                     datetime.now(timezone.utc).isoformat()),
+                     datetime.now(UTC).isoformat()),
                 )
 
             # 3. 写入 TurnCompleted Event Outbox
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             uow.outbox.insert(DomainEvent(
                 event_type="TurnCompleted",
                 aggregate_type="turn",

@@ -1,6 +1,6 @@
 """Tests for MemoryItem domain entity."""
 
-from cogito.domain.memory import MemoryItem, MemoryKind, MemoryStatus, GoalStatus
+from cogito.domain.memory import GoalStatus, MemoryItem, MemoryKind, MemoryStatus
 
 
 class TestMemoryItem:

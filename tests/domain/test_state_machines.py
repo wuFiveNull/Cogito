@@ -17,7 +17,6 @@ from cogito.domain.state_machines import (
     is_terminal_task,
     is_terminal_turn,
     validate_transition_attempt,
-    validate_transition_delivery,
     validate_transition_turn,
 )
 from cogito.domain.task import TaskAttemptStatus, TaskStatus

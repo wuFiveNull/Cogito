@@ -2,18 +2,35 @@
 
 同聚合顺序保证：只领取当前最小版本号的 pending Event。
 若更小版本仍处于 pending/leased/retry_scheduled，则跳过该聚合。
+
+EVENT-OUTBOX / 3. Outbox 状态
+pending → leased → published
+                 ├→ retry_scheduled
+                 └→ dead_letter
+
+可靠性语义：
+- lease_next 仅领取 pending 或已到期的 retry_scheduled
+- 条件更新验证 lease_owner + lease_version
+- 指数退避计算 next_attempt_at
+- 达到 MAX_TENTATIVE 后精确进入 dead_letter
 """
 
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import NamedTuple
 
 from cogito.service.unit_of_work import UnitOfWork
 
+# ── 重试策略 ──
 
 MAX_TENTATIVE = 3
+BACKOFF_BASE_SECONDS = 10
+BACKOFF_MULTIPLIER = 3
+MAX_BACKOFF_SECONDS = 3600
+
+# ── Lease ──
 
 
 class OutboxLease(NamedTuple):
@@ -30,6 +47,14 @@ class OutboxLease(NamedTuple):
     origin: str
     trust_label: str
     created_at: str
+    lease_version: int
+    attempt_count: int
+
+
+def compute_backoff(attempt_count: int) -> float:
+    """指数退避计算重试延迟（秒）。"""
+    delay = BACKOFF_BASE_SECONDS * (BACKOFF_MULTIPLIER ** (attempt_count - 1))
+    return min(delay, MAX_BACKOFF_SECONDS)
 
 
 class OutboxWorker:
@@ -41,32 +66,52 @@ class OutboxWorker:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
-    def lease_next(self, worker_id: str) -> OutboxLease | None:
-        """领取下一个待发布的 Outbox Event（同聚合有序）。"""
+    def lease_next(self, worker_id: str, clock: datetime | None = None) -> OutboxLease | None:
+        """领取下一个待发布的 Outbox Event（同聚合有序）。
+
+        可领取条件：
+        - status = 'pending'（新事件）
+        - status = 'retry_scheduled' AND next_attempt_at <= now（重试到期）
+
+        领取使用条件更新：只有 status 和 version 匹配时才成功。
+        """
+        now = clock or datetime.now(UTC)
+        now_iso = now.isoformat()
+
         with UnitOfWork(self._conn) as uow:
-            # 找可领取的事件：按聚合顺序，跳过有更小版本 pending 的聚合
             row = self._conn.execute("""
                 SELECT * FROM outbox_events o1
-                WHERE o1.status = 'pending'
-                  AND NOT EXISTS (
+                WHERE (
+                    o1.status = 'pending'
+                    OR (
+                        o1.status = 'retry_scheduled'
+                        AND (o1.next_attempt_at IS NULL OR o1.next_attempt_at <= ?)
+                    )
+                )
+                AND NOT EXISTS (
                     SELECT 1 FROM outbox_events o2
                     WHERE o2.aggregate_type = o1.aggregate_type
                       AND o2.aggregate_id = o1.aggregate_id
                       AND o2.aggregate_version < o1.aggregate_version
                       AND o2.status IN ('pending', 'leased', 'retry_scheduled')
-                  )
+                )
                 ORDER BY o1.aggregate_type, o1.aggregate_id, o1.aggregate_version
                 LIMIT 1
-            """).fetchone()
+            """, (now_iso,)).fetchone()
 
             if row is None:
                 return None
 
-            # 尝试获取 Lease
+            # 条件更新：status+version 匹配时才成功
+            old_version = row["lease_version"]
+            new_attempt_count = row["attempt_count"] + 1
+
             updated = self._conn.execute(
-                "UPDATE outbox_events SET status='leased', lease_owner=? "
-                "WHERE event_id=? AND status='pending'",
-                (worker_id, row["event_id"]),
+                "UPDATE outbox_events SET status='leased', lease_owner=?, "
+                "lease_version=lease_version+1, attempt_count=?, lease_expires_at=? "
+                "WHERE event_id=? AND status=? AND lease_version=?",
+                (worker_id, new_attempt_count, now_iso,
+                 row["event_id"], row["status"], old_version),
             )
             if updated.rowcount == 0:
                 return None
@@ -87,55 +132,73 @@ class OutboxWorker:
                 origin=row["origin"],
                 trust_label=row["trust_label"],
                 created_at=row["created_at"],
+                lease_version=old_version + 1,
+                attempt_count=new_attempt_count,
             )
 
-    def publish(self, lease: OutboxLease) -> bool:
-        """标记 OutboxEvent 为已发布。"""
+    def publish(self, lease: OutboxLease, worker_id: str) -> bool:
+        """标记 OutboxEvent 为已发布。
+
+        验证 lease_owner 和 lease_version 匹配，确保只有当前持有 Worker 可提交。
+        """
         with UnitOfWork(self._conn) as uow:
             updated = self._conn.execute(
                 "UPDATE outbox_events SET status='published' "
-                "WHERE event_id=? AND status='leased'",
-                (lease.event_id,),
+                "WHERE event_id=? AND lease_owner=? AND lease_version=? AND status='leased'",
+                (lease.event_id, worker_id, lease.lease_version),
             )
             uow.commit()
             return updated.rowcount > 0
 
-    def retry(self, lease: OutboxLease) -> bool:
-        """标记为 retry_scheduled（等待下次重试）。"""
-        with UnitOfWork(self._conn) as uow:
-            # 检查已有尝试次数
-            row = self._conn.execute(
-                "SELECT COUNT(*) as cnt FROM outbox_events o "
-                "JOIN outbox_events o2 ON o2.aggregate_type=o.aggregate_type "
-                "AND o2.aggregate_id=o.aggregate_id "
-                "WHERE o.event_id=? AND o2.status='published'",
-                (lease.event_id,),
-            ).fetchone()
-            tentative = row["cnt"] if row else 0
+    def retry(self, lease: OutboxLease, worker_id: str, clock: datetime | None = None) -> bool:
+        """标记为 retry_scheduled 或 dead_letter。
 
-            if tentative >= MAX_TENTATIVE:
-                self._conn.execute(
+        验证 lease_owner + lease_version。
+        若 attempt_count >= MAX_TENTATIVE → dead_letter。
+        否则按指数退避设置 next_attempt_at。
+        """
+        now = clock or datetime.now(UTC)
+
+        with UnitOfWork(self._conn) as uow:
+            if lease.attempt_count >= MAX_TENTATIVE:
+                updated = self._conn.execute(
                     "UPDATE outbox_events SET status='dead_letter' "
-                    "WHERE event_id=? AND status='leased'",
-                    (lease.event_id,),
+                    "WHERE event_id=? AND lease_owner=? AND lease_version=? AND status='leased'",
+                    (lease.event_id, worker_id, lease.lease_version),
+                )
+                uow.commit()
+                return updated.rowcount > 0
+
+            delay_seconds = compute_backoff(lease.attempt_count)
+            next_at = datetime.fromtimestamp(now.timestamp() + delay_seconds, tz=UTC)
+
+            updated = self._conn.execute(
+                "UPDATE outbox_events SET status='retry_scheduled', next_attempt_at=? "
+                "WHERE event_id=? AND lease_owner=? AND lease_version=? AND status='leased'",
+                (next_at.isoformat(), lease.event_id, worker_id, lease.lease_version),
+            )
+            uow.commit()
+            return updated.rowcount > 0
+
+    def dead_letter(self, event_id: str, worker_id: str = "", lease_version: int = 0) -> bool:
+        """直接移入 dead letter。
+
+        若指定 worker_id+lease_version，则验证条件；否则无条件（管理操作）。
+        """
+        with UnitOfWork(self._conn) as uow:
+            if worker_id:
+                updated = self._conn.execute(
+                    "UPDATE outbox_events SET status='dead_letter' "
+                    "WHERE event_id=? AND lease_owner=? AND lease_version=? "
+                    "AND status IN ('leased', 'retry_scheduled')",
+                    (event_id, worker_id, lease_version),
                 )
             else:
-                self._conn.execute(
-                    "UPDATE outbox_events SET status='retry_scheduled' "
-                    "WHERE event_id=? AND status='leased'",
-                    (lease.event_id,),
+                updated = self._conn.execute(
+                    "UPDATE outbox_events SET status='dead_letter' "
+                    "WHERE event_id=? AND status IN ('leased', 'retry_scheduled')",
+                    (event_id,),
                 )
-            uow.commit()
-            return True
-
-    def dead_letter(self, event_id: str) -> bool:
-        """直接移入 dead letter。"""
-        with UnitOfWork(self._conn) as uow:
-            updated = self._conn.execute(
-                "UPDATE outbox_events SET status='dead_letter' "
-                "WHERE event_id=? AND status IN ('leased', 'retry_scheduled')",
-                (event_id,),
-            )
             uow.commit()
             return updated.rowcount > 0
 

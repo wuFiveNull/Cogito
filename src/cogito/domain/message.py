@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -109,7 +109,7 @@ class Message:
         self.receive_sequence = receive_sequence
         self.trust_label = trust_label
         self.raw_payload_ref = raw_payload_ref
-        self.created_at = created_at or datetime.now(timezone.utc)
+        self.created_at = created_at or datetime.now(UTC)
         self.deleted_at = deleted_at
 
     def to_dict(self) -> dict[str, Any]:
@@ -191,7 +191,7 @@ class MessageRevision:
         self.editor_endpoint_id = editor_endpoint_id
         self.content_parts = content_parts or []
         self.raw_payload_ref = raw_payload_ref
-        self.created_at = created_at or datetime.now(timezone.utc)
+        self.created_at = created_at or datetime.now(UTC)
 
     def to_dict(self) -> dict[str, Any]:
         return {

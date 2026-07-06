@@ -26,6 +26,15 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
 
+[tool.ruff.lint.per-file-ignores]
+"src/cogito/store/schema.py" = ["E501"]
+"src/cogito/domain/*.py" = ["E501"]
+"src/cogito/service/completion.py" = ["E501"]
+"src/cogito/service/delivery_worker.py" = ["E501"]
+"src/cogito/service/inbound_service.py" = ["E501"]
+"src/cogito/store/repositories.py" = ["E501"]
+"tests/**/*.py" = ["E501"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

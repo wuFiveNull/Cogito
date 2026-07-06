@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -62,7 +62,7 @@ class Task:
         self.checkpoint_ref = checkpoint_ref
         self.idempotency_key = idempotency_key
         self.origin = origin
-        self.created_at = created_at or datetime.now(timezone.utc)
+        self.created_at = created_at or datetime.now(UTC)
 
     def to_dict(self) -> dict[str, Any]:
         return {

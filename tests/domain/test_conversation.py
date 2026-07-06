@@ -1,10 +1,9 @@
 """Tests for Conversation and Session domain entities."""
 
 from cogito.domain.conversation import (
+    ContextPartitionPolicy,
     Conversation,
     ConversationType,
-    ConversationStatus,
-    ContextPartitionPolicy,
     Session,
     SessionStatus,
 )

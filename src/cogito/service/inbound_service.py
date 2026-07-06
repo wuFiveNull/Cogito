@@ -14,9 +14,8 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any
+from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from cogito.contracts.envelope import ChannelEnvelope
 from cogito.domain.conversation import (
@@ -29,11 +28,17 @@ from cogito.domain.conversation import (
 )
 from cogito.domain.events import DomainEvent
 from cogito.domain.message import ContentPart, Message, MessageDirection, MessageRole
-from cogito.domain.principal import Endpoint, EndpointStatus, Principal, PrincipalStatus, PrincipalType
+from cogito.domain.principal import (
+    Endpoint,
+    EndpointStatus,
+    Principal,
+    PrincipalStatus,
+    PrincipalType,
+)
 from cogito.domain.state_machines import validate_transition_turn
 from cogito.domain.turn import Turn, TurnStatus
-from cogito.store.repositories import InboxRecord
 from cogito.service.unit_of_work import UnitOfWork
+from cogito.store.repositories import InboxRecord
 
 
 @dataclass
@@ -171,7 +176,7 @@ class InboundService:
                 raise RuntimeError(f"Turn status transition failed: {turn.turn_id}")
 
             # ── 9. 写入 Event Outbox ──
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             uow.outbox.insert(DomainEvent(
                 event_id="",
                 event_type="InboundMessageAccepted",
@@ -203,7 +208,7 @@ class InboundService:
                 platform_event_id=platform_event_id,
                 status="processed",
                 message_id=message.message_id,
-                received_at=datetime.now(timezone.utc).isoformat(),
+                received_at=datetime.now(UTC).isoformat(),
             ))
 
             uow.commit()

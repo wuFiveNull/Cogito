@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-
 DEFAULT_CONFIG_PATH = Path("config.toml")
 
 # ── 已知顶层 key 和 section —— 之外的视为未知 ──

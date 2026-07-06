@@ -1,6 +1,6 @@
 """Tests for Delivery and DeliveryAttempt domain entities."""
 
-from cogito.domain.delivery import Delivery, DeliveryStatus, DeliveryAttempt, DeliveryAttemptStatus
+from cogito.domain.delivery import Delivery, DeliveryAttempt, DeliveryAttemptStatus, DeliveryStatus
 
 
 class TestDelivery:

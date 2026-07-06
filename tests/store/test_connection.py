@@ -3,7 +3,7 @@
 import os
 import tempfile
 
-from cogito.store.connection import get_connection, ConnectionPool
+from cogito.store.connection import ConnectionPool, get_connection
 
 
 class TestGetConnection:

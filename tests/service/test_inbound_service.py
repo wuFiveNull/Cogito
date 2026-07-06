@@ -1,15 +1,13 @@
 """Tests for accept_inbound application service (P2 core transaction)."""
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from threading import Thread
 
 import pytest
 
 from cogito.contracts.envelope import ChannelEnvelope
-from cogito.domain.turn import TurnStatus
 from cogito.service.inbound_service import InboundService
-
 
 # ── Helper ──
 
@@ -24,7 +22,7 @@ def _envelope(**overrides: object) -> ChannelEnvelope:
         "platform_message_id": "pm1",
         "content_parts": [{"content_type": "text", "inline_data": "Hello"}],
         "trust_label": "unverified",
-        "received_at": datetime.now(timezone.utc).isoformat(),
+        "received_at": datetime.now(UTC).isoformat(),
     }
     data.update(overrides)
     return ChannelEnvelope(**data)
@@ -264,9 +262,9 @@ class TestConversationReuse:
         assert convs == 1  # one conversation reused
 
     def test_sequence_monotonic(self, service: InboundService, conn: sqlite3.Connection):
-        r1 = service.accept(_envelope(platform_message_id="pm1"))
-        r2 = service.accept(_envelope(platform_message_id="pm2"))
-        r3 = service.accept(_envelope(platform_message_id="pm3"))
+        service.accept(_envelope(platform_message_id="pm1"))
+        service.accept(_envelope(platform_message_id="pm2"))
+        service.accept(_envelope(platform_message_id="pm3"))
 
         seqs = [
             r["receive_sequence"]
@@ -332,6 +330,7 @@ class TestRollback:
     def test_rollback_removes_all_data(self):
         """Simulate a crash by rolling back after intercepting the commit."""
         from unittest.mock import patch
+
         import cogito.service.unit_of_work as uow_mod
 
         conn = _setup_in_memory_db()
@@ -355,6 +354,7 @@ class TestRollback:
     def test_rollback_allows_retry(self):
         """After rollback, same message can be re-processed successfully."""
         from unittest.mock import patch
+
         import cogito.service.unit_of_work as uow_mod
 
         conn = _setup_in_memory_db()
@@ -379,6 +379,7 @@ class TestRollback:
     def test_partial_failure_no_partial_data(self):
         """When UoW exits without commit (e.g. exception), data is rolled back."""
         from unittest.mock import patch
+
         import cogito.service.unit_of_work as uow_mod
 
         conn = _setup_in_memory_db()
@@ -406,7 +407,8 @@ class TestRollback:
 class TestConcurrentDedup:
     def test_concurrent_duplicate_creates_one_turn(self):
         """Two connections processing the same event concurrently produce one Turn."""
-        import tempfile, os
+        import os
+        import tempfile
         db_fd, db_path = tempfile.mkstemp(suffix=".db")
         os.close(db_fd)
 

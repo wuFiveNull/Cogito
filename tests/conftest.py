@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import sqlite3
-from pathlib import Path
-from typing import Generator
+from collections.abc import Generator
 
 import pytest
 
-from cogito.store.connection import get_connection
 from cogito.store.migration import migrate
 
 

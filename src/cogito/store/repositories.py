@@ -7,8 +7,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime
 
 from cogito.domain.conversation import (
     ContextPartitionPolicy,
@@ -19,10 +18,15 @@ from cogito.domain.conversation import (
     SessionStatus,
 )
 from cogito.domain.events import DomainEvent
-from cogito.domain.message import ContentPart, Message, MessageDirection, MessageRole
-from cogito.domain.principal import Endpoint, EndpointStatus, Principal, PrincipalStatus, PrincipalType
+from cogito.domain.message import ContentPart, Message
+from cogito.domain.principal import (
+    Endpoint,
+    EndpointStatus,
+    Principal,
+    PrincipalStatus,
+    PrincipalType,
+)
 from cogito.domain.turn import Turn, TurnStatus
-
 
 # =============================================================================
 # InboxRepository

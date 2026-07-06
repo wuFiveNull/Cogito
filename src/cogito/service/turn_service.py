@@ -18,7 +18,9 @@ class TurnAccepted:
 class ResumeCommand:
     """Command to resume a waiting turn."""
 
-    def __init__(self, turn_id: str, resolution: str, payload: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self, turn_id: str, resolution: str, payload: dict[str, Any] | None = None
+    ) -> None:
         self.turn_id = turn_id
         self.resolution = resolution
         self.payload = payload or {}

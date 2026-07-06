@@ -1,8 +1,13 @@
 """Tests for Message and ContentPart domain entities."""
 
+from datetime import UTC
+
 from cogito.domain.message import (
-    Message, ContentPart, MessageRevision,
-    MessageRole, MessageDirection,
+    ContentPart,
+    Message,
+    MessageDirection,
+    MessageRevision,
+    MessageRole,
 )
 
 
@@ -73,8 +78,8 @@ class TestMessage:
         assert m.deleted_at is None
 
     def test_deleted_at_roundtrip(self):
-        from datetime import datetime, timezone
-        deleted = datetime.now(timezone.utc)
+        from datetime import datetime
+        deleted = datetime.now(UTC)
         m1 = Message(message_id="m1", deleted_at=deleted)
         d = m1.to_dict()
         m2 = Message.from_dict(d)
