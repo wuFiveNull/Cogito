@@ -311,6 +311,14 @@ class TestChannelManager:
         assert spec.class_name == "TelegramAdapter"
         assert "telegram" in spec.module
 
+    def test_registry_has_qqofficial(self):
+        """registry 包含 qqofficial 适配器。"""
+        from cogito.channel.registry import ADAPTERS
+
+        assert "qqofficial" in ADAPTERS
+        spec = ADAPTERS["qqofficial"]
+        assert spec.class_name == "QQOfficialAdapter"
+
     def test_unknown_adapter_raises(self):
         """未知适配器名称抛出 ValueError。"""
         from cogito.channel.registry import create_adapter
@@ -362,3 +370,36 @@ def in_memory_db() -> sqlite3.Connection:
 @pytest.fixture
 def in_memory_db_service(in_memory_db: sqlite3.Connection) -> InboundService:
     return InboundService(in_memory_db)
+
+
+# =============================================================================
+# ChannelGateway 测试
+# =============================================================================
+
+
+class TestChannelGateway:
+    def test_gateway_implements_gateway_protocol(self):
+        """ChannelGateway 实现 Gateway Protocol。"""
+        from cogito.service.channel_gateway import ChannelGateway
+
+        assert hasattr(ChannelGateway, "send")
+
+    def test_read_message_text_from_db(self, in_memory_db):
+        """从 content_parts 读取消息文本。"""
+        from cogito.contracts.envelope import ChannelEnvelope
+        from cogito.service.inbound_service import InboundService
+
+        svc = InboundService(in_memory_db)
+        result = svc.accept(ChannelEnvelope(
+            channel_type="test", channel_instance_id="ci1",
+            platform_sender_id="user1", platform_conversation_id="conv1",
+            platform_message_id="pm_gw1",
+            content_parts=[{"content_type": "text", "inline_data": "Hello World"}],
+            received_at=datetime.now(UTC).isoformat(),
+        ))
+
+        row = in_memory_db.execute(
+            "SELECT inline_data FROM content_parts WHERE message_id=?",
+            (result.message_id,),
+        ).fetchone()
+        assert row["inline_data"] == "Hello World"

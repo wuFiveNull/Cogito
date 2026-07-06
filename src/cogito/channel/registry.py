@@ -21,6 +21,10 @@ ADAPTERS: dict[str, AdapterSpec] = {
         module="cogito.channel.adapters.telegram",
         class_name="TelegramAdapter",
     ),
+    "qqofficial": AdapterSpec(
+        module="cogito.channel.adapters.qqofficial",
+        class_name="QQOfficialAdapter",
+    ),
 }
 
 
