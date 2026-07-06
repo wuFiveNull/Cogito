@@ -1,0 +1,7 @@
+This directory contains code derived from LangBot (https://github.com/Hoshinonyaruko/LangBot),
+which is licensed under the Apache License, Version 2.0.
+
+See the full license text in:
+  reference/message_gateway_langbot_original/LICENSE-LANGBOT
+
+Modifications made by Cogito are also licensed under Apache-2.0.

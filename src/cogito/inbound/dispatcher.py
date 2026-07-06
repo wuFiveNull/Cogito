@@ -1,0 +1,69 @@
+"""Inbound Dispatcher — 将 Inbound 转换为 ChannelEnvelope 并交给 InboundService。
+
+数据流:
+    Inbound → ChannelEnvelope → InboundService.accept()
+"""
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+from cogito.contracts.envelope import ChannelEnvelope, ReplyRoute
+from cogito.inbound.models import Inbound
+from cogito.service.inbound_service import InboundService
+
+
+class InboundDispatcher:
+    """Inbound 分发器。
+
+    将 Channel Adapter 的统一 Inbound 消息转换为 Cogito Core 的 ChannelEnvelope，
+    然后调用 InboundService.accept() 完成入站事务。
+    """
+
+    def __init__(self, inbound_service: InboundService) -> None:
+        self._inbound_service = inbound_service
+
+    async def dispatch(self, inbound: Inbound) -> None:
+        """分发一条 Inbound 消息到 Agent Core。"""
+        envelope = self._build_envelope(inbound)
+        self._inbound_service.accept(envelope)
+
+    def _build_envelope(self, inbound: Inbound) -> ChannelEnvelope:
+        """将 Inbound 转换为 ChannelEnvelope。"""
+        content_parts = [
+            {
+                "content_type": c.type,
+                "inline_data": c.data,
+                "mime": c.mime,
+                "name": c.name,
+                "size": c.size,
+                "trust_label": "unverified",
+            }
+            for c in inbound.content
+        ]
+
+        reply_route = ReplyRoute(
+            channel_instance_id=inbound.channel_instance_id,
+            platform_conversation_id=inbound.conversation_id,
+            reply_to_platform_message_id=inbound.route.source_message_id,
+            target_endpoint_ref=(
+                f"{inbound.channel}:{inbound.sender_id}"
+                if inbound.sender_id else ""
+            ),
+        )
+
+        return ChannelEnvelope(
+            channel_type=inbound.channel,
+            channel_instance_id=inbound.channel_instance_id,
+            platform_sender_id=inbound.sender_id,
+            platform_conversation_id=inbound.conversation_id,
+            platform_message_id=(
+                inbound.message_id or inbound.route.source_message_id
+            ),
+            content_parts=content_parts,
+            reply_route=reply_route,
+            sender_endpoint_ref=f"{inbound.channel}:{inbound.sender_id}",
+            conversation_endpoint_ref=f"{inbound.channel}:{inbound.conversation_id}",
+            capability_snapshot=inbound.metadata.get("capability", {}),
+            trust_label=inbound.metadata.get("trust_label", "unverified"),
+            received_at=datetime.now(UTC).isoformat(),
+        )
