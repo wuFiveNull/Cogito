@@ -1,9 +1,10 @@
 """Configuration — strict layered config model.
 
 遵循 CONFIG-PROFILES / 1（配置层级）与 CONFIG-PROFILES / 6（启动校验）：
-- 配置分层：runtime / storage / interaction / channel / agent / worker 等
+- 配置分层：runtime / storage / interaction / worker 等
 - 未知字段和节在加载时报错（仅限当前已定型节内未知字段）
 - 已知但未定型节可以出现但内容暂不校验
+- 提供兼容别名：llm→model, channels→channel, plugins→capability/plugins
 - 敏感字段（api_key 等）在 repr 中脱敏
 """
 
@@ -12,6 +13,7 @@ from __future__ import annotations
 import os
 import re
 import tomllib
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -19,15 +21,20 @@ from typing import Any
 DEFAULT_CONFIG_PATH = Path("config.toml")
 
 # ── 已知顶层 key —— 之外的视为未知 ──
-# CONFIG-PROFILES / 2 定义的全部顶层节
 KNOWN_TOP_KEYS = frozenset({"workspace_path"})
 KNOWN_SECTIONS = frozenset({
     "runtime", "storage", "interaction",
-    "channel", "conversation", "agent", "model", "memory",
+    "channel", "channels", "conversation", "agent", "model", "llm", "memory",
     "capability", "sandbox", "worker", "scheduler",
     "connector", "proactive", "security",
-    "observability", "retention", "backup",
+    "observability", "retention", "backup", "plugins",
 })
+
+# 兼容别名映射：旧名 → 新名
+COMPAT_ALIASES: dict[str, str] = {
+    "llm": "model",
+    "channels": "channel",
+}
 
 # ── 已定型节内的已知字段（校验未知字段）──
 STORAGE_FIELDS = frozenset({"db_path", "enable_wal", "busy_timeout", "payload_dir"})
@@ -41,10 +48,10 @@ WORKER_FIELDS = frozenset({
 
 # ── 已声明但尚未定型节（内容暂不校验，仅允许存在）──
 _TOLERATED_SECTIONS = frozenset({
-    "channel", "conversation", "agent", "model", "memory",
+    "channel", "channels", "conversation", "agent", "model", "llm", "memory",
     "capability", "sandbox", "scheduler",
     "connector", "proactive", "security",
-    "observability", "retention", "backup",
+    "observability", "retention", "backup", "plugins",
 })
 
 
@@ -160,19 +167,13 @@ class InteractionConfig:
 
 
 # =============================================================================
-# Worker 配置（Lease TTL、心跳等）
+# Worker 配置
 # =============================================================================
 
 
 @dataclass
 class WorkerConfig:
-    """Worker、Lease 和恢复相关配置。
-
-    CONFIG-PROFILES / 6 要求：
-    - lease_duration > heartbeat_interval
-    - outbox/delivery TTL > heartbeat_interval
-    - recovery_grace > 0
-    """
+    """Worker、Lease 和恢复相关配置。"""
 
     concurrency: int = 1
     lease_duration_seconds: int = 300
@@ -258,7 +259,7 @@ class Config:
         cfg_path = Path(path)
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         content = f"""# Cogito Configuration
-# API Key 等敏感信息在开发阶段存入本文件，启动时加载到内存。
+# API Key 等敏感信息存在 .env 文件中，不在本文件写入。
 # 所有相对路径以 workspace_path 为基准。
 
 workspace_path = "{self.workspace_path}"
@@ -299,6 +300,18 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
             data = tomllib.load(f)
 
         resolved = _resolve_env(data)
+
+        # 兼容别名处理：旧名出现在配置中时，发出弃用警告
+        for old_name, new_name in COMPAT_ALIASES.items():
+            if old_name in resolved:
+                if new_name not in resolved:
+                    resolved[new_name] = resolved[old_name]
+                warnings.warn(
+                    f"Config section '{old_name}' is deprecated, use '{new_name}' instead. "
+                    f"Both sections present: values from '{new_name}' take precedence.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
 
         known_all = KNOWN_TOP_KEYS | KNOWN_SECTIONS
         unknown_keys = set(resolved) - known_all

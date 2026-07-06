@@ -160,16 +160,45 @@ class DeliveryWorker:
     def deliver(self, lease: DeliveryLease, worker_id: str, clock: datetime | None = None) -> str:
         """发送 Delivery。
 
-        验证 lease_owner + lease_version 后才提交结果。
+        先验证 Lease 有效性再调用 Gateway，避免过期 Worker 产生重复副作用。
+
+        流程：
+        1. 短事务读取并验证当前执行权（status=sending, lease_owner, lease_version, 未过期）
+        2. 若无效 → 返回 "stale"，不调用 Gateway
+        3. 事务外调用 Gateway
+        4. 短事务再次验证 Lease 后提交结果
+        5. 若第三步后 Lease 失效 → unknown（只能 reconcile）
         """
         target = lease.target_snapshot
         content_ref = lease.content_ref or ""
-
-        result = self._gateway.send(target, content_ref)
-
         now = clock or datetime.now(UTC)
         now_int = epoch_ms(now)
 
+        # ── 第一步：预验证 Lease（短事务，不持锁跨网络）──
+        with UnitOfWork(self._conn):
+            current = self._conn.execute(
+                "SELECT status, lease_owner, lease_version, lease_expires_at "
+                "FROM deliveries WHERE delivery_id=?",
+                (lease.delivery_id,),
+            ).fetchone()
+        # 不 commit — 只读
+
+        if current is None:
+            return "stale"
+        if current["status"] != "sending":
+            return "stale"
+        if current["lease_owner"] != worker_id:
+            return "stale"
+        if current["lease_version"] != lease.lease_version:
+            return "stale"
+        lease_expires = current["lease_expires_at"]
+        if lease_expires is not None and lease_expires <= now_int:
+            return "stale"  # lease expired before Gateway call
+
+        # ── 第二步：事务外调用 Gateway ──
+        result = self._gateway.send(target, content_ref)
+
+        # ── 第三步：再次验证 Lease 后提交结果 ──
         with UnitOfWork(self._conn) as uow:
             current = self._conn.execute(
                 "SELECT status, lease_owner, lease_version FROM deliveries WHERE delivery_id=?",
@@ -177,7 +206,14 @@ class DeliveryWorker:
             ).fetchone()
 
             if current is None or current["lease_owner"] != worker_id or current["lease_version"] != lease.lease_version:
-                return "stale"
+                # Gateway was called but we lost the lease — enter unknown
+                self._conn.execute(
+                    "UPDATE deliveries SET status='unknown' "
+                    "WHERE delivery_id=? AND status='sending' AND lease_owner=? AND lease_version=?",
+                    (lease.delivery_id, worker_id, lease.lease_version),
+                )
+                uow.commit()
+                return "unknown"
 
             attempt_row = self._conn.execute(
                 "SELECT attempt_id FROM delivery_attempts "

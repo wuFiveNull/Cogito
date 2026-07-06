@@ -6,8 +6,8 @@
 3. 无有效执行权的 running Turn/RunAttempt
 4. unknown Delivery 保持待对账，不转回普通重试
 
-恢复操作必须使用条件更新，旧 Worker 返回结果后不得提交。
-恢复依据只能是数据库状态、Checkpoint、Lease 和 Receipt。
+恢复操作必须使用条件更新，重新验证 lease_version + lease_expires_at，
+防止与 heartbeat 产生竞态（Worker 在 SELECT→UPDATE 间续期 Lease）。
 """
 
 from __future__ import annotations
@@ -29,9 +29,8 @@ class RecoveryService:
     def recover_outbox_leases(self, clock: datetime | None = None) -> int:
         """回收过期的 Outbox Lease。
 
-        条件：status='leased' AND lease_expires_at IS NOT NULL AND lease_expires_at < now
-        操作：status → 'pending', 清除 lease_owner, 推进 lease_version
-        返回：回收数量
+        条件 UPDATE 重新验证 lease_version + lease_expires_at < now。
+        若 Worker 在 SELECT 后续期，UPDATE 因 version/expires 不匹配而失败。
         """
         now = clock or datetime.now(UTC)
         now_ms_val = epoch_ms(now)
@@ -49,8 +48,9 @@ class RecoveryService:
                 updated = self._conn.execute(
                     "UPDATE outbox_events SET status='pending', lease_owner=NULL, "
                     "lease_expires_at=NULL, lease_version=lease_version+1 "
-                    "WHERE event_id=? AND status='leased'",
-                    (row["event_id"],),
+                    "WHERE event_id=? AND status='leased' AND lease_version=? "
+                    "AND lease_expires_at IS NOT NULL AND lease_expires_at < ?",
+                    (row["event_id"], row["lease_version"], now_ms_val),
                 )
                 if updated.rowcount > 0:
                     count += 1
@@ -62,10 +62,8 @@ class RecoveryService:
     def recover_delivery_leases(self, clock: datetime | None = None) -> int:
         """回收过期的 Delivery Lease。
 
-        条件：status='sending' AND lease_expires_at IS NOT NULL AND lease_expires_at < now
-        操作：status → 'unknown'（因外部可能已成功），清除 lease_owner，推进 lease_version
-        sending 不能直接回 pending —— 外部结果可能已成功，应通过 reconcile 处理。
-        返回：回收数量
+        sending + 过期 → unknown（不可回 pending）。
+        条件 UPDATE 重新验证 lease_version + lease_expires_at。
         """
         now = clock or datetime.now(UTC)
         now_ms_val = epoch_ms(now)
@@ -83,8 +81,9 @@ class RecoveryService:
                 updated = self._conn.execute(
                     "UPDATE deliveries SET status='unknown', lease_owner=NULL, "
                     "lease_expires_at=NULL, lease_version=lease_version+1 "
-                    "WHERE delivery_id=? AND status='sending'",
-                    (row["delivery_id"],),
+                    "WHERE delivery_id=? AND status='sending' AND lease_version=? "
+                    "AND lease_expires_at IS NOT NULL AND lease_expires_at < ?",
+                    (row["delivery_id"], row["lease_version"], now_ms_val),
                 )
                 if updated.rowcount > 0:
                     count += 1
@@ -96,17 +95,15 @@ class RecoveryService:
     def recover_stale_turns(self, clock: datetime | None = None) -> int:
         """标记无有效执行权的 running Turn/RunAttempt 为 abandoned。
 
-        只恢复 Lease 已过期或明确失去执行权的 Attempt。
-        仍持有有效 Lease 的 running Turn 不被重置。
-        过期 Attempt → abandoned；Turn 根据恢复策略进入 queued。
-        若无法判断则进入 manual_review（当前简化：只支持 queued）。
+        只恢复 Lease 已过期的 Attempt（不干扰有效 Lease）。
+        条件 UPDATE 重新验证 attempt 状态、lease_version 和过期时间。
         """
         now = clock or datetime.now(UTC)
         now_ms_val = epoch_ms(now)
 
         with UnitOfWork(self._conn) as uow:
             rows = self._conn.execute("""
-                SELECT t.turn_id, t.version, t.active_attempt_id
+                SELECT t.turn_id, t.version, t.active_attempt_id, a.attempt_id
                 FROM turns t
                 JOIN run_attempts a ON a.attempt_id = t.active_attempt_id
                 WHERE t.status = 'running'
@@ -119,14 +116,16 @@ class RecoveryService:
 
             count = 0
             for row in rows:
-                # 标记 RunAttempt 为 abandoned
+                # 条件标记 RunAttempt：验证 status + lease_expires_at
                 self._conn.execute(
                     "UPDATE run_attempts SET status=?, finished_at=?, lease_version=lease_version+1 "
-                    "WHERE attempt_id=? AND status='running'",
-                    (RunAttemptStatus.abandoned.value, now_ms_val, row["active_attempt_id"]),
+                    "WHERE attempt_id=? AND status='running' "
+                    "AND (lease_expires_at IS NULL OR lease_expires_at < ?)",
+                    (RunAttemptStatus.abandoned.value, now_ms_val,
+                     row["active_attempt_id"], now_ms_val),
                 )
 
-                # Turn 回到 queued（但保持 version 递增防竞态）
+                # Turn 回到 queued（条件验证 version 防止竞态）
                 updated = self._conn.execute(
                     "UPDATE turns SET status=?, active_attempt_id=NULL, version=version+1 "
                     "WHERE turn_id=? AND version=? AND status='running'",
@@ -140,10 +139,6 @@ class RecoveryService:
         return count
 
     def recover_all(self, clock: datetime | None = None) -> dict[str, int]:
-        """执行所有恢复扫描。
-
-        Returns: 每类恢复的数量。
-        """
         return {
             "outbox_leases": self.recover_outbox_leases(clock),
             "delivery_leases": self.recover_delivery_leases(clock),

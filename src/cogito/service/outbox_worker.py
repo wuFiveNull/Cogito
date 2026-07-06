@@ -131,16 +131,20 @@ class OutboxWorker:
                 attempt_count=new_attempt_count,
             )
 
-    def publish(self, lease: OutboxLease, worker_id: str) -> bool:
+    def publish(self, lease: OutboxLease, worker_id: str, clock: datetime | None = None) -> bool:
         """标记 OutboxEvent 为已发布。
 
-        验证 lease_owner + lease_version 匹配，确保只有当前持有 Worker 可提交。
+        验证 lease_owner + lease_version + lease_expires_at > now。
         """
+        now = clock or datetime.now(UTC)
+        now_int = epoch_ms(now)
+
         with UnitOfWork(self._conn) as uow:
             updated = self._conn.execute(
                 "UPDATE outbox_events SET status='published' "
-                "WHERE event_id=? AND lease_owner=? AND lease_version=? AND status='leased'",
-                (lease.event_id, worker_id, lease.lease_version),
+                "WHERE event_id=? AND lease_owner=? AND lease_version=? AND status='leased' "
+                "AND (lease_expires_at IS NULL OR lease_expires_at > ?)",
+                (lease.event_id, worker_id, lease.lease_version, now_int),
             )
             uow.commit()
             return updated.rowcount > 0
@@ -148,18 +152,18 @@ class OutboxWorker:
     def retry(self, lease: OutboxLease, worker_id: str, clock: datetime | None = None) -> bool:
         """标记为 retry_scheduled 或 dead_letter。
 
-        验证 lease_owner + lease_version。
-        若 attempt_count >= MAX_TENTATIVE → dead_letter。
-        否则按指数退避设置 next_attempt_at（epoch ms）。
+        验证 lease_owner + lease_version + lease_expires_at > now。
         """
         now = clock or datetime.now(UTC)
+        now_int = epoch_ms(now)
 
         with UnitOfWork(self._conn) as uow:
             if lease.attempt_count >= MAX_TENTATIVE:
                 updated = self._conn.execute(
                     "UPDATE outbox_events SET status='dead_letter' "
-                    "WHERE event_id=? AND lease_owner=? AND lease_version=? AND status='leased'",
-                    (lease.event_id, worker_id, lease.lease_version),
+                    "WHERE event_id=? AND lease_owner=? AND lease_version=? AND status='leased' "
+                    "AND (lease_expires_at IS NULL OR lease_expires_at > ?)",
+                    (lease.event_id, worker_id, lease.lease_version, now_int),
                 )
                 uow.commit()
                 return updated.rowcount > 0
@@ -170,8 +174,9 @@ class OutboxWorker:
 
             updated = self._conn.execute(
                 "UPDATE outbox_events SET status='retry_scheduled', next_attempt_at=? "
-                "WHERE event_id=? AND lease_owner=? AND lease_version=? AND status='leased'",
-                (next_at_int, lease.event_id, worker_id, lease.lease_version),
+                "WHERE event_id=? AND lease_owner=? AND lease_version=? AND status='leased' "
+                "AND (lease_expires_at IS NULL OR lease_expires_at > ?)",
+                (next_at_int, lease.event_id, worker_id, lease.lease_version, now_int),
             )
             uow.commit()
             return updated.rowcount > 0
