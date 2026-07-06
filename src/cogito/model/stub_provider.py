@@ -18,6 +18,7 @@ from cogito.model.contracts import (
     ModelResponse,
     Usage,
 )
+from cogito.model.errors import ModelProviderError
 from cogito.model.provider import HealthStatus, ModelProvider
 
 
@@ -62,7 +63,7 @@ class StubModelProvider(ModelProvider):
         self._call_index += 1
 
         if scenario.error:
-            raise _ProviderError(scenario.error)
+            raise ModelProviderError(scenario.error)
 
         parts = (
             ContentPart(part_type="text", text=scenario.response_text),
@@ -101,11 +102,3 @@ class StubModelProvider(ModelProvider):
         """重置调用计数和接收请求记录。"""
         self._call_index = 0
         self.received_requests.clear()
-
-
-class _ProviderError(Exception):
-    """Provider 内部错误包装，用于在测试中区分。"""
-
-    def __init__(self, envelope: ErrorEnvelope) -> None:
-        self.envelope = envelope
-        super().__init__(envelope.message)

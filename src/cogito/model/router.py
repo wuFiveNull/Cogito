@@ -22,6 +22,7 @@ from cogito.model.contracts import (
     ModelRequest,
     ModelResponse,
 )
+from cogito.model.errors import ModelProviderError
 from cogito.model.provider import ModelProvider
 from cogito.store.time_utils import epoch_ms
 
@@ -132,7 +133,7 @@ class ModelRouter:
                     )
                     return response
 
-                except _ProviderError as e:
+                except ModelProviderError as e:
                     call_latency = epoch_ms(datetime.now(UTC)) - started_at
 
                     # 记录错误
@@ -184,7 +185,3 @@ class ModelRouter:
         chain = [provider_id]
         chain.extend(self._fallbacks.get(provider_id, []))
         return chain
-
-
-# 避免循环导入
-from cogito.model.stub_provider import _ProviderError  # noqa: E402

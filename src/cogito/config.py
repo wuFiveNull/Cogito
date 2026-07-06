@@ -46,6 +46,14 @@ WORKER_FIELDS = frozenset({
     "recovery_grace_period_seconds",
 })
 
+MODEL_FIELDS = frozenset({
+    "provider", "api_key", "base_url", "timeout_seconds",
+})
+
+AGENT_FIELDS = frozenset({
+    "system_prompt", "max_output_tokens", "context_memory_window", "tools",
+})
+
 # ── 已声明但尚未定型节（内容暂不校验，仅允许存在）──
 _TOLERATED_SECTIONS = frozenset({
     "channel", "channels", "conversation", "agent", "model", "llm", "memory",
@@ -225,6 +233,108 @@ class WorkerConfig:
 
 
 # =============================================================================
+# Model 配置
+# =============================================================================
+
+
+@dataclass
+class ModelEndpointConfig:
+    """单个模型端点的配置。
+
+    Plan 01 / 五、模型配置：兼容当前 [llm] 配置。
+    """
+    model: str = ""
+    api_key: str = ""
+    base_url: str = ""
+    timeout_seconds: int = 60
+
+    def __repr__(self) -> str:
+        masked_key = _mask_sensitive("api_key", self.api_key)
+        return (
+            f"ModelEndpointConfig(model={self.model!r}, "
+            f"api_key={masked_key}, "
+            f"base_url={self.base_url!r})"
+        )
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> ModelEndpointConfig:
+        _check_unknown(raw, MODEL_FIELDS, "model")
+        return cls(
+            model=str(raw.get("model", "")),
+            api_key=str(raw.get("api_key", "")),
+            base_url=str(raw.get("base_url", "")),
+            timeout_seconds=int(raw.get("timeout_seconds", 60)),
+        )
+
+    def is_configured(self) -> bool:
+        """检查是否已配置（至少需要 model、api_key 和 base_url）。"""
+        return bool(self.model and self.api_key and self.base_url)
+
+
+@dataclass
+class ModelConfig:
+    """模型配置 —— 提供者选择与模型选择。"""
+    provider: str = "openai_compat"
+    main: ModelEndpointConfig = field(default_factory=ModelEndpointConfig)
+
+    def __repr__(self) -> str:
+        return f"ModelConfig(provider={self.provider!r}, main={self.main!r})"
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> ModelConfig:
+        main_raw = dict(raw.get("main", {}))
+        return cls(
+            provider=str(raw.get("provider", "openai_compat")),
+            main=ModelEndpointConfig._from_raw(main_raw),
+        )
+
+
+# =============================================================================
+# Agent 配置
+# =============================================================================
+
+
+@dataclass
+class AgentConfig:
+    """Agent 运行时配置。
+
+    兼容规则：
+    - agent.max_tokens → max_output_tokens
+    - agent.context.memory_window → context_memory_window
+    - agent.tools 保留但不启用
+    """
+    system_prompt: str = "You are Cogito, a helpful AI assistant."
+    max_output_tokens: int = 4096
+    context_memory_window: int = 50
+    tools: list[str] = field(default_factory=list)
+
+    def __repr__(self) -> str:
+        return (
+            f"AgentConfig(system_prompt={self.system_prompt[:40]!r}..., "
+            f"max_output_tokens={self.max_output_tokens}, "
+            f"memory_window={self.context_memory_window})"
+        )
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> AgentConfig:
+        # 兼容：agent.max_tokens → max_output_tokens
+        max_tokens = raw.get("max_output_tokens") or raw.get("max_tokens")
+        context_raw = raw.get("context", {})
+        memory_window = (
+            context_raw.get("memory_window")
+            if isinstance(context_raw, dict)
+            else None
+        ) or raw.get("context_memory_window", 50)
+
+        return cls(
+            system_prompt=str(raw.get("system_prompt", "You are Cogito, a helpful AI assistant.")),
+            max_output_tokens=int(max_tokens) if max_tokens is not None else 4096,
+            context_memory_window=int(memory_window),
+            tools=list(raw.get("tools", [])),
+        )
+
+
+# =============================================================================
 # 顶层配置
 # =============================================================================
 
@@ -238,13 +348,16 @@ class Config:
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     interaction: InteractionConfig = field(default_factory=InteractionConfig)
     worker: WorkerConfig = field(default_factory=WorkerConfig)
+    model: ModelConfig = field(default_factory=ModelConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
 
     def __repr__(self) -> str:
         return (
             f"Config(workspace_path={self.workspace_path!r}, "
             f"storage={self.storage!r}, "
             f"runtime={self.runtime!r}, "
-            f"interaction={self.interaction!r})"
+            f"interaction={self.interaction!r}, "
+            f"model={self.model!r})"
         )
 
     # ── 路径快捷方法 ──
@@ -345,10 +458,18 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
         worker_raw = resolved.get("worker", {})
         worker = WorkerConfig._from_raw(worker_raw) if worker_raw else WorkerConfig()
 
+        model_raw = resolved.get("model", {}) or resolved.get("llm", {})
+        model = ModelConfig._from_raw(model_raw)
+
+        agent_raw = resolved.get("agent", {})
+        agent = AgentConfig._from_raw(agent_raw)
+
         return cls(
             workspace_path=str(resolved.get("workspace_path", ".workspace")),
             storage=storage,
             runtime=runtime,
             interaction=interaction,
             worker=worker,
+            model=model,
+            agent=agent,
         )

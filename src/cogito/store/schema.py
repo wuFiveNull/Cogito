@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS endpoints (
     channel_instance_id TEXT NOT NULL DEFAULT '',
     platform_account_id TEXT NOT NULL DEFAULT '',
     principal_id        TEXT NOT NULL REFERENCES principals(principal_id),
+    endpoint_ref        TEXT NOT NULL DEFAULT '',
     capabilities        TEXT NOT NULL DEFAULT '[]',
     status              TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled','deleted')),
     verified_at         TEXT
@@ -34,6 +35,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     conversation_id            TEXT PRIMARY KEY,
     conversation_endpoint_id   TEXT NOT NULL DEFAULT '',
     platform_conversation_id   TEXT NOT NULL DEFAULT '',
+    conversation_endpoint_ref  TEXT NOT NULL DEFAULT '',
     conversation_type          TEXT NOT NULL DEFAULT 'private' CHECK(conversation_type IN ('private','group','thread','web')),
     principal_scope            TEXT NOT NULL DEFAULT '',
     context_partition_policy   TEXT NOT NULL DEFAULT 'isolated' CHECK(context_partition_policy IN ('isolated','shared_profile')),
@@ -66,6 +68,8 @@ CREATE TABLE IF NOT EXISTS messages (
     receive_sequence     INTEGER NOT NULL DEFAULT 0,
     trust_label          TEXT NOT NULL DEFAULT 'unverified',
     raw_payload_ref      TEXT,
+    reply_route_json     TEXT NOT NULL DEFAULT '{}',
+    capability_snapshot_json TEXT NOT NULL DEFAULT '{}',
     created_at           TEXT NOT NULL,
     UNIQUE(conversation_id, receive_sequence)
 );

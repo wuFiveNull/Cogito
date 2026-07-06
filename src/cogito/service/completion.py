@@ -2,7 +2,7 @@
 
 单事务完成：
 1. 创建 Assistant Message + ContentPart
-2. 创建 Delivery（待发送）
+2. 创建 Delivery（待发送，target_snapshot 来自输入消息 reply_route）
 3. 写入 TurnCompleted Event Outbox
 4. 标记 RunAttempt → succeeded
 5. 标记 Turn → completed
@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from cogito.domain.events import DomainEvent
@@ -30,6 +31,74 @@ class TurnCompletionService:
         self._conn = conn
         self._clock = clock or ProductionClock()
         self._dispatcher = Dispatcher(conn, clock=self._clock)
+
+    def complete_reply(
+        self,
+        turn: Turn,
+        attempt: RunAttempt,
+        reply_text: str,
+    ) -> str | None:
+        """正式回复完成入口。
+
+        自行读取输入 Message 的 conversation_id、session_id、reply_route、capability_snapshot。
+        事务内完成：Assistant Message + ContentPart + Delivery + Outbox + Attempt + Turn。
+
+        Args:
+            turn: 当前 Turn。
+            attempt: 当前 RunAttempt。
+            reply_text: 模型回复文本。
+
+        Returns: final_message_id 或 None（失败时回滚）。
+        """
+        # 读取输入消息的元数据
+        input_row = self._conn.execute(
+            "SELECT conversation_id, session_id, sender_principal_id, sender_endpoint_id, "
+            "reply_route_json, capability_snapshot_json "
+            "FROM messages WHERE message_id=?",
+            (turn.input_message_id,),
+        ).fetchone()
+
+        conversation_id = input_row["conversation_id"] if input_row else ""
+        session_id = input_row["session_id"] if input_row else (turn.session_id or "")
+        sender_principal_id = input_row["sender_principal_id"] if input_row else ""
+        sender_endpoint_id = input_row["sender_endpoint_id"] if input_row else ""
+        reply_route_json = input_row["reply_route_json"] if input_row else "{}"
+        capability_snapshot_json = input_row["capability_snapshot_json"] if input_row else "{}"
+
+        reply_route = json.loads(reply_route_json) if isinstance(reply_route_json, str) else reply_route_json
+        capability_snapshot = json.loads(capability_snapshot_json) if isinstance(capability_snapshot_json, str) else capability_snapshot_json
+
+        # 构建 Assistant Message
+        parts = [
+            ContentPart(
+                content_type="text",
+                inline_data=reply_text,
+            ),
+        ]
+
+        message = Message(
+            conversation_id=conversation_id,
+            session_id=session_id or turn.session_id,
+            sender_principal_id=sender_principal_id or "cogito",
+            sender_endpoint_id=sender_endpoint_id or "cogito",
+            role=MessageRole.assistant,
+            direction=MessageDirection.outbound,
+            content_parts=parts,
+            reply_to_message_id=turn.input_message_id,
+            reply_route=reply_route,
+            capability_snapshot=capability_snapshot,
+        )
+
+        return self._complete(
+            turn=turn,
+            attempt=attempt,
+            message=message,
+            channel_type="",
+            delivery_target="",
+            endpoint_id=sender_endpoint_id,
+            principal_id=sender_principal_id,
+            reply_route=reply_route,
+        )
 
     def complete_with_stub(
         self,
@@ -85,8 +154,13 @@ class TurnCompletionService:
         delivery_target: str,
         endpoint_id: str,
         principal_id: str,
+        reply_route: dict | None = None,
     ) -> str | None:
-        """原子完成事务。"""
+        """原子完成事务。
+
+        Args:
+            reply_route: 来自输入消息的回复路由快照。创建 Delivery 时使用。
+        """
         with UnitOfWork(self._conn) as uow:
             # 1. 写入 Assistant Message
             uow.message.insert(message)
@@ -95,16 +169,19 @@ class TurnCompletionService:
 
             # 2. 写入 Delivery（pending 状态，等待 Outbox Worker 发送）
             delivery_id = ""
-            if delivery_target:
+            if delivery_target or reply_route:
                 import uuid
                 delivery_id = uuid.uuid4().hex
                 now_int = epoch_ms(self._clock.now())
+                target = {"target": delivery_target} if delivery_target else {}
+                if reply_route:
+                    target["reply_route"] = reply_route
                 self._conn.execute(
                     "INSERT INTO deliveries (delivery_id, target_snapshot, content_ref, "
                     "status, idempotency_key, created_at) "
                     "VALUES (?, ?, ?, ?, ?, ?)",
                     (delivery_id,
-                     '{"target": "' + delivery_target + '"}',
+                     json.dumps(target),
                      message.message_id,
                      "pending",
                      f"delivery_{message.message_id}",
@@ -130,7 +207,7 @@ class TurnCompletionService:
             ))
 
             # 4. 完成 Turn + Attempt（在同一 UoW 中，不自成事务）
-            self._dispatcher.complete(
+            ok = self._dispatcher.complete(
                 turn.turn_id,
                 attempt.attempt_id,
                 turn.version,
@@ -139,6 +216,9 @@ class TurnCompletionService:
                 final_message_id=message.message_id,
                 _uow=uow,
             )
+            if not ok:
+                # Turn 或 Attempt 状态已变化（版本不匹配、Lease 过期等）
+                return None  # 不提交，回滚 Message/Delivery
 
             uow.commit()
 

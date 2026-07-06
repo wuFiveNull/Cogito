@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime
 
@@ -145,7 +146,7 @@ class EndpointRepository:
     def find(self, endpoint_id: str) -> Endpoint | None:
         row = self._conn.execute(
             "SELECT endpoint_id, channel_type, channel_instance_id, platform_account_id, "
-            "principal_id, capabilities, status, verified_at "
+            "principal_id, endpoint_ref, capabilities, status, verified_at "
             "FROM endpoints WHERE endpoint_id=?",
             (endpoint_id,),
         ).fetchone()
@@ -157,6 +158,7 @@ class EndpointRepository:
             channel_instance_id=row["channel_instance_id"],
             platform_account_id=row["platform_account_id"],
             principal_id=row["principal_id"],
+            endpoint_ref=row["endpoint_ref"],
             status=EndpointStatus(row["status"]),
             verified_at=datetime.fromisoformat(row["verified_at"]) if row["verified_at"] else None,
         )
@@ -164,10 +166,11 @@ class EndpointRepository:
     def insert(self, endpoint: Endpoint) -> None:
         self._conn.execute(
             "INSERT INTO endpoints (endpoint_id, channel_type, channel_instance_id, "
-            "platform_account_id, principal_id, capabilities, status, verified_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "platform_account_id, principal_id, endpoint_ref, capabilities, status, verified_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (endpoint.endpoint_id, endpoint.channel_type, endpoint.channel_instance_id,
              endpoint.platform_account_id, endpoint.principal_id,
+             endpoint.endpoint_ref,
              "[]", endpoint.status.value, None),
         )
 
@@ -176,7 +179,7 @@ class EndpointRepository:
     ) -> Endpoint | None:
         row = self._conn.execute(
             "SELECT endpoint_id, channel_type, channel_instance_id, platform_account_id, "
-            "principal_id, capabilities, status, verified_at "
+            "principal_id, endpoint_ref, capabilities, status, verified_at "
             "FROM endpoints WHERE channel_instance_id=? AND platform_account_id=?",
             (channel_instance_id, platform_account_id),
         ).fetchone()
@@ -188,6 +191,30 @@ class EndpointRepository:
             channel_instance_id=row["channel_instance_id"],
             platform_account_id=row["platform_account_id"],
             principal_id=row["principal_id"],
+            endpoint_ref=row["endpoint_ref"],
+            status=EndpointStatus(row["status"]),
+            verified_at=datetime.fromisoformat(row["verified_at"]) if row["verified_at"] else None,
+        )
+
+    def find_by_ref(self, endpoint_ref: str) -> Endpoint | None:
+        """通过 endpoint_ref 查找端点。"""
+        if not endpoint_ref:
+            return None
+        row = self._conn.execute(
+            "SELECT endpoint_id, channel_type, channel_instance_id, platform_account_id, "
+            "principal_id, endpoint_ref, capabilities, status, verified_at "
+            "FROM endpoints WHERE endpoint_ref=?",
+            (endpoint_ref,),
+        ).fetchone()
+        if row is None:
+            return None
+        return Endpoint(
+            endpoint_id=row["endpoint_id"],
+            channel_type=row["channel_type"],
+            channel_instance_id=row["channel_instance_id"],
+            platform_account_id=row["platform_account_id"],
+            principal_id=row["principal_id"],
+            endpoint_ref=row["endpoint_ref"],
             status=EndpointStatus(row["status"]),
             verified_at=datetime.fromisoformat(row["verified_at"]) if row["verified_at"] else None,
         )
@@ -205,7 +232,7 @@ class ConversationRepository:
     def find(self, conversation_id: str) -> Conversation | None:
         row = self._conn.execute(
             "SELECT conversation_id, conversation_endpoint_id, platform_conversation_id, "
-            "conversation_type, principal_scope, context_partition_policy, status "
+            "conversation_endpoint_ref, conversation_type, principal_scope, context_partition_policy, status "
             "FROM conversations WHERE conversation_id=?",
             (conversation_id,),
         ).fetchone()
@@ -215,6 +242,7 @@ class ConversationRepository:
             conversation_id=row["conversation_id"],
             conversation_endpoint_id=row["conversation_endpoint_id"],
             platform_conversation_id=row["platform_conversation_id"],
+            conversation_endpoint_ref=row["conversation_endpoint_ref"],
             conversation_type=ConversationType(row["conversation_type"]),
             principal_scope=row["principal_scope"],
             context_partition_policy=ContextPartitionPolicy(row["context_partition_policy"]),
@@ -224,11 +252,13 @@ class ConversationRepository:
     def insert(self, conversation: Conversation) -> None:
         self._conn.execute(
             "INSERT INTO conversations (conversation_id, conversation_endpoint_id, "
-            "platform_conversation_id, conversation_type, principal_scope, "
+            "platform_conversation_id, conversation_endpoint_ref, conversation_type, principal_scope, "
             "context_partition_policy, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (conversation.conversation_id, conversation.conversation_endpoint_id,
-             conversation.platform_conversation_id, conversation.conversation_type.value,
+             conversation.platform_conversation_id,
+             conversation.conversation_endpoint_ref,
+             conversation.conversation_type.value,
              conversation.principal_scope, conversation.context_partition_policy.value,
              conversation.status.value),
         )
@@ -238,7 +268,7 @@ class ConversationRepository:
     ) -> Conversation | None:
         row = self._conn.execute(
             "SELECT conversation_id, conversation_endpoint_id, platform_conversation_id, "
-            "conversation_type, principal_scope, context_partition_policy, status "
+            "conversation_endpoint_ref, conversation_type, principal_scope, context_partition_policy, status "
             "FROM conversations "
             "WHERE conversation_endpoint_id=? AND platform_conversation_id=?",
             (conversation_endpoint_id, platform_conversation_id),
@@ -249,6 +279,30 @@ class ConversationRepository:
             conversation_id=row["conversation_id"],
             conversation_endpoint_id=row["conversation_endpoint_id"],
             platform_conversation_id=row["platform_conversation_id"],
+            conversation_endpoint_ref=row["conversation_endpoint_ref"],
+            conversation_type=ConversationType(row["conversation_type"]),
+            principal_scope=row["principal_scope"],
+            context_partition_policy=ContextPartitionPolicy(row["context_partition_policy"]),
+            status=ConversationStatus(row["status"]),
+        )
+
+    def find_by_endpoint_ref(self, conversation_endpoint_ref: str) -> Conversation | None:
+        """通过 conversation_endpoint_ref 查找对话。"""
+        if not conversation_endpoint_ref:
+            return None
+        row = self._conn.execute(
+            "SELECT conversation_id, conversation_endpoint_id, platform_conversation_id, "
+            "conversation_endpoint_ref, conversation_type, principal_scope, context_partition_policy, status "
+            "FROM conversations WHERE conversation_endpoint_ref=?",
+            (conversation_endpoint_ref,),
+        ).fetchone()
+        if row is None:
+            return None
+        return Conversation(
+            conversation_id=row["conversation_id"],
+            conversation_endpoint_id=row["conversation_endpoint_id"],
+            platform_conversation_id=row["platform_conversation_id"],
+            conversation_endpoint_ref=row["conversation_endpoint_ref"],
             conversation_type=ConversationType(row["conversation_type"]),
             principal_scope=row["principal_scope"],
             context_partition_policy=ContextPartitionPolicy(row["context_partition_policy"]),
@@ -337,14 +391,17 @@ class MessageRepository:
             "INSERT INTO messages (message_id, conversation_id, session_id, "
             "sender_principal_id, sender_endpoint_id, role, direction, "
             "reply_to_message_id, platform_message_id, current_revision_no, "
-            "receive_sequence, trust_label, raw_payload_ref, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "receive_sequence, trust_label, raw_payload_ref, "
+            "reply_route_json, capability_snapshot_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (message.message_id, message.conversation_id, message.session_id,
              message.sender_principal_id, message.sender_endpoint_id,
              message.role.value, message.direction.value,
              message.reply_to_message_id, message.platform_message_id,
              message.current_revision_no, message.receive_sequence,
              message.trust_label, message.raw_payload_ref,
+             json.dumps(message.reply_route),
+             json.dumps(message.capability_snapshot),
              message.created_at.isoformat()),
         )
 

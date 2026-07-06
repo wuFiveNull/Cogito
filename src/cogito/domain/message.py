@@ -92,6 +92,8 @@ class Message:
         receive_sequence: int = 0,
         trust_label: str = "unverified",
         raw_payload_ref: str | None = None,
+        reply_route: dict[str, Any] | None = None,
+        capability_snapshot: dict[str, Any] | None = None,
         created_at: datetime | None = None,
         deleted_at: datetime | None = None,
     ) -> None:
@@ -109,6 +111,8 @@ class Message:
         self.receive_sequence = receive_sequence
         self.trust_label = trust_label
         self.raw_payload_ref = raw_payload_ref
+        self.reply_route = reply_route or {}
+        self.capability_snapshot = capability_snapshot or {}
         self.created_at = created_at or datetime.now(UTC)
         self.deleted_at = deleted_at
 
@@ -128,6 +132,8 @@ class Message:
             "receive_sequence": self.receive_sequence,
             "trust_label": self.trust_label,
             "raw_payload_ref": self.raw_payload_ref,
+            "reply_route": self.reply_route,
+            "capability_snapshot": self.capability_snapshot,
             "created_at": self.created_at.isoformat(),
             "deleted_at": self.deleted_at.isoformat() if self.deleted_at else None,
         }
@@ -149,6 +155,8 @@ class Message:
             receive_sequence=data.get("receive_sequence", 0),
             trust_label=data.get("trust_label", "unverified"),
             raw_payload_ref=data.get("raw_payload_ref"),
+            reply_route=data.get("reply_route"),
+            capability_snapshot=data.get("capability_snapshot"),
             created_at=datetime.fromisoformat(data["created_at"]),
             deleted_at=datetime.fromisoformat(data["deleted_at"]) if data.get("deleted_at") else None,
         )

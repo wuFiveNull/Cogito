@@ -42,7 +42,7 @@ class TestMigration:
         migrate(empty_db)  # second run
         rows = empty_db.execute("SELECT version FROM _schema_version ORDER BY version").fetchall()
         versions = [r[0] for r in rows]
-        assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9]  # all migration versions applied exactly once
+        assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]  # all migration versions applied exactly once
 
     def test_unique_constraints(self, in_memory_db):
         """Test a sample unique constraint."""
@@ -125,7 +125,7 @@ class TestMigrationUpgrade:
                 "SELECT version FROM _schema_version"
             ).fetchall()
         }
-        assert versions == {1, 2, 3, 4, 5, 6, 7, 8, 9}
+        assert versions == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
 
     def test_fresh_install_versions(self, empty_db):
         """Fresh migration from scratch applies all versions."""
@@ -137,7 +137,7 @@ class TestMigrationUpgrade:
                 "SELECT version FROM _schema_version"
             ).fetchall()
         }
-        assert versions == {1, 2, 3, 4, 5, 6, 7, 8, 9}
+        assert versions == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
 
     def test_turn_schema_v2(self, in_memory_db):
         """Verify v2 schema constraints."""

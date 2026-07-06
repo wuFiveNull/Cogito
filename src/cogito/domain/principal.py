@@ -81,6 +81,7 @@ class Endpoint:
         channel_instance_id: str = "",
         platform_account_id: str = "",
         principal_id: str = "",
+        endpoint_ref: str = "",
         capabilities: list[str] | None = None,
         status: EndpointStatus = EndpointStatus.active,
         verified_at: datetime | None = None,
@@ -90,6 +91,7 @@ class Endpoint:
         self.channel_instance_id = channel_instance_id
         self.platform_account_id = platform_account_id
         self.principal_id = principal_id
+        self.endpoint_ref = endpoint_ref
         self.capabilities = capabilities or []
         self.status = EndpointStatus(status)
         self.verified_at = verified_at
@@ -101,6 +103,7 @@ class Endpoint:
             "channel_instance_id": self.channel_instance_id,
             "platform_account_id": self.platform_account_id,
             "principal_id": self.principal_id,
+            "endpoint_ref": self.endpoint_ref,
             "capabilities": self.capabilities,
             "status": self.status.value,
             "verified_at": self.verified_at.isoformat() if self.verified_at else None,
@@ -114,6 +117,7 @@ class Endpoint:
             channel_instance_id=data["channel_instance_id"],
             platform_account_id=data["platform_account_id"],
             principal_id=data["principal_id"],
+            endpoint_ref=data.get("endpoint_ref", ""),
             capabilities=data.get("capabilities", []),
             status=EndpointStatus(data["status"]),
             verified_at=datetime.fromisoformat(data["verified_at"]) if data.get("verified_at") else None,

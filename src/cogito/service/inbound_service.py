@@ -5,7 +5,7 @@
 2. Inbox 幂等去重
 3. 解析/创建 Principal、Endpoint、Conversation、Session
 4. 分配 receive_sequence
-5. 写入 Message 与 ContentPart
+5. 写入 Message 与 ContentPart（含回复路由快照）
 6. 创建 Turn（accepted → queued）
 7. 写入 Event Outbox
 8. 返回 message_id、turn_id
@@ -77,9 +77,18 @@ class InboundService:
                 )
 
             # ── 2. 解析/创建 Principal ──
-            principal = uow.principal.find_by_platform(
-                envelope.channel_type, envelope.platform_sender_id,
-            )
+            # 优先使用 sender_endpoint_ref，兼容旧测试：Ref 为空时退回现有 platform ID
+            principal: Principal | None = None
+            if envelope.sender_endpoint_ref:
+                endpoint_by_ref = uow.endpoint.find_by_ref(envelope.sender_endpoint_ref)
+                if endpoint_by_ref is not None:
+                    principal = uow.principal.find(endpoint_by_ref.principal_id)
+
+            if principal is None:
+                principal = uow.principal.find_by_platform(
+                    envelope.channel_type, envelope.platform_sender_id,
+                )
+
             if principal is None:
                 principal = Principal(
                     principal_type=PrincipalType.external_user,
@@ -88,27 +97,43 @@ class InboundService:
                 uow.principal.insert(principal)
 
             # ── 3. 解析/创建 Endpoint ──
-            endpoint = uow.endpoint.find_by_platform(
-                envelope.channel_instance_id, envelope.platform_sender_id,
-            )
+            endpoint: Endpoint | None = None
+            if envelope.sender_endpoint_ref:
+                endpoint = uow.endpoint.find_by_ref(envelope.sender_endpoint_ref)
+
+            if endpoint is None:
+                endpoint = uow.endpoint.find_by_platform(
+                    envelope.channel_instance_id, envelope.platform_sender_id,
+                )
+
             if endpoint is None:
                 endpoint = Endpoint(
                     channel_type=envelope.channel_type,
                     channel_instance_id=envelope.channel_instance_id,
                     platform_account_id=envelope.platform_sender_id,
                     principal_id=principal.principal_id,
+                    endpoint_ref=envelope.sender_endpoint_ref or "",
                     status=EndpointStatus.active,
                 )
                 uow.endpoint.insert(endpoint)
 
             # ── 4. 解析/创建 Conversation ──
-            conversation = uow.conversation.find_by_platform(
-                endpoint.endpoint_id, envelope.platform_conversation_id,
-            )
+            conversation: Conversation | None = None
+            if envelope.conversation_endpoint_ref:
+                conversation = uow.conversation.find_by_endpoint_ref(
+                    envelope.conversation_endpoint_ref,
+                )
+
+            if conversation is None:
+                conversation = uow.conversation.find_by_platform(
+                    endpoint.endpoint_id, envelope.platform_conversation_id,
+                )
+
             if conversation is None:
                 conversation = Conversation(
                     conversation_endpoint_id=endpoint.endpoint_id,
                     platform_conversation_id=envelope.platform_conversation_id,
+                    conversation_endpoint_ref=envelope.conversation_endpoint_ref or "",
                     conversation_type=ConversationType.private,
                     context_partition_policy=ContextPartitionPolicy.isolated,
                     status=ConversationStatus.active,
@@ -156,6 +181,8 @@ class InboundService:
                 platform_message_id=platform_event_id,
                 receive_sequence=seq,
                 trust_label=envelope.trust_label,
+                reply_route=envelope.reply_route.to_dict() if envelope.reply_route else None,
+                capability_snapshot=envelope.capability_snapshot or None,
                 created_at=datetime.fromisoformat(envelope.received_at) if envelope.received_at else None,
             )
             uow.message.insert(message)

@@ -40,6 +40,7 @@ class Conversation:
         conversation_id: str | None = None,
         conversation_endpoint_id: str = "",
         platform_conversation_id: str = "",
+        conversation_endpoint_ref: str = "",
         conversation_type: ConversationType = ConversationType.private,
         principal_scope: str = "",
         context_partition_policy: ContextPartitionPolicy = ContextPartitionPolicy.isolated,
@@ -48,6 +49,7 @@ class Conversation:
         self.conversation_id = conversation_id or uuid.uuid4().hex
         self.conversation_endpoint_id = conversation_endpoint_id
         self.platform_conversation_id = platform_conversation_id
+        self.conversation_endpoint_ref = conversation_endpoint_ref
         self.conversation_type = ConversationType(conversation_type)
         self.principal_scope = principal_scope
         self.context_partition_policy = ContextPartitionPolicy(context_partition_policy)
@@ -58,6 +60,7 @@ class Conversation:
             "conversation_id": self.conversation_id,
             "conversation_endpoint_id": self.conversation_endpoint_id,
             "platform_conversation_id": self.platform_conversation_id,
+            "conversation_endpoint_ref": self.conversation_endpoint_ref,
             "conversation_type": self.conversation_type.value,
             "principal_scope": self.principal_scope,
             "context_partition_policy": self.context_partition_policy.value,
@@ -70,6 +73,7 @@ class Conversation:
             conversation_id=data["conversation_id"],
             conversation_endpoint_id=data["conversation_endpoint_id"],
             platform_conversation_id=data["platform_conversation_id"],
+            conversation_endpoint_ref=data.get("conversation_endpoint_ref", ""),
             conversation_type=ConversationType(data["conversation_type"]),
             principal_scope=data.get("principal_scope", ""),
             context_partition_policy=ContextPartitionPolicy(data.get("context_partition_policy", "isolated")),

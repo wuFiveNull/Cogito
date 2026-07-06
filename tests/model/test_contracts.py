@@ -256,7 +256,7 @@ class TestStubProvider:
 
     @pytest.mark.asyncio
     async def test_error_scenario(self):
-        from cogito.model.stub_provider import _ProviderError
+        from cogito.model.errors import ModelProviderError
 
         provider = StubModelProvider([
             StubScenario(error=ErrorEnvelope(
@@ -266,7 +266,7 @@ class TestStubProvider:
             )),
         ])
 
-        with pytest.raises(_ProviderError) as exc:
+        with pytest.raises(ModelProviderError) as exc:
             await provider.generate(ModelRequest())
         assert exc.value.envelope.category == ErrorCategory.rate_limit
 
