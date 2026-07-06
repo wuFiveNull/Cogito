@@ -93,6 +93,7 @@ class Message:
         trust_label: str = "unverified",
         raw_payload_ref: str | None = None,
         created_at: datetime | None = None,
+        deleted_at: datetime | None = None,
     ) -> None:
         self.message_id = message_id or uuid.uuid4().hex
         self.conversation_id = conversation_id
@@ -109,6 +110,7 @@ class Message:
         self.trust_label = trust_label
         self.raw_payload_ref = raw_payload_ref
         self.created_at = created_at or datetime.now(timezone.utc)
+        self.deleted_at = deleted_at
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -127,6 +129,7 @@ class Message:
             "trust_label": self.trust_label,
             "raw_payload_ref": self.raw_payload_ref,
             "created_at": self.created_at.isoformat(),
+            "deleted_at": self.deleted_at.isoformat() if self.deleted_at else None,
         }
 
     @classmethod
@@ -147,6 +150,7 @@ class Message:
             trust_label=data.get("trust_label", "unverified"),
             raw_payload_ref=data.get("raw_payload_ref"),
             created_at=datetime.fromisoformat(data["created_at"]),
+            deleted_at=datetime.fromisoformat(data["deleted_at"]) if data.get("deleted_at") else None,
         )
 
     def __eq__(self, other: object) -> bool:
@@ -156,3 +160,67 @@ class Message:
 
     def __repr__(self) -> str:
         return f"Message({self.message_id}, {self.role}, seq={self.receive_sequence})"
+
+
+class MessageRevision:
+    """平台编辑事件产生的消息修订版本。
+
+    同一消息的 revision_no 单调递增。
+    迟到旧编辑可保存为历史，但不回退 current_revision_no。
+    """
+
+    def __init__(
+        self,
+        message_id: str = "",
+        revision_no: int = 1,
+        platform_edit_id: str = "",
+        platform_revision: int = 0,
+        edited_at: datetime | None = None,
+        observed_at: datetime | None = None,
+        editor_endpoint_id: str = "",
+        content_parts: list[ContentPart] | None = None,
+        raw_payload_ref: str | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
+        self.message_id = message_id
+        self.revision_no = revision_no
+        self.platform_edit_id = platform_edit_id
+        self.platform_revision = platform_revision
+        self.edited_at = edited_at
+        self.observed_at = observed_at
+        self.editor_endpoint_id = editor_endpoint_id
+        self.content_parts = content_parts or []
+        self.raw_payload_ref = raw_payload_ref
+        self.created_at = created_at or datetime.now(timezone.utc)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "message_id": self.message_id,
+            "revision_no": self.revision_no,
+            "platform_edit_id": self.platform_edit_id,
+            "platform_revision": self.platform_revision,
+            "edited_at": self.edited_at.isoformat() if self.edited_at else None,
+            "observed_at": self.observed_at.isoformat() if self.observed_at else None,
+            "editor_endpoint_id": self.editor_endpoint_id,
+            "content_parts": [p.to_dict() for p in self.content_parts],
+            "raw_payload_ref": self.raw_payload_ref,
+            "created_at": self.created_at.isoformat(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> MessageRevision:
+        return cls(
+            message_id=data["message_id"],
+            revision_no=data["revision_no"],
+            platform_edit_id=data.get("platform_edit_id", ""),
+            platform_revision=data.get("platform_revision", 0),
+            edited_at=datetime.fromisoformat(data["edited_at"]) if data.get("edited_at") else None,
+            observed_at=datetime.fromisoformat(data["observed_at"]) if data.get("observed_at") else None,
+            editor_endpoint_id=data.get("editor_endpoint_id", ""),
+            content_parts=[ContentPart.from_dict(p) for p in data.get("content_parts", [])],
+            raw_payload_ref=data.get("raw_payload_ref"),
+            created_at=datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None,
+        )
+
+    def __repr__(self) -> str:
+        return f"MessageRevision({self.message_id}, rev={self.revision_no})"

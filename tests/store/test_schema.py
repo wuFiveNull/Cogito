@@ -8,12 +8,13 @@ class TestMigration:
         """After migration, all core tables should exist."""
         tables = [
             "principals", "endpoints", "conversations", "sessions",
-            "messages", "content_parts", "inbound_inbox",
+            "messages", "content_parts", "message_revisions", "inbound_inbox",
             "turns", "run_attempts", "turn_checkpoints",
             "tasks", "task_attempts",
             "deliveries", "delivery_attempts",
             "tool_calls", "approvals",
             "memory_items",
+            "events", "outbox_events",
             "payload_objects", "audit_records",
             "_schema_version",
         ]
@@ -40,7 +41,7 @@ class TestMigration:
         migrate(empty_db)  # second run
         rows = empty_db.execute("SELECT version FROM _schema_version ORDER BY version").fetchall()
         versions = [r[0] for r in rows]
-        assert versions == [1, 2]  # both migration versions applied exactly once
+        assert versions == [1, 2, 3]  # all migration versions applied exactly once
 
     def test_unique_constraints(self, in_memory_db):
         """Test a sample unique constraint."""
@@ -125,7 +126,7 @@ class TestMigrationUpgrade:
                 "SELECT version FROM _schema_version"
             ).fetchall()
         }
-        assert versions == {1, 2}
+        assert versions == {1, 2, 3}
 
     def test_fresh_install_versions(self, empty_db):
         """Fresh migration from scratch applies all versions."""
@@ -137,7 +138,7 @@ class TestMigrationUpgrade:
                 "SELECT version FROM _schema_version"
             ).fetchall()
         }
-        assert versions == {1, 2}
+        assert versions == {1, 2, 3}
 
     def test_turn_schema_v2(self, in_memory_db):
         """Verify v2 schema constraints."""
@@ -183,3 +184,128 @@ class TestConfigIntegrity:
                 assert "version" in cols
             finally:
                 conn.close()
+
+
+class TestOutboxSchema:
+    """Tests for outbox_events and events tables (migration 0003)."""
+
+    def test_outbox_event_insert_and_query(self, in_memory_db):
+        in_memory_db.execute(
+            "INSERT INTO outbox_events (event_id, event_type, aggregate_type, aggregate_id, aggregate_version, created_at) "
+            "VALUES ('e1', 'TurnAccepted', 'turn', 't1', 1, '2026-01-01T00:00:00Z')"
+        )
+        row = in_memory_db.execute(
+            "SELECT status, event_type FROM outbox_events WHERE event_id='e1'"
+        ).fetchone()
+        assert row["status"] == "pending"
+        assert row["event_type"] == "TurnAccepted"
+
+    def test_outbox_status_constraint(self, in_memory_db):
+        """Invalid status should be rejected."""
+        with pytest.raises(Exception):
+            in_memory_db.execute(
+                "INSERT INTO outbox_events (event_id, status, created_at) VALUES ('e1', 'invalid_status', '2026-01-01T00:00:00Z')"
+            )
+
+    def test_outbox_aggregate_unique(self, in_memory_db):
+        """events table enforces (aggregate_type, aggregate_id, aggregate_version) unique."""
+        in_memory_db.execute(
+            "INSERT INTO events (event_id, event_type, aggregate_type, aggregate_id, aggregate_version, occurred_at) "
+            "VALUES ('e1', 'TurnAccepted', 'turn', 't1', 1, '2026-01-01T00:00:00Z')"
+        )
+        with pytest.raises(Exception):
+            in_memory_db.execute(
+                "INSERT INTO events (event_id, event_type, aggregate_type, aggregate_id, aggregate_version, occurred_at) "
+                "VALUES ('e2', 'TurnAccepted', 'turn', 't1', 1, '2026-01-01T00:00:00Z')"
+            )
+
+    def test_outbox_leased_transition(self, in_memory_db):
+        in_memory_db.execute(
+            "INSERT INTO outbox_events (event_id, status, created_at) VALUES ('e1', 'pending', '2026-01-01T00:00:00Z')"
+        )
+        in_memory_db.execute(
+            "UPDATE outbox_events SET status='leased', lease_owner='worker1' WHERE event_id='e1'"
+        )
+        row = in_memory_db.execute(
+            "SELECT status, lease_owner FROM outbox_events WHERE event_id='e1'"
+        ).fetchone()
+        assert row["status"] == "leased"
+        assert row["lease_owner"] == "worker1"
+
+
+class TestMessageRevisionSchema:
+    """Tests for message_revisions table (migration 0003)."""
+
+    def test_insert_revision(self, in_memory_db):
+        in_memory_db.execute(
+            "INSERT INTO conversations (conversation_id, conversation_type, platform_conversation_id) "
+            "VALUES ('c1', 'private', 'plat_c1')"
+        )
+        in_memory_db.execute(
+            "INSERT INTO messages (message_id, conversation_id, role, created_at) "
+            "VALUES ('m1', 'c1', 'user', '2026-01-01T00:00:00Z')"
+        )
+        in_memory_db.execute(
+            "INSERT INTO message_revisions (message_id, revision_no, platform_edit_id, created_at) "
+            "VALUES ('m1', 1, 'pe1', '2026-01-01T00:00:00Z')"
+        )
+        row = in_memory_db.execute(
+            "SELECT revision_no, platform_edit_id FROM message_revisions WHERE message_id='m1'"
+        ).fetchone()
+        assert row["revision_no"] == 1
+        assert row["platform_edit_id"] == "pe1"
+
+    def test_revision_unique_per_message(self, in_memory_db):
+        in_memory_db.execute(
+            "INSERT INTO conversations (conversation_id, conversation_type, platform_conversation_id) "
+            "VALUES ('c1', 'private', 'plat_c1')"
+        )
+        in_memory_db.execute(
+            "INSERT INTO messages (message_id, conversation_id, role, created_at) "
+            "VALUES ('m1', 'c1', 'user', '2026-01-01T00:00:00Z')"
+        )
+        in_memory_db.execute(
+            "INSERT INTO message_revisions (message_id, revision_no, platform_edit_id, created_at) "
+            "VALUES ('m1', 1, 'pe1', '2026-01-01T00:00:00Z')"
+        )
+        with pytest.raises(Exception):
+            in_memory_db.execute(
+                "INSERT INTO message_revisions (message_id, revision_no, platform_edit_id, created_at) "
+                "VALUES ('m1', 1, 'pe2', '2026-01-01T00:00:00Z')"
+            )
+
+    def test_revision_fk_enforced(self, in_memory_db):
+        """FK to messages should be enforced."""
+        with pytest.raises(Exception):
+            in_memory_db.execute(
+                "INSERT INTO message_revisions (message_id, revision_no, created_at) "
+                "VALUES ('nonexistent', 1, '2026-01-01T00:00:00Z')"
+            )
+
+
+class TestMessageDeletedAt:
+    """Tests for messages.deleted_at column (migration 0003)."""
+
+    def test_deleted_at_default_null(self, in_memory_db):
+        row = in_memory_db.execute(
+            "PRAGMA table_info(messages)"
+        ).fetchall()
+        cols = {r[1] for r in row}
+        assert "deleted_at" in cols
+
+    def test_soft_delete_and_query(self, in_memory_db):
+        in_memory_db.execute(
+            "INSERT INTO conversations (conversation_id, conversation_type, platform_conversation_id) "
+            "VALUES ('c1', 'private', 'plat_c1')"
+        )
+        in_memory_db.execute(
+            "INSERT INTO messages (message_id, conversation_id, role, created_at) "
+            "VALUES ('m1', 'c1', 'user', '2026-01-01T00:00:00Z')"
+        )
+        in_memory_db.execute(
+            "UPDATE messages SET deleted_at = '2026-06-01T00:00:00Z' WHERE message_id='m1'"
+        )
+        row = in_memory_db.execute(
+            "SELECT deleted_at FROM messages WHERE message_id='m1'"
+        ).fetchone()
+        assert row["deleted_at"] is not None

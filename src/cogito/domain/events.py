@@ -26,6 +26,7 @@ class DomainEvent:
         schema_version: str = "1.0",
         correlation_id: str = "",
         causation_id: str = "",
+        origin: str = "system",
     ) -> None:
         self.event_id = event_id or uuid.uuid4().hex
         self.event_type = event_type
@@ -41,6 +42,7 @@ class DomainEvent:
         self.schema_version = schema_version
         self.correlation_id = correlation_id
         self.causation_id = causation_id
+        self.origin = origin
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -58,6 +60,7 @@ class DomainEvent:
             "schema_version": self.schema_version,
             "correlation_id": self.correlation_id,
             "causation_id": self.causation_id,
+            "origin": self.origin,
         }
 
     @classmethod
@@ -77,6 +80,7 @@ class DomainEvent:
             schema_version=data.get("schema_version", "1.0"),
             correlation_id=data.get("correlation_id", ""),
             causation_id=data.get("causation_id", ""),
+            origin=data.get("origin", "system"),
         )
 
     def __eq__(self, other: object) -> bool:
