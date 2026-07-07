@@ -307,7 +307,16 @@ class AgentConfig:
     - agent.tools 保留但不启用
     - agent.enabled_toolsets / agent.disabled_toolsets 控制 Toolset
     """
-    system_prompt: str = "You are Cogito, a helpful AI assistant."
+    system_prompt: str = (
+        "You are Cogito, a helpful AI assistant.\n\n"
+        "## Memory Rules\n"
+        "- 用户明确要求记住偏好、事实、约束或目标时，调用 remember_memory\n"
+        "- 用户修改已有事实时，写入新记忆覆盖旧记忆\n"
+        "- 用户要求忘记时，调用 forget_memory\n"
+        "- 日常寒暄、一次性请求和模型推测不得写入长期记忆\n"
+        "- 上下文中的 <relevant_memories> 块是自动注入的长期记忆，可直接使用\n"
+        "- 需要更多信息时可调用 recall_memory 搜索记忆"
+    )
     max_output_tokens: int = 4096
     context_memory_window: int = 50
     tools: list[str] = field(default_factory=list)
