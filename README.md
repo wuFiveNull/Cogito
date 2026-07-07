@@ -32,12 +32,16 @@ python -m cogito run --interactive
 
 ```powershell
 python -m pytest -q                  # 应全绿
-python -m ruff check                  # 应全绿（legacy channel/* 已在 pyproject.toml 隔离，门禁不含之）
+python -m pytest -q tests/channel/test_qq_onebot_contract.py  # QQ OneBot Contract
+python -m pytest -q tests/integration/test_qq_onebot_e2e.py   # QQ OneBot E2E
+python -m ruff check                  # 应全绿（legacy channel/adapters|vendor|clients|utils 已隔离）
 python -m compileall -q src           # 应无输出（全绿）
 python -m cogito config check --config config.example.toml
+python -m cogito config check --config tests/fixtures/config/qq_onebot.toml  # QQ enabled
 ```
 
-当前基线：**660 tests passed in ~32s**，Ruff 0 errors，compileall clean。
+当前基线：**678 tests passed in ~34s**，Ruff 0 errors，compileall clean。
+QQ OneBot Channel: **experimental**（自动门禁通过，真实 QQ 人工验收待完成）。
 
 ## 实现状态
 
@@ -46,13 +50,13 @@ python -m cogito config check --config config.example.toml
 | 领域实体 | ✅ 完成 | Principal、Conversation、Session、Message、Turn、Task、Delivery、MemoryItem |
 | 状态机 | ✅ 完成 | Turn、RunAttempt、Task、Delivery、Memory 状态转移验证 |
 | 异常层次 | ✅ 完成 | 实体未找到、非法状态转移、并发冲突、幂等违反、Lease 错误等 |
-| SQLite 存储 | ✅ 完成 | Schema、连接管理、编号 Migration（v1-v19），INTEGER epoch ms 时间 |
+| SQLite 存储 | ✅ 完成 | Schema、连接管理、编号 Migration（v1-v20），INTEGER epoch ms 时间 |
 | CLI | ✅ 完成 | `config check / init / info / run / memory`；共享 `--config` 参数 |
 | 严格配置 | ✅ 完成 | ConfigError 单行可操作提示、secret 不泄漏、未知字段显式报错 |
 | 入站事务 | ✅ 完成 | accept_inbound（Inbox 幂等、Conversation/Session/Message/Turn/Outbox 同事务） |
 | Dispatcher + Lane | ✅ 完成 | 按优先级 DESC 调度、Lane 隔离、原子 RunAttempt 创建 |
 | Outbox / Delivery Worker | ✅ 完成 | Lease/版本校验、指数退避重试、dead-letter |
-| Delivery Receipt | ✅ 完成 | confirmed/uncertain/reconciled 持久凭证 |
+| Delivery Receipt | ✅ 完成 | confirmed/uncertain/reconciled/temporary/permanent 持久凭证 |
 | Recovery Service | ✅ 完成 | 过期 Lease 回收（sending→unknown）、stale Turn 清理；启动时自动运行 |
 | Stub / OpenAI-compatible Provider | ✅ 完成 | 非流式调用；缺省配置自动降级为 Stub |
 | Model Router | ✅ 完成 | 按角色路由、有限重试、fallback |
@@ -65,6 +69,7 @@ python -m cogito config check --config config.example.toml
 | Terminal Channel | ✅ 完成 | 可运行基线（本 PR） |
 | RuntimeApplication | ✅ 完成 | 统一装配根（SQLite + migrate + recover + Provider + Runner） |
 | 外部 Channel Adapter | ⚠️ 实验性 | 17 个 Adapter 已注册但未经逐个可导入性验证 |
+| QQ OneBot Channel | ⚠️ experimental | aiocqhttp 1.4.4 + LangBot Facade，自动 E2E 通过，真实 QQ 待验收 |
 | 流式 Channel 投递 | ⏳ 待实现 | 后续 PR |
 | LangBot Bridge | ⏳ 待实现 | 后续 PR |
 | Web Dashboard / API | ⏳ 待实现 | 后续 PR |
@@ -99,8 +104,27 @@ src/cogito/
 ├── capability/        # Tool Registry / Executor / MCP
 ├── tools/             # 内置工具
 ├── inbound/           # 入站 Dispatcher
-└── channel/           # 外部 Channel Adapter（实验性，未纳入 lint 门禁）
+└── channel/
+    ├── base.py        # ChannelAdapter Protocol + 结构化 DTO
+    ├── drivers/       # 纳入 lint 门禁的 Adapter（qq_onebot、onebot_models）
+    ├── adapters/      # Legacy Adapter（隔离 lint）
+    └── vendor/        # LangBot 兼容层（隔离 lint）
 ```
+
+### QQ OneBot 11 渠道
+
+需要 `pip install -e ".[qq]"` 安装 aiocqhttp 1.4.4。配置示例见 `config.example.toml` [channel.qq] 节。
+
+```powershell
+pip install -e ".[qq]"
+# 复制并编辑配置
+Copy-Item config.example.toml config.toml
+# 取消 [channel.qq] 注释、填入你的 QQ owner 和 access_token
+python -m cogito config check
+python -m cogito run
+```
+
+详见 `docs/operations/qq-onebot.md`。
 
 ## 项目配置
 
