@@ -515,14 +515,19 @@ class AiocqhttpAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter)
         else:
             self.bot = aiocqhttp.CQHttp()
 
-    async def send_message(self, target_type: str, target_id: str, message: platform_message.MessageChain):
+    async def send_message(self, target_type: str, target_id: str, message: platform_message.MessageChain) -> Any:
+        """发送消息到 QQ。
+
+        QQ-ONEBOT-E2E-01: 返回 send_group_msg/send_private_msg 的原始结果
+        （OneBot 11 规范返回 {"message_id": int}）。
+        """
         # Check if message contains a Forward component
         forward_msg = message.get_first(platform_message.Forward)
         if forward_msg:
             if target_type == 'group':
                 # Send as merged forward message via OneBot API
                 await self._send_forward_message(int(target_id), forward_msg)
-                return
+                return None
             else:
                 await self.logger.warning(
                     f'Forward message is only supported for group targets, got target_type={target_type}. Falling through to normal send.'
@@ -531,9 +536,10 @@ class AiocqhttpAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter)
         aiocq_msg = (await AiocqhttpMessageConverter.yiri2target(message))[0]
 
         if target_type == 'group':
-            await self.bot.send_group_msg(group_id=int(target_id), message=aiocq_msg)
+            return await self.bot.send_group_msg(group_id=int(target_id), message=aiocq_msg)
         elif target_type == 'person':
-            await self.bot.send_private_msg(user_id=int(target_id), message=aiocq_msg)
+            return await self.bot.send_private_msg(user_id=int(target_id), message=aiocq_msg)
+        return None
 
     async def _send_forward_message(self, group_id: int, forward: platform_message.Forward):
         """Send a merged forward message to a group using NapCat extended API."""

@@ -2,6 +2,9 @@
 
 数据流:
     Inbound → ChannelEnvelope → InboundService.accept()
+
+QQ-ONEBOT-E2E-01: 传递 metadata 中的 conversation_type / trust_label / capability，
+让 InboundService 可以正确建模群聊 vs 私聊。
 """
 from __future__ import annotations
 
@@ -41,11 +44,14 @@ class InboundDispatcher:
             for c in inbound.content
         ]
 
+        # 优先从 metadata 取 target_endpoint_ref（QQ OneBot Facade 提供稳定 ID）
+        metadata_target_ref = inbound.metadata.get("target_endpoint_ref")
+
         reply_route = ReplyRoute(
             channel_instance_id=inbound.channel_instance_id,
             platform_conversation_id=inbound.conversation_id,
             reply_to_platform_message_id=inbound.route.source_message_id,
-            target_endpoint_ref=(
+            target_endpoint_ref=metadata_target_ref or (
                 f"{inbound.channel}:{inbound.sender_id}"
                 if inbound.sender_id else ""
             ),
@@ -61,9 +67,19 @@ class InboundDispatcher:
             ),
             content_parts=content_parts,
             reply_route=reply_route,
-            sender_endpoint_ref=f"{inbound.channel}:{inbound.sender_id}",
-            conversation_endpoint_ref=f"{inbound.channel}:{inbound.conversation_id}",
+            sender_endpoint_ref=inbound.metadata.get(
+                "sender_endpoint_ref",
+                f"{inbound.channel}:{inbound.sender_id}",
+            ),
+            conversation_endpoint_ref=inbound.metadata.get(
+                "conversation_endpoint_ref",
+                f"{inbound.channel}:{inbound.conversation_id}",
+            ),
             capability_snapshot=inbound.metadata.get("capability", {}),
             trust_label=inbound.metadata.get("trust_label", "unverified"),
+            metadata={
+                "conversation_type": inbound.metadata.get("conversation_type", "private"),
+                "group_id": inbound.metadata.get("group_id", ""),
+            },
             received_at=datetime.now(UTC).isoformat(),
         )

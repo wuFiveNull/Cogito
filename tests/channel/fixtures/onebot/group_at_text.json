@@ -1,0 +1,30 @@
+{
+  "description": "OneBot 11 group message event with @Bot (群聊 @Bot 消息)",
+  "post_type": "message",
+  "message_type": "group",
+  "sub_type": "normal",
+  "message_id": 100002,
+  "group_id": 88888888,
+  "user_id": 12345678,
+  "anonymous": null,
+  "message": [
+    {"type": "at", "data": {"qq": "99999999"}},
+    {"type": "text", "data": {"text": " 你好"}}
+  ],
+  "raw_message": "[CQ:at,qq=99999999] 你好",
+  "font": 0,
+  "sender": {
+    "user_id": 12345678,
+    "nickname": "TestUser",
+    "card": "TestCard",
+    "sex": "unknown",
+    "age": 0,
+    "area": "",
+    "level": "1",
+    "role": "member",
+    "title": ""
+  },
+  "time": 1700000100,
+  "self_id": 99999999,
+  "message_format": "array"
+}

@@ -130,11 +130,14 @@ class InboundService:
                 )
 
             if conversation is None:
+                # QQ-ONEBOT-E2E-01: 支持群聊/私聊类型区分
+                conv_type_str = envelope.metadata.get("conversation_type", "private") if envelope.metadata else "private"
+                conversation_type = ConversationType.group if conv_type_str == "group" else ConversationType.private
                 conversation = Conversation(
                     conversation_endpoint_id=endpoint.endpoint_id,
                     platform_conversation_id=envelope.platform_conversation_id,
                     conversation_endpoint_ref=envelope.conversation_endpoint_ref or "",
-                    conversation_type=ConversationType.private,
+                    conversation_type=conversation_type,
                     context_partition_policy=ContextPartitionPolicy.isolated,
                     status=ConversationStatus.active,
                 )

@@ -31,10 +31,14 @@ dev = ["pytest>=8", "ruff>=0.11", "pytest-asyncio>=0.24"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-# Plan 02 / RUNNABLE-BASELINE-01 — Legacy Channel Adapters 隔离出 lint 门禁。
-# 退出隔离条件: (a) 首个真实 Channel 开发时逐个可导入性验证; (b) 17 个 adapter 与 Core 解耦。
+# Legacy Channel 隔离 Ruff 门禁 —— 精确排除旧 adapters / vendor / clients。
+# channel/base.py、bridge.py、drivers/*、manager.py、registry.py 纳入门禁。
+# 退出隔离条件: (a) 17 个 adapter 与 Core 解耦; (b) vendor 不再被复用。
 exclude = [
-    "src/cogito/channel",
+    "src/cogito/channel/adapters",
+    "src/cogito/channel/vendor",
+    "src/cogito/channel/clients",
+    "src/cogito/channel/utils",
 ]
 
 [tool.ruff.lint]
