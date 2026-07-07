@@ -33,6 +33,7 @@ from cogito.runtime.context import ContextBuilder
 from cogito.runtime.loop import AgentLoop, LoopResultType
 from cogito.service.completion import TurnCompletionService
 from cogito.service.dispatcher import Dispatcher
+from cogito.service.memory_extractor import MemoryExtractor
 from cogito.service.memory_service import SqliteMemoryService
 from cogito.store.time_utils import epoch_ms
 
@@ -96,6 +97,9 @@ class AgentRunner:
             toolsets=toolsets,
         )
         self._completion = TurnCompletionService(conn, clock=self._clock)
+        self._memory_extractor = MemoryExtractor(
+            conn, memory_service, router,
+        ) if memory_service and router else None
 
     async def run_once(self, worker_id: str, cancel_flag: callable | None = None) -> RunOutcome:
         """领取一个 Turn 并执行完成。
@@ -171,6 +175,13 @@ class AgentRunner:
             )
             if message_id is None:
                 return RunOutcome.failed
+
+            # Turn 成功后异步触发记忆提取（不阻塞当前回复）
+            if self._memory_extractor and context.principal_id:
+                asyncio.ensure_future(
+                    self._run_extraction(context, turn)
+                )
+
             return RunOutcome.completed
         except Exception as e:
             _LOGGER.exception("complete_reply failed: %s", e)
@@ -275,6 +286,24 @@ class AgentRunner:
                 clock=self._clock.now(),
             )
         except Exception:
+            pass
+
+    async def _run_extraction(self, context, turn) -> None:
+        """Turn 完成后异步运行记忆提取。失败不阻塞后续流程。"""
+        try:
+            # 加载当前 session 的消息（用于提取）
+            messages = self._context_builder._load_session_messages(
+                context.session_id,
+            )
+            if not messages:
+                return
+
+            await self._memory_extractor.extract_from_messages(
+                messages,
+                principal_id=context.principal_id,
+            )
+        except Exception:
+            # 提取失败不影响主流程
             pass
 
 
