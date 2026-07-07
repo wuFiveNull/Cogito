@@ -168,7 +168,6 @@ class QQOfficialAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter
         self._inbound_handler = handler
 
     async def send(self, conversation_id: str, message: str, reply_to_message_id: str | None = None) -> dict:
-        platform_message.MessageChain([platform_message.Plain(text=message)])
         await self.bot.send_private_text_msg(conversation_id, message, reply_to_message_id or "")
         return {"platform_message_id": ""}
 
@@ -282,12 +281,9 @@ class QQOfficialAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter
             pass
 
     def _ensure_listeners(self):
-        """注册 LangBot 事件监听器，确保 Cogito _inbound_handler 被调用。"""
+        """注册 QQ 消息事件监听器，收到消息后转发到 Cogito _inbound_handler。"""
         import logging
         _log = logging.getLogger("cogito.channel.qqofficial")
-
-        if not self._inbound_handler:
-            _log.warning("QQ适配器: _inbound_handler 未设置，消息不会转发到 Cogito")
 
         # 好友消息
         self.bot.on_message("C2C_MESSAGE_CREATE")(self._make_qq_handler("C2C_MESSAGE_CREATE", _log))
