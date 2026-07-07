@@ -87,7 +87,7 @@ class TestNewWorkspaceStubInteractive:
             conn = _open_db(db_path)
             try:
                 row = conn.execute("SELECT MAX(version) FROM _schema_version").fetchone()
-                assert row[0] == 19, f"expected migration v19, got v{row[0]}"
+                assert row[0] == 20, f"expected migration v20, got v{row[0]}"
 
                 # FK check must be empty (done by migration runner)
                 fk = conn.execute("PRAGMA foreign_key_check").fetchall()
@@ -229,7 +229,7 @@ class TestNewWorkspaceStubInteractive:
                 v = conn.execute(
                     "SELECT MAX(version) FROM _schema_version"
                 ).fetchone()[0]
-                assert v == 19
+                assert v == 20
             finally:
                 conn.close()
 

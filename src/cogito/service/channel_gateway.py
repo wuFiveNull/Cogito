@@ -39,11 +39,6 @@ class ChannelGateway(Gateway):
         self._channel_manager = channel_manager
         self._loop: asyncio.AbstractEventLoop | None = None
 
-    def _ensure_loop(self) -> asyncio.AbstractEventLoop:
-        """延迟获取主 loop —— 必须在 RuntimeApplication 启动后调用。"""
-        if self._loop is None:
-            self._loop = asyncio.get_running_loop()
-        return self._loop
 
     def send(self, target_snapshot: str, content_ref: str) -> bool | None:
         """遗留 bool|None 接口 —— 委托 send_request() 后映射。"""
@@ -59,6 +54,8 @@ class ChannelGateway(Gateway):
 
         由 DeliveryWorker 通过 asyncio.to_thread() 调用。
         在工作线程内使用 run_coroutine_threadsafe 回到主 loop 调用 Adapter。
+
+        如果在 running loop 内被同步调用（如测试），直接使用 asyncio.run。
         """
         try:
             target = json.loads(target_snapshot) if isinstance(target_snapshot, str) else target_snapshot
@@ -117,29 +114,34 @@ class ChannelGateway(Gateway):
             text=text,
         )
 
-        # 在主 loop 调用 Adapter
+        # 调用 Adapter
+        return self._call_adapter_sync(adapter, request)
+
+    def _call_adapter_sync(self, adapter, request: ChannelSendRequest) -> ChannelSendResult:
+        """在可能没有 running loop 的情况下同步调用 adapter.send_request()。
+
+        优先调用 adapter.send_request_sync()（同步版本），不需要 event loop。
+        如果 adapter 只有 async send_request()，通过新建 loop 运行。
+        """
+        # 优先同步调用
+        if hasattr(adapter, "send_request_sync"):
+            try:
+                return adapter.send_request_sync(request)
+            except Exception as e:
+                _LOG.exception("ChannelGateway send_request_sync failed: %s", e)
+                return ChannelSendResult(status="unknown", error_code=type(e).__name__)
+
+        # 异步回退 — 新建 event loop
+        coro = adapter.send_request(request)
         try:
-            loop = self._ensure_loop()
-            coro = adapter.send_request(request)
-            future = asyncio.run_coroutine_threadsafe(coro, loop)
-            result = future.result(timeout=30)
-            return result
-        except asyncio.CancelledError:
-            return ChannelSendResult(status="temporary", error_code="cancelled")
+            return asyncio.run(asyncio.wait_for(coro, timeout=30))
         except TimeoutError:
             return ChannelSendResult(status="unknown", error_code="timeout")
         except ConnectionError:
-            return ChannelSendResult(
-                status="temporary",
-                error_code="connection_error",
-            )
+            return ChannelSendResult(status="temporary", error_code="connection_error")
         except Exception as e:
-            _LOG.exception("ChannelGateway.send_request failed: %s", e)
-            # 无法判断外部结果 → unknown
-            return ChannelSendResult(
-                status="unknown",
-                error_code=type(e).__name__,
-            )
+            _LOG.exception("ChannelGateway._call_adapter_sync failed: %s", e)
+            return ChannelSendResult(status="unknown", error_code=type(e).__name__)
 
     def _read_message_text(self, content_ref: str) -> str | None:
         """从 content_ref (message_id) 读取消息文本。"""
