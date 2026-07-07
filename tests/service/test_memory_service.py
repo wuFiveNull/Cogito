@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 import pytest
 
 from cogito.domain.memory import MemoryItem, MemoryKind, MemoryStatus
-from cogito.service.memory_service import MemoryService, _make_canonical_key
+from cogito.service.memory_service import SqliteMemoryService, _make_canonical_key
 from cogito.store.migration import migrate
 
 
@@ -31,8 +31,8 @@ def db() -> sqlite3.Connection:
 
 
 @pytest.fixture
-def service(db) -> MemoryService:
-    return MemoryService(db)
+def service(db) -> SqliteMemoryService:
+    return SqliteMemoryService(db)
 
 
 class TestMemoryService:

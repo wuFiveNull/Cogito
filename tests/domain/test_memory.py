@@ -197,3 +197,19 @@ class TestMemoryItem:
         assert m.importance == 0.0
         m2 = MemoryItem(importance=1.0)
         assert m2.importance == 1.0
+
+    def test_confidence_clamped_low(self):
+        m = MemoryItem(confidence=-0.5)
+        assert m.confidence == 0.0
+
+    def test_confidence_clamped_high(self):
+        m = MemoryItem(confidence=1.5)
+        assert m.confidence == 1.0
+
+    def test_importance_clamped_low(self):
+        m = MemoryItem(importance=-0.1)
+        assert m.importance == 0.0
+
+    def test_importance_clamped_high(self):
+        m = MemoryItem(importance=1.1)
+        assert m.importance == 1.0

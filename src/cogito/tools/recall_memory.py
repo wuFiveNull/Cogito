@@ -6,17 +6,17 @@
 from __future__ import annotations
 
 from cogito.capability.models import ToolContext, ToolDef
-from cogito.service.memory_service import MemoryService
+from cogito.service.memory_service import SqliteMemoryService
 from cogito.store.memory_repo import MemoryRepository
 
 TOOL_NAME = "recall_memory"
 
 # 在注册时通过闭包注入 repo/service
-_service: MemoryService | None = None
+_service: SqliteMemoryService | None = None
 _repo: MemoryRepository | None = None
 
 
-def _set_service(service: MemoryService) -> None:
+def _set_service(service: SqliteMemoryService) -> None:
     global _service, _repo
     _service = service
     _repo = None  # 优先使用 service
@@ -74,7 +74,7 @@ async def handler(args: dict, ctx: ToolContext) -> str:
 
 def create_tool_def(
     repo: MemoryRepository | None = None,
-    service: MemoryService | None = None,
+    service: SqliteMemoryService | None = None,
 ) -> ToolDef:
     """创建 recall_memory 工具定义。
 

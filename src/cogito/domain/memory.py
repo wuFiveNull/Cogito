@@ -117,8 +117,8 @@ class MemoryItem:
         self.source_type = source_type
         self.source_id = source_id
         self.explicitness = explicitness
-        self.confidence = confidence
-        self.importance = importance
+        self.confidence = self._validate_confidence(confidence)
+        self.importance = self._validate_importance(importance)
         self.confirmation_method = confirmation_method
         self.confirmed_by = confirmed_by
         self.confirmed_at = confirmed_at
@@ -227,6 +227,28 @@ class MemoryItem:
             f"MemoryItem({self.memory_id}, {self.kind}, {self.status}, "
             f"key={self.canonical_key!r})"
         )
+
+    @staticmethod
+    def _validate_confidence(value: float) -> float:
+        """校验并裁剪 confidence 范围 [0.0, 1.0]。
+        MEMORY-LIFECYCLE — 置信度必须在有效范围。
+        """
+        if value < 0.0:
+            return 0.0
+        if value > 1.0:
+            return 1.0
+        return value
+
+    @staticmethod
+    def _validate_importance(value: float) -> float:
+        """校验并裁剪 importance 范围 [0.0, 1.0]。
+        MEMORY-LIFECYCLE — 重要性必须在有效范围。
+        """
+        if value < 0.0:
+            return 0.0
+        if value > 1.0:
+            return 1.0
+        return value
 
 
 def _parse_dt(s: str) -> datetime | None:

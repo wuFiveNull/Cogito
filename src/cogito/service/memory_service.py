@@ -1,5 +1,7 @@
 """MemoryService — 长期记忆服务。
 
+包含 MemoryService Protocol 接口和 SqliteMemoryService 具体实现。
+
 MemoryService 是唯一拥有 Memory 写入行为的模块：
 - 通过 UnitOfWork 管理事务
 - 从 Turn/Input Message 推导 Principal 和来源
@@ -14,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from datetime import UTC, datetime
+from typing import Protocol
 
 from cogito.domain.memory import (
     MemoryItem,
@@ -40,15 +43,94 @@ def _make_canonical_key(
     return f"{principal_id}.{subject}.{predicate}"
 
 
-class MemoryService:
-    """长期记忆服务。
+class MemoryService(Protocol):
+    """Memory 生命周期管理接口（Protocol）。
 
-    连接 Repository 和业务逻辑的中间层。
+    DOMAIN-CONTRACTS / 1.13 MemoryItem
     """
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self._conn = conn
-        self._repo = MemoryRepository(conn)
+    def retrieve(
+        self,
+        principal_id: str,
+        query: str = "",
+        scope_type: str = "",
+        scope_id: str = "",
+        kinds: list[str] | None = None,
+        limit: int = 20,
+    ) -> list[MemoryItem]:
+        """检索有效记忆。"""
+        ...
+
+    def remember(
+        self,
+        kind: str,
+        subject: str,
+        predicate: str,
+        value: str,
+        principal_id: str,
+        scope_type: str = "",
+        scope_id: str = "",
+        scope: str = "",
+        source_type: str = "message",
+        source_id: str = "",
+        explicitness: str = "explicit_user_statement",
+        confidence: float = 1.0,
+        importance: float = 0.7,
+    ) -> MemoryItem:
+        """直接确认写入记忆。"""
+        ...
+
+    def get(self, memory_id: str) -> MemoryItem | None:
+        """按 ID 获取记忆。"""
+        ...
+
+    def forget(self, memory_id: str) -> bool:
+        """忘记一条记忆。"""
+        ...
+
+    def confirm(self, memory_id: str, confirmed_by: str = "") -> bool:
+        """确认候选记忆。"""
+        ...
+
+    def reject(self, memory_id: str) -> bool:
+        """拒绝候选记忆。"""
+        ...
+
+
+class SqliteMemoryService:
+    """SqliteMemoryService — SQLite 实现的长期记忆服务。
+
+    连接 Repository 和业务逻辑的中间层。
+    实现 MemoryService Protocol 定义的所有接口。
+
+    使用方式：
+        # 直接创建
+        service = SqliteMemoryService(conn)
+
+        # 通过 UnitOfWork
+        with UnitOfWork(conn) as uow:
+            service = uow.memory_service
+            service.remember(...)
+            uow.commit()
+    """
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection | None = None,
+        repo: MemoryRepository | None = None,
+    ) -> None:
+        """初始化。必须提供 conn 或 repo 中的一个。
+
+        Args:
+            conn: SQLite 连接（与 repo 二选一）
+            repo: MemoryRepository 实例（优先，与 conn 二选一）
+        """
+        if repo is not None:
+            self._repo = repo
+        elif conn is not None:
+            self._repo = MemoryRepository(conn)
+        else:
+            raise ValueError("Either conn or repo must be provided")
 
     # ── 写入 ──
 

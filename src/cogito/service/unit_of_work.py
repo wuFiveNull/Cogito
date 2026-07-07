@@ -9,6 +9,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
+from cogito.service.memory_service import SqliteMemoryService
 from cogito.store.memory_repo import MemoryRepository
 from cogito.store.repositories import (
     ConversationRepository,
@@ -47,6 +48,7 @@ class UnitOfWork:
         self._turn: TurnRepository | None = None
         self._outbox: OutboxRepository | None = None
         self._memory: MemoryRepository | None = None
+        self._memory_service: SqliteMemoryService | None = None
 
     @property
     def inbox(self) -> InboxRepository:
@@ -101,6 +103,13 @@ class UnitOfWork:
         if self._memory is None:
             self._memory = MemoryRepository(self._conn)
         return self._memory
+
+    @property
+    def memory_service(self) -> SqliteMemoryService:
+        """返回共享同一事务的 MemoryService。"""
+        if self._memory_service is None:
+            self._memory_service = SqliteMemoryService(repo=self.memory)
+        return self._memory_service
 
     # ── 事务边界 ──
 
