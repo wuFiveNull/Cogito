@@ -151,9 +151,64 @@ class RecoveryService:
                 uow.commit()
         return count
 
+    def recover_stale_tasks(self, clock: datetime | None = None) -> int:
+        """标记无有效执行权的 running Task/TaskAttempt 为 abandoned+queued。
+
+        与 recover_stale_turns 同款条件更新模式：
+        1. SELECT 出 attempt 的 lease_version + lease_expires_at
+        2. Attempt UPDATE 验证 lease_version + lease_expires_at 仍过期
+        3. 仅 Attempt rowcount > 0 才将 Task 回 queued
+        """
+        now_ms_val = epoch_ms(self._now(clock))
+
+        with UnitOfWork(self._conn) as uow:
+            # 查 running Task 及其当前 running 的 Attempt
+            rows = self._conn.execute("""
+                SELECT t.task_id,
+                       a.task_attempt_id AS attempt_id,
+                       a.lease_version, a.lease_expires_at
+                FROM tasks t
+                JOIN task_attempts a ON a.task_id = t.task_id
+                WHERE t.status = 'running'
+                  AND a.status = 'running'
+                  AND (
+                      a.lease_expires_at IS NULL
+                      OR a.lease_expires_at < ?
+                  )
+            """, (now_ms_val,)).fetchall()
+
+            count = 0
+            for row in rows:
+                # Step 1: 条件标记 Attempt 为 abandoned（验证 lease_version + 仍过期）
+                attempt_updated = self._conn.execute(
+                    "UPDATE task_attempts SET status='abandoned', "
+                    "  finished_at=?, lease_version=lease_version+1 "
+                    "WHERE task_attempt_id=? AND status='running' "
+                    "AND lease_version=? "
+                    "AND (lease_expires_at IS NULL OR lease_expires_at = ?)",
+                    (now_ms_val, row["attempt_id"],
+                     row["lease_version"], row["lease_expires_at"]),
+                )
+                if attempt_updated.rowcount == 0:
+                    continue  # heartbeat 续期成功，跳过
+
+                # Step 2: Task 回 queued
+                self._conn.execute(
+                    "UPDATE tasks SET status='queued', lease_owner=NULL, "
+                    "  lease_expires_at=NULL "
+                    "WHERE task_id=? AND status='running'",
+                    (row["task_id"],),
+                )
+                count += 1
+
+            if count > 0:
+                uow.commit()
+        return count
+
     def recover_all(self, clock: datetime | None = None) -> dict[str, int]:
         return {
             "outbox_leases": self.recover_outbox_leases(clock),
             "delivery_leases": self.recover_delivery_leases(clock),
             "stale_turns": self.recover_stale_turns(clock),
+            "stale_tasks": self.recover_stale_tasks(clock),
         }

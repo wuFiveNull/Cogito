@@ -124,7 +124,15 @@ def _build_registry(ctx: TaskHandlerContext) -> TaskHandlerRegistry:
     registry.register("memory.extract", _handle_memory_extract)
     registry.register("memory.consolidate", _handle_memory_consolidate)
     registry.register("summary.generate", _handle_summary_generate)
+    registry.register("connector.poll", _handle_connector_poll)
     return registry
+
+
+def _handle_connector_poll(task: Task, ctx: TaskHandlerContext) -> str:
+    """connector.poll 的薄封装 —— 委托给 connector_handler 模块。"""
+    from cogito.service.connector_handler import handle_connector_poll
+
+    return handle_connector_poll(task, ctx)
 
 
 # ── memory.extract （B5: 替换 stub 为真实流程）──

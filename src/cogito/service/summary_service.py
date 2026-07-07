@@ -15,11 +15,54 @@ import sqlite3
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any  # noqa: F401  (re-exported for handler use)
 
 from cogito.service.unit_of_work import UnitOfWork
 
 _LOGGER = logging.getLogger(__name__)
+
+
+# ── RSS 条目摘要（步骤 5: 调用真实模型） ──
+
+RSS_SUMMARY_SYSTEM_PROMPT = (
+    "You are a content summarizer. Given an RSS feed entry, "
+    "produce a concise 1-2 sentence summary in Chinese. "
+    "Only summarize what is present in the content."
+)
+
+
+def summarize_item(
+    title: str,
+    content: str,
+    model_router: Any,
+    role: str = "main",
+    max_chars: int = 200,
+) -> str:
+    """为单条 RSS 条目生成摘要（调用真实模型，失败时降级为截取）。
+
+    仅当正文长度 > 100 字符才调用模型（省 token），否则取 feed 自带摘要。
+    """
+    text = content or title
+    if len(text) <= 100:
+        return text[:max_chars]
+
+    if model_router is None:
+        return text[:max_chars]
+
+    try:
+        from cogito.model.contracts import ModelRequest
+
+        messages = [
+            {"role": "system", "content": RSS_SUMMARY_SYSTEM_PROMPT},
+            {"role": "user", "content": f"Title: {title}\n\nContent: {text[:2000]}"},
+        ]
+        request = ModelRequest(messages=messages, max_output_tokens=200)
+        response = model_router.generate(request, model_role=role)
+        summary = (response.text or "").strip()
+        return summary[:max_chars] if summary else text[:max_chars]
+    except Exception as e:
+        _LOGGER.warning("summarize_item model call failed: %s", e)
+        return text[:max_chars]
 
 # 摘要模型输出格式
 SUMMARY_OUTPUT_SCHEMA = {
