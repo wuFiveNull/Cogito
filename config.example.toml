@@ -52,10 +52,19 @@ recovery_grace_period_seconds = 30
 # url = "http://localhost:3000/mcp"
 # transport = "sse"
 # enabled = true
-[model]
-# main = { provider = "openai_compat", model = "deepseek-chat", api_key = "sk-your-key-here", base_url = "https://api.deepseek.com/v1" }
-# 或通过环境变量引用：
-# main = { provider = "openai_compat", model = "gpt-4o", api_key = "${OPENAI_API_KEY}", base_url = "https://api.openai.com/v1" }
+# ── 模型配置 ──
+# 取消注释并填入你的配置：
+#
+# [model]
+# provider = "openai_compat"
+#
+# [model.main]
+# model = "deepseek-chat"
+# api_key = "sk-your-real-key"
+# base_url = "https://api.deepseek.com/v1"
+# timeout_seconds = 60
+#
+# 也支持环境变量引用：api_key = "${MY_API_KEY}"
 
 [channel]
 # gateway_url = "http://127.0.0.1:8080"
