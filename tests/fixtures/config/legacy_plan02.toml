@@ -1,0 +1,36 @@
+# Legacy Plan 02 风格配置：使用旧 [llm]/[channels] 别名。
+# 测试兼容别名正常工作，输出迁移提示。
+
+workspace_path = ".workspace"
+
+[storage]
+db_path = "data/cogito.db"
+enable_wal = true
+busy_timeout = 5000
+payload_dir = "data/payload"
+profile_name = "personal"
+
+[runtime]
+timezone = "Asia/Shanghai"
+
+[interaction]
+bind_host = "127.0.0.1"
+allow_remote = false
+
+[worker]
+concurrency = 1
+lease_duration_seconds = 300
+heartbeat_interval_seconds = 60
+
+[llm]
+provider = "openai_compat"
+
+[llm.main]
+model = "deepseek-chat"
+api_key = "sk-legacy-fake-key"
+base_url = "https://api.deepseek.com/v1"
+
+[channels.qqofficial]
+appid = "1904987567"
+secret = "fake-secret-legacy"
+token = "fake-token-legacy"

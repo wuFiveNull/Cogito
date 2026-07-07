@@ -31,6 +31,14 @@ KNOWN_SECTIONS = frozenset({
     "embedding",
 })
 
+# ── Channel 子节已知字段（[channel.*] 定型节） ──
+CHANNEL_QQ_FIELDS = frozenset({
+    "enabled", "driver", "instance_id", "host", "port", "access_token",
+    "owner_qq_ids", "allow_private", "allowed_group_ids",
+    "require_mention_in_group", "startup_timeout_seconds",
+})
+CHANNEL_TOP_FIELDS = frozenset({"gateway_url"})
+
 # 兼容别名映射：旧名 → 新名
 COMPAT_ALIASES: dict[str, str] = {
     "llm": "model",
@@ -81,7 +89,9 @@ _TOLERATED_SECTIONS = frozenset({
 
 
 # ── 需要脱敏的字段 ──
-SENSITIVE_FIELDS = frozenset({"api_key", "token", "secret"})
+SENSITIVE_FIELDS = frozenset({
+    "api_key", "token", "secret", "access_token",
+})
 
 
 class ConfigError(ValueError):
@@ -518,6 +528,114 @@ class CapabilityConfig:
 
 
 # =============================================================================
+# Channel 配置（QQ OneBot E2E-01 / PR 1）
+# =============================================================================
+
+
+@dataclass
+class QQOneBotConfig:
+    """QQ OneBot 11 渠道配置。
+
+    仅第一版：loopback only，allowlist 控制，不泄漏 token/QQ ID。
+    """
+    enabled: bool = False
+    driver: str = "aiocqhttp"
+    instance_id: str = "qq-main"
+    host: str = "127.0.0.1"
+    port: int = 8080
+    access_token: str = ""
+    owner_qq_ids: list[str] = field(default_factory=list)
+    allow_private: bool = True
+    allowed_group_ids: list[str] = field(default_factory=list)
+    require_mention_in_group: bool = True
+    startup_timeout_seconds: int = 15
+
+    def __repr__(self) -> str:
+        masked_token = _mask_sensitive("access_token", self.access_token)
+        return (
+            f"QQOneBotConfig(enabled={self.enabled}, instance_id={self.instance_id!r}, "
+            f"host={self.host!r}, port={self.port}, "
+            f"access_token={masked_token}, "
+            f"owner_qq_ids=<{len(self.owner_qq_ids)}>, "
+            f"allowed_group_ids=<{len(self.allowed_group_ids)}>)"
+        )
+
+    def validate(self) -> None:
+        """QQ 渠道启动前校验。"""
+        if not self.enabled:
+            return
+        if self.host not in ("127.0.0.1", "localhost"):
+            raise ConfigError(
+                section="channel.qq",
+                field="host",
+                reason=f"only loopback (127.0.0.1 / localhost) allowed in v1, got {self.host!r}",
+            )
+        if not (1 <= self.port <= 65535):
+            raise ConfigError(
+                section="channel.qq",
+                field="port",
+                reason=f"port must be 1-65535, got {self.port}",
+            )
+        if not self.instance_id:
+            raise ConfigError(
+                section="channel.qq",
+                field="instance_id",
+                reason="required when channel.qq.enabled=true",
+            )
+        if not self.access_token:
+            raise ConfigError(
+                section="channel.qq",
+                field="access_token",
+                reason="required when channel.qq.enabled=true",
+            )
+        if not self.owner_qq_ids:
+            raise ConfigError(
+                section="channel.qq",
+                field="owner_qq_ids",
+                reason="at least one owner_qq_ids required when channel.qq.enabled=true",
+            )
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> QQOneBotConfig:
+        _check_unknown(raw, CHANNEL_QQ_FIELDS, "channel.qq")
+        return cls(
+            enabled=bool(raw.get("enabled", False)),
+            driver=str(raw.get("driver", "aiocqhttp")),
+            instance_id=str(raw.get("instance_id", "qq-main")),
+            host=str(raw.get("host", "127.0.0.1")),
+            port=int(raw.get("port", 8080)),
+            access_token=str(raw.get("access_token", "")),
+            owner_qq_ids=list(raw.get("owner_qq_ids", [])),
+            allow_private=bool(raw.get("allow_private", True)),
+            allowed_group_ids=list(raw.get("allowed_group_ids", [])),
+            require_mention_in_group=bool(raw.get("require_mention_in_group", True)),
+            startup_timeout_seconds=int(raw.get("startup_timeout_seconds", 15)),
+        )
+
+
+@dataclass
+class ChannelConfig:
+    """全局 Channel 配置。
+
+    第一版只声明 [channel.qq]，未来增加其他 Channel。
+    """
+    qq: QQOneBotConfig = field(default_factory=QQOneBotConfig)
+    gateway_url: str = ""
+
+    def __repr__(self) -> str:
+        return f"ChannelConfig(qq={self.qq!r})"
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> ChannelConfig:
+        _check_unknown(raw, CHANNEL_TOP_FIELDS | {"qq"}, "(top-level channel)")
+        qq_raw = dict(raw.get("qq", {}))
+        return cls(
+            qq=QQOneBotConfig._from_raw(qq_raw),
+            gateway_url=str(raw.get("gateway_url", "")),
+        )
+
+
+# =============================================================================
 # 顶层配置
 # =============================================================================
 
@@ -535,6 +653,7 @@ class Config:
     agent: AgentConfig = field(default_factory=AgentConfig)
     capability: CapabilityConfig = field(default_factory=CapabilityConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
+    channel: ChannelConfig = field(default_factory=ChannelConfig)
 
     def __repr__(self) -> str:
         return (
@@ -675,6 +794,10 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
         embedding_raw = resolved.get("embedding", {})
         embedding = EmbeddingConfig._from_raw(embedding_raw) if embedding_raw else EmbeddingConfig()
 
+        # channel 节：解析但不默认校验 enabled 渠道
+        channel_raw = resolved.get("channel", {})
+        channel = ChannelConfig._from_raw(channel_raw) if channel_raw else ChannelConfig()
+
         return cls(
             workspace_path=str(resolved.get("workspace_path", ".workspace")),
             storage=storage,
@@ -685,4 +808,5 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
             agent=agent,
             capability=capability,
             embedding=embedding,
+            channel=channel,
         )

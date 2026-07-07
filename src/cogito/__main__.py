@@ -129,12 +129,18 @@ def _cmd_config(args: argparse.Namespace) -> None:
         # load() raises ConfigError on failure
         config = Config.load(config_path)
 
+        # QQ OneBot 校验（enabled 时才校验字段约束）
+        if config.channel.qq.enabled:
+            config.channel.qq.validate()
+
         model_label = "configured" if config.model.main.is_configured() else "stub"
         print(f"[ok] config:    {config_path}")
         print(f"[ok] profile:   {config.runtime.profile}")
         print(f"[ok] workspace: {Path(config.workspace_path).resolve()}")
         print(f"[ok] model:     {model_label}")
         print("[ok] schema:    valid")
+        if config.channel.qq.enabled:
+            print(f"[ok] channel.qq: enabled (instance={config.channel.qq.instance_id})")
         return
     else:
         raise SystemExit(f"Unknown config subcommand: {args.config_command}")

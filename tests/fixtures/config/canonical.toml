@@ -1,0 +1,37 @@
+# Canonical config fixture for CLI black-box tests.
+# 使用假 token / 假 QQ 号，不表示任何真实账户。
+
+workspace_path = ".workspace"
+
+[storage]
+db_path = "data/cogito.db"
+enable_wal = true
+busy_timeout = 5000
+payload_dir = "data/payload"
+
+[runtime]
+profile = "personal"
+timezone = "Asia/Shanghai"
+instance_id = ""
+
+[interaction]
+bind_host = "127.0.0.1"
+allow_remote = false
+validate_origin = true
+
+[worker]
+concurrency = 1
+lease_duration_seconds = 300
+heartbeat_interval_seconds = 60
+outbox_lease_ttl_seconds = 120
+delivery_lease_ttl_seconds = 120
+recovery_grace_period_seconds = 30
+
+[model]
+provider = "openai_compat"
+
+[model.main]
+model = "deepseek-chat"
+api_key = "sk-fake-canonical-key-0000"
+base_url = "https://api.deepseek.com/v1"
+timeout_seconds = 60

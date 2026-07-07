@@ -1,0 +1,50 @@
+# QQ OneBot config fixture — enabled QQ channel for tests.
+# 所有值均为假值；token 和 QQ 号只用于测试配置加载，不进入生产。
+
+workspace_path = ".workspace"
+
+[storage]
+db_path = "data/cogito.db"
+enable_wal = true
+busy_timeout = 5000
+payload_dir = "data/payload"
+
+[runtime]
+profile = "personal"
+timezone = "Asia/Shanghai"
+instance_id = ""
+
+[interaction]
+bind_host = "127.0.0.1"
+allow_remote = false
+validate_origin = true
+
+[worker]
+concurrency = 1
+lease_duration_seconds = 300
+heartbeat_interval_seconds = 60
+outbox_lease_ttl_seconds = 120
+delivery_lease_ttl_seconds = 120
+recovery_grace_period_seconds = 30
+
+[model]
+provider = "openai_compat"
+
+[model.main]
+model = "deepseek-chat"
+api_key = "sk-fake-qq-key-0000"
+base_url = "https://api.deepseek.com/v1"
+timeout_seconds = 60
+
+[channel.qq]
+enabled = true
+driver = "aiocqhttp"
+instance_id = "qq-main"
+host = "127.0.0.1"
+port = 8080
+access_token = "test-qq-access-token"
+owner_qq_ids = ["12345678"]
+allow_private = true
+allowed_group_ids = []
+require_mention_in_group = true
+startup_timeout_seconds = 15

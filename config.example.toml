@@ -87,3 +87,20 @@ recovery_grace_period_seconds = 30
 # ── Embedding（Phase 4；默认关闭）──
 # [embedding]
 # enabled = false
+
+# ── QQ OneBot 11 渠道（Plan 03；可选）──
+# 需要 pip install -e ".[qq]" 安装 aiocqhttp
+# 第一个真实 Channel 开发中，当前标记 experimental。
+#
+# [channel.qq]
+# enabled = true
+# driver = "aiocqhttp"
+# instance_id = "qq-main"
+# host = "127.0.0.1"                  # 第一版仅允许 loopback
+# port = 8080
+# access_token = "${COGITO_QQ_ACCESS_TOKEN}"
+# owner_qq_ids = ["${COGITO_OWNER_QQ}"]
+# allow_private = true
+# allowed_group_ids = []             # 空 = 拒绝全部群聊
+# require_mention_in_group = true
+# startup_timeout_seconds = 15

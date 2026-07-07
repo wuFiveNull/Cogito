@@ -13,6 +13,11 @@ dependencies = [
 [project.scripts]
 cogito = "cogito.__main__:main"
 
+[project.optional-dependencies]
+# Plan 03 / QQ-ONEBOT-E2E-01 — aiocqhttp 1.4.4 是当前已审计基线。
+# 升级版本必须重新运行 OneBot Contract Fixture。
+qq = ["aiocqhttp==1.4.4"]
+
 [build-system]
 requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"

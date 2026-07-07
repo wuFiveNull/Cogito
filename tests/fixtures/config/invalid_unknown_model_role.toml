@@ -1,0 +1,26 @@
+# 故意包含 unknown model role 字段的配置，测试 config check 报未知字段。
+
+workspace_path = ".workspace"
+
+[storage]
+db_path = "data/cogito.db"
+enable_wal = true
+busy_timeout = 5000
+payload_dir = "data/payload"
+
+[runtime]
+profile = "personal"
+timezone = "Asia/Shanghai"
+
+[interaction]
+bind_host = "127.0.0.1"
+allow_remote = false
+
+[worker]
+concurrency = 1
+lease_duration_seconds = 300
+heartbeat_interval_seconds = 60
+
+[model]
+provider = "openai_compat"
+main_role = "primary"
