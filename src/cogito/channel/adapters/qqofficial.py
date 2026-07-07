@@ -272,6 +272,15 @@ class QQOfficialAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter
         async def on_error(error: Exception):
             _log.error("QQ WebSocket error: %s", error)
 
+        # 启动 WebSocket 网关连接（从 LangBot 移植）
+        self._ws_task = asyncio.create_task(
+            self.bot.connect_gateway_loop(on_event, on_ready, on_error)
+        )
+        try:
+            await self._ws_task
+        except asyncio.CancelledError:
+            pass
+
     def _ensure_listeners(self):
         """注册 LangBot 事件监听器，确保 Cogito _inbound_handler 被调用。"""
         import logging
@@ -333,11 +342,6 @@ class QQOfficialAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter
                 _log.exception("QQ消息处理失败: %s", e)
 
         return handle
-        self._ws_task = asyncio.create_task(self.bot.connect_gateway_loop(on_event, on_ready, on_error))
-        try:
-            await self._ws_task
-        except asyncio.CancelledError:
-            pass
 
     async def kill(self) -> bool:
         if self._ws_task:
