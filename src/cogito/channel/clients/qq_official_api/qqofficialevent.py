@@ -65,9 +65,12 @@ class QQOfficialEvent(dict):
         return str(self.get("openid", ""))
 
     @property
-    def attachments(self) -> str:
-        url = str(self.get("image_attachments", ""))
-        if url and not url.startswith("https://"):
+    def attachments(self) -> str | None:
+        raw = self.get("image_attachments")
+        if not raw:
+            return None
+        url = str(raw)
+        if not url.startswith("https://"):
             url = "https://" + url
         return url
 
