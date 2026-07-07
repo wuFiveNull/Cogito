@@ -141,7 +141,7 @@ class TestToolExecutor:
         # 非法值返回 error
         result = await executor.execute("tc1", "enum_tool", {"choice": "x"}, ctx)
         assert result.status == "error"
-        assert "must be one of" in result.error_message
+        assert "validation error" in result.error_message
 
     @pytest.mark.asyncio
     async def test_handler_error_returns_error_status(self, registry, ctx):

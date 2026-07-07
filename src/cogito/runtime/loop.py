@@ -84,6 +84,7 @@ class LoopState:
     # Tool calling
     tool_call_count: int = 0
     tool_signatures: list[tuple[str, str]] = field(default_factory=list)
+    tool_repaired: bool = False  # 本 attempt 是否已做过一次参数修复（AGENT-LOOP / 5）
 
 
 class AgentLoop:
@@ -300,6 +301,9 @@ class AgentLoop:
     ) -> bool:
         """执行模型返回的 Tool Calls。
 
+        AGENT-LOOP / 4. Tool Call：Registry resolve → Policy → Approve → Execute → Result → next.
+        AGENT-LOOP / 5. 输出校验：无效参数最多修复一次。
+
         返回 True 表示检测到循环（重复签名），应终止。
         """
         if not self._executor:
@@ -353,6 +357,26 @@ class AgentLoop:
                 tool_call_id, tool_name, arguments, ctx,
             )
 
+            # ── 无效参数修复（AGENT-LOOP / 5.1-5.3）──
+            if (
+                result.status == "error"
+                and "validation" in result.error_message.lower()
+                and not state.tool_repaired
+            ):
+                state.tool_repaired = True
+                # 发送修复提示，让模型修正参数重试
+                state.messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": (
+                        f"Parameter validation error for tool '{tool_name}': "
+                        f"{result.error_message}. Please fix the parameters and retry."
+                    ),
+                })
+                # 不增加 tool_call_count 计数，不注入 error ToolResult
+                continue
+
+            # ── 正常处理 ──
             state.tool_call_count += 1
 
             # 格式化 tool result 消息

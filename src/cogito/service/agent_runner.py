@@ -337,6 +337,57 @@ def build_agent_runner(
     )
 
 
+async def build_and_start_agent_runner(
+    config: Config,
+    connection: sqlite3.Connection,
+    provider: ModelProvider | None = None,
+    clock: Clock | None = None,
+    registry: CapabilityRegistry | None = None,
+    toolsets: set[str] | None = None,
+) -> AgentRunner:
+    """异步构建 AgentRunner 并启动 MCP Server。
+
+    在 build_agent_runner 基础上追加 MCP 服务器启动。
+    """
+    runner = build_agent_runner(
+        config=config,
+        connection=connection,
+        provider=provider,
+        clock=clock,
+        registry=registry,
+        toolsets=toolsets,
+    )
+
+    # 启动 MCP Server
+    if config.capability.mcp_servers:
+        try:
+            from cogito.capability.mcp.manager import MCPServerManager
+
+            manager = MCPServerManager(runner._registry)
+            for entry in config.capability.mcp_servers:
+                if not entry.enabled:
+                    continue
+                from cogito.capability.mcp import MCPServerConfig
+
+                mcp_cfg = MCPServerConfig(
+                    name=entry.name,
+                    transport=entry.transport,
+                    command=entry.command,
+                    args=entry.args,
+                    url=entry.url,
+                    enabled=entry.enabled,
+                    toolset=entry.toolset,
+                )
+                try:
+                    await manager.start_server(mcp_cfg)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    return runner
+
+
 def _create_provider(model_cfg: ModelConfig) -> ModelProvider:
     """根据配置创建真实 ModelProvider。
 

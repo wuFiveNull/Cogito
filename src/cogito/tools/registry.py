@@ -22,9 +22,10 @@ def discover_builtin_tools(target: CapabilityRegistry | None = None) -> Capabili
 
     # 显式导入并注册每个内置工具
     # 每个工具模块在顶层定义 tool_def 变量
-    from cogito.tools import echo, now, recall_memory
+    from cogito.tools import echo, now
+    from cogito.tools.recall_memory import create_tool_def as _create_memory
 
-    for tool in [echo.tool_def, now.tool_def, recall_memory.tool_def]:
+    for tool in [echo.tool_def, now.tool_def, _create_memory()]:
         r.register(tool)
 
     return r

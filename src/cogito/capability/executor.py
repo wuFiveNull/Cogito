@@ -232,7 +232,7 @@ class ToolExecutor:
         for field in required:
             if field not in arguments:
                 raise ToolValidationError(
-                    f"Tool '{tool.name}': missing required parameter '{field}'"
+                    f"Tool '{tool.name}': validation error — missing required parameter '{field}'"
                 )
 
         # 检查枚举约束
@@ -240,7 +240,7 @@ class ToolExecutor:
             prop = properties.get(key, {})
             if "enum" in prop and value not in prop["enum"]:
                 raise ToolValidationError(
-                    f"Tool '{tool.name}': parameter '{key}' must be one of "
+                    f"Tool '{tool.name}': validation error — parameter '{key}' must be one of "
                     f"{prop['enum']}, got '{value}'"
                 )
 
@@ -249,7 +249,7 @@ class ToolExecutor:
             adapter.validate_python(arguments)
         except Exception as e:
             raise ToolValidationError(
-                f"Tool '{tool.name}': argument validation failed: {e}"
+                f"Tool '{tool.name}': validation error — {e}"
             ) from e
 
         return arguments

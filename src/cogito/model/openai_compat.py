@@ -186,8 +186,23 @@ class OpenAICompatProvider(ModelProvider):
         messages = []
         for msg in request.messages:
             role = msg.get("role", "user")
+            entry: dict[str, Any] = {"role": role}
+
             content = msg.get("content", "")
-            messages.append({"role": role, "content": content})
+            if role == "tool":
+                # tool 消息：content + tool_call_id
+                entry["content"] = content or ""
+                entry["tool_call_id"] = msg.get("tool_call_id", "")
+            elif role == "assistant" and "tool_calls" in msg:
+                # assistant 含 tool_calls：content（可能空）+ tool_calls
+                if content:
+                    entry["content"] = content
+                entry["tool_calls"] = msg["tool_calls"]
+            else:
+                # user / system / assistant 普通
+                entry["content"] = content
+
+            messages.append(entry)
 
         payload: dict[str, Any] = {
             "model": self._model,

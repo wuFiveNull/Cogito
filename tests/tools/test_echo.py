@@ -13,6 +13,7 @@ import pytest
 
 from cogito.capability.models import ToolContext
 from cogito.tools.registry import discover_builtin_tools
+from cogito.tools.recall_memory import create_tool_def
 
 
 @pytest.fixture
@@ -60,19 +61,23 @@ class TestNowTool:
 
 class TestRecallMemoryTool:
     @pytest.mark.asyncio
-    async def test_recall_memory_returns_stub(self, ctx):
-        from cogito.tools.recall_memory import handler
-
-        result = await handler({"query": "test query"}, ctx)
-        assert "recall_memory" in result
-        assert "not yet implemented" in result
+    async def test_recall_memory_returns_no_service_message(self, ctx):
+        tool_def = create_tool_def()  # no repo
+        result = await tool_def.handler({"query": "test query"}, ctx)
+        assert "not available" in result.lower()
 
     @pytest.mark.asyncio
     async def test_recall_memory_empty_query(self, ctx):
-        from cogito.tools.recall_memory import handler
-
-        result = await handler({"query": ""}, ctx)
+        tool_def = create_tool_def()
+        result = await tool_def.handler({"query": ""}, ctx)
         assert "provide a query" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_create_tool_def_schema(self):
+        tool_def = create_tool_def()
+        assert tool_def.name == "recall_memory"
+        assert tool_def.risk_level == "low"
+        assert "query" in tool_def.input_schema.get("required", [])
 
 
 class TestToolRegistry:

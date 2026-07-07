@@ -305,3 +305,92 @@ class TestToolCallIteration:
 
         result = await loop.run(_make_snapshot())
         assert result.tool_call_count == 1
+
+
+class TestToolRepair:
+    """Agent-LOOP / 5: 无效参数修复。"""
+
+    @pytest.mark.asyncio
+    async def test_validation_error_triggers_repair(self):
+        """参数校验失败后发送修复提示，模型修正后成功。"""
+        provider = StubModelProvider([
+            # 第一次：缺少必填参数 text
+            StubScenario(
+                finish_reason=FinishReason.tool_calls,
+                tool_calls=(
+                    {"id": "c1", "type": "function",
+                     "function": {"name": "echo", "arguments": "{}"}},
+                ),
+            ),
+            # 第二次：修正后正确调用
+            StubScenario(
+                finish_reason=FinishReason.tool_calls,
+                tool_calls=(
+                    {"id": "c2", "type": "function",
+                     "function": {"name": "echo", "arguments": '{"text": "fixed"}'}},
+                ),
+            ),
+            # 第三次：最终回复
+            StubScenario(
+                response_text="Done after fix",
+                finish_reason=FinishReason.stop,
+            ),
+        ])
+        router = ModelRouter(
+            providers={"stub": provider},
+            role_map={"main": "stub"},
+        )
+        registry = _make_registry()
+        executor = ToolExecutor(registry)
+        loop = AgentLoop(
+            router=router,
+            registry=registry,
+            executor=executor,
+            toolsets={"core"},
+        )
+
+        result = await loop.run(_make_snapshot())
+        assert result.result_type == LoopResultType.final_response
+        assert result.text == "Done after fix"
+        assert result.tool_call_count == 1  # 修复不计入
+
+    @pytest.mark.asyncio
+    async def test_repeated_validation_error_counts(self):
+        """修复后仍然参数错误，第二次计入 tool call。"""
+        provider = StubModelProvider([
+            StubScenario(
+                finish_reason=FinishReason.tool_calls,
+                tool_calls=(
+                    {"id": "c1", "type": "function",
+                     "function": {"name": "echo", "arguments": "{}"}},
+                ),
+            ),
+            StubScenario(
+                finish_reason=FinishReason.tool_calls,
+                tool_calls=(
+                    {"id": "c2", "type": "function",
+                     "function": {"name": "echo", "arguments": "{}"}},
+                ),
+            ),
+            StubScenario(
+                response_text="Final",
+                finish_reason=FinishReason.stop,
+            ),
+        ])
+        router = ModelRouter(
+            providers={"stub": provider},
+            role_map={"main": "stub"},
+        )
+        registry = _make_registry()
+        executor = ToolExecutor(registry)
+        loop = AgentLoop(
+            router=router,
+            registry=registry,
+            executor=executor,
+            toolsets={"core"},
+        )
+
+        result = await loop.run(_make_snapshot())
+        assert result.result_type == LoopResultType.final_response
+        # 第一次修复不计入，第二次计入
+        assert result.tool_call_count == 1

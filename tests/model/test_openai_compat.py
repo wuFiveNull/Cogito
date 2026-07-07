@@ -283,15 +283,11 @@ class TestToolCalls:
             },
         )
 
-    @pytest.mark.asyncio
-    async def test_tool_calls_in_request_payload(self):
-        """tools 参数正确发送到请求体。"""
-        sent_payload = {}
-
+    def _capture_provider(self, sent_storage: dict) -> OpenAICompatProvider:
+        """创建将请求体捕获到 sent_storage 的 provider。"""
         def capture(request: httpx.Request) -> httpx.Response:
-            nonlocal sent_payload
-            sent_payload = json.loads(request.content)
-            return self._tool_response("")
+            sent_storage["payload"] = json.loads(request.content)
+            return self._tool_response("done")
 
         transport = httpx.MockTransport(capture)
         provider = _make_provider()
@@ -300,22 +296,87 @@ class TestToolCalls:
             base_url=provider._base_url,
             timeout=httpx.Timeout(5),
         )
+        return provider
 
-        request = _make_request({
-            "tools": ({
-                "type": "function",
-                "function": {
-                    "name": "echo",
-                    "description": "Echo text",
-                    "parameters": {"type": "object", "properties": {}},
-                },
-            },),
-        })
+    @pytest.mark.asyncio
+    async def test_tool_calls_in_request_payload(self):
+        """tools 参数正确发送到请求体。"""
+        sent = {}
+        provider = self._capture_provider(sent)
+
+        request = ModelRequest(
+            messages=({"role": "user", "content": "Hello"},),
+            tools=({"type": "function", "function": {
+                "name": "echo", "description": "Echo text",
+                "parameters": {"type": "object", "properties": {}},
+            }},),
+        )
         await provider.generate(request)
 
-        assert "tools" in sent_payload
-        assert len(sent_payload["tools"]) == 1
-        assert sent_payload["tools"][0]["function"]["name"] == "echo"
+        assert "tools" in sent["payload"]
+        assert sent["payload"]["tools"][0]["function"]["name"] == "echo"
+
+    @pytest.mark.asyncio
+    async def test_assistant_tool_calls_in_message(self):
+        """assistant 消息的 tool_calls 正确序列化到请求体。"""
+        sent = {}
+        provider = self._capture_provider(sent)
+
+        request = ModelRequest(
+            messages=(
+                {"role": "user", "content": "Use echo tool"},
+                {"role": "assistant", "content": "",
+                 "tool_calls": [{"id": "call1", "type": "function",
+                                "function": {"name": "echo", "arguments": '{"text":"hi"}'}}]},
+                {"role": "tool", "content": "hi", "tool_call_id": "call1"},
+            ),
+        )
+        await provider.generate(request)
+
+        msgs = sent["payload"]["messages"]
+        assert msgs[1]["role"] == "assistant"
+        assert "tool_calls" in msgs[1]
+        assert msgs[1]["tool_calls"][0]["function"]["name"] == "echo"
+
+        assert msgs[2]["role"] == "tool"
+        assert msgs[2]["tool_call_id"] == "call1"
+        assert msgs[2]["content"] == "hi"
+
+    @pytest.mark.asyncio
+    async def test_tool_message_without_content(self):
+        """tool 消息无 content 时正确序列化。"""
+        sent = {}
+        provider = self._capture_provider(sent)
+
+        request = ModelRequest(
+            messages=({"role": "tool", "tool_call_id": "call1"},),
+        )
+        await provider.generate(request)
+
+        msgs = sent["payload"]["messages"]
+        assert msgs[0]["role"] == "tool"
+        assert msgs[0]["tool_call_id"] == "call1"
+        assert "content" in msgs[0]
+
+    @pytest.mark.asyncio
+    async def test_assistant_tool_calls_with_text(self):
+        """assistant 同时返回文本和 tool_calls 时两者都序列化。"""
+        sent = {}
+        provider = self._capture_provider(sent)
+
+        request = ModelRequest(
+            messages=(
+                {"role": "assistant", "content": "I will use a tool",
+                 "tool_calls": [{"id": "call1", "type": "function",
+                                "function": {"name": "echo", "arguments": '{}'}}]},
+            ),
+        )
+        await provider.generate(request)
+
+        msgs = sent["payload"]["messages"]
+        assert msgs[0]["role"] == "assistant"
+        assert msgs[0]["content"] == "I will use a tool"
+        assert "tool_calls" in msgs[0]
 
     @pytest.mark.asyncio
     async def test_parse_tool_calls_response(self):
