@@ -56,6 +56,9 @@ class OpenAICompatProvider(ModelProvider):
         self._timeout = timedelta(seconds=timeout_seconds)
         self._max_retries = max_retries
 
+        # MODEL-ADAPTER / 6: 名称可逆映射
+        self._tool_name_map: dict[str, str] = {}  # provider_name → canonical_name
+
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             timeout=httpx.Timeout(timeout_seconds),
@@ -134,7 +137,7 @@ class OpenAICompatProvider(ModelProvider):
                 original_message=str(e),
             )) from e
 
-        return self._parse_response(request.request_id, data)
+        return self._parse_response(request.request_id, data, request=request)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[ModelResponse]:
         raise NotImplementedError("Streaming not implemented in openai_compat provider")
@@ -183,6 +186,14 @@ class OpenAICompatProvider(ModelProvider):
 
         支持 tools（在 Phase 2 启用）。
         """
+        # 重置名称映射并记录 (MODEL-ADAPTER / 6)
+        self._tool_name_map = {}
+        for t in request.tools:
+            fn = t.get("function", {})
+            name = fn.get("name", "")
+            if name:
+                self._tool_name_map[name] = name  # OpenAI 格式名称不变
+
         messages = []
         for msg in request.messages:
             role = msg.get("role", "user")
@@ -222,10 +233,12 @@ class OpenAICompatProvider(ModelProvider):
 
     def _parse_response(
         self, request_id: str, data: dict[str, Any],
+        request: ModelRequest | None = None,
     ) -> ModelResponse:
         """解析 OpenAI-compatible 响应体。
 
         支持 tool_calls 解析（Phase 2）。
+        MODEL-ADAPTER / 6：Provider 返回的参数用原 Schema 重校验。
         """
         try:
             choice = data["choices"][0]
@@ -254,14 +267,26 @@ class OpenAICompatProvider(ModelProvider):
         raw_tool_calls = message.get("tool_calls", [])
         tool_calls: list[dict[str, Any]] = []
         for tc in raw_tool_calls:
-            tool_calls.append({
+            fn_name = tc.get("function", {}).get("name", "")
+            fn_args = tc.get("function", {}).get("arguments", "{}")
+
+            # 名称反向映射
+            canonical_name = self._tool_name_map.get(fn_name, fn_name)
+
+            entry: dict[str, Any] = {
                 "id": tc.get("id", ""),
                 "type": tc.get("type", "function"),
                 "function": {
-                    "name": tc.get("function", {}).get("name", ""),
-                    "arguments": tc.get("function", {}).get("arguments", "{}"),
+                    "name": canonical_name,
+                    "arguments": fn_args,
                 },
-            })
+            }
+
+            # MODEL-ADAPTER / 6: 参数重校验
+            if request and request.tools:
+                self._revalidate_tool_arguments(canonical_name, fn_args, request.tools)
+
+            tool_calls.append(entry)
 
         parts = (ContentPart(
             part_type=ContentPartType.text,
@@ -278,6 +303,60 @@ class OpenAICompatProvider(ModelProvider):
             finish_reason=finish_reason,
             usage=usage,
         )
+
+    def _revalidate_tool_arguments(
+        self,
+        tool_name: str,
+        raw_arguments: str,
+        tool_schemas: tuple[dict[str, Any], ...],
+    ) -> None:
+        """用请求中的 tool schema 校验返回的 tool_calls 参数。
+
+        MODEL-ADAPTER / 6：Provider 返回的参数统一解析后再次用原 Schema 校验。
+        校验失败时抛 ModelProviderError。
+        """
+        # 找到对应的 schema
+        schema = None
+        for t in tool_schemas:
+            fn = t.get("function", {})
+            if fn.get("name") == tool_name:
+                schema = fn.get("parameters", {})
+                break
+
+        if not schema:
+            return
+
+        # 解析参数
+        try:
+            args = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+        except (json.JSONDecodeError, TypeError):
+            raise ModelProviderError(ErrorEnvelope(
+                category=ErrorCategory.invalid_request,
+                message=f"Tool '{tool_name}': invalid arguments JSON from provider",
+                retryable=False,
+            ))
+
+        if not isinstance(args, dict):
+            return
+
+        # 轻量校验：必填字段 + 枚举
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        for field in required:
+            if field not in args:
+                raise ModelProviderError(ErrorEnvelope(
+                    category=ErrorCategory.invalid_request,
+                    message=f"Tool '{tool_name}': response missing required field '{field}'",
+                    retryable=False,
+                ))
+        for key, value in args.items():
+            prop = properties.get(key, {})
+            if "enum" in prop and value not in prop["enum"]:
+                raise ModelProviderError(ErrorEnvelope(
+                    category=ErrorCategory.invalid_request,
+                    message=f"Tool '{tool_name}': response field '{key}' has invalid enum value",
+                    retryable=False,
+                ))
 
     def _map_http_error(self, response: httpx.Response) -> ModelProviderError:
         """将 HTTP 错误映射为统一 Provider 错误。"""

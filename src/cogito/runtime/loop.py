@@ -18,7 +18,7 @@ from enum import StrEnum
 from typing import Any
 
 from cogito.capability.executor import ToolExecutor
-from cogito.capability.models import ToolContext, ToolResult
+from cogito.capability.models import ToolContext
 from cogito.capability.registry import CapabilityRegistry
 from cogito.model.contracts import (
     ContentPart,
@@ -113,6 +113,7 @@ class AgentLoop:
         max_repeated_tool_signature: int = 3,
         max_runtime_s: int = 120,
         max_total_tokens: int = 32000,
+        checkpoint_callback: Callable[[dict], None] | None = None,
     ) -> None:
         self._router = router
         self._registry = registry
@@ -123,6 +124,7 @@ class AgentLoop:
         self._max_repeated_tool_signature = max_repeated_tool_signature
         self._max_runtime = timedelta(seconds=max_runtime_s)
         self._max_total_tokens = max_total_tokens
+        self._checkpoint_callback = checkpoint_callback
 
     async def run(
         self,
@@ -353,6 +355,9 @@ class AgentLoop:
                 tool_call_id=tool_call_id,
             )
 
+            # AGENT-LOOP / 7: 副作用工具执行前写 checkpoint
+            self._write_checkpoint(state)
+
             result = await self._executor.execute(
                 tool_call_id, tool_name, arguments, ctx,
             )
@@ -393,6 +398,23 @@ class AgentLoop:
             return hashlib.md5(json.dumps(obj, sort_keys=True).encode()).hexdigest()
         except (json.JSONDecodeError, TypeError):
             return raw_arguments
+
+    def _write_checkpoint(self, state: LoopState) -> None:
+        """将当前 LoopState 写入 checkpoint（AGENT-LOOP / 7）。"""
+        if not self._checkpoint_callback:
+            return
+        try:
+            self._checkpoint_callback({
+                "turn_id": state.turn_id,
+                "iteration_no": state.iteration_no,
+                "tool_call_count": state.tool_call_count,
+                "message_count": len(state.messages),
+                "last_signature": (
+                    state.tool_signatures[-1] if state.tool_signatures else None
+                ),
+            })
+        except Exception:
+            pass  # checkpoint 失败不阻断主流程
 
     def _classify_response(self, response: ModelResponse) -> str:
         """分类 ModelResponse 类型。"""

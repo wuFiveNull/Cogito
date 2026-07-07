@@ -13,6 +13,9 @@ from typing import Any
 from cogito.capability.models import ToolDef
 
 
+MAX_DESCRIPTION_LENGTH = 512
+
+
 class CapabilityRegistry:
     """中心工具注册表。
 
@@ -78,6 +81,13 @@ class CapabilityRegistry:
 
     # ── Schema 输出 ──
 
+    @staticmethod
+    def _sanitize_description(desc: str) -> str:
+        """截断过长的 description（MODEL-ADAPTER / 6）。"""
+        if len(desc) > MAX_DESCRIPTION_LENGTH:
+            return desc[:MAX_DESCRIPTION_LENGTH] + "..."
+        return desc
+
     def get_openai_schemas(self, toolsets: set[str] | None = None) -> list[dict[str, Any]]:
         """获取 OpenAI function calling 格式的工具 Schema 列表。
 
@@ -99,7 +109,7 @@ class CapabilityRegistry:
                 "type": "function",
                 "function": {
                     "name": t.name,
-                    "description": t.description,
+                    "description": self._sanitize_description(t.description),
                     "parameters": t.input_schema,
                 },
             })
@@ -114,7 +124,7 @@ class CapabilityRegistry:
                 "type": "function",
                 "function": {
                     "name": t.name,
-                    "description": t.description,
+                    "description": self._sanitize_description(t.description),
                     "parameters": t.input_schema,
                 },
             })

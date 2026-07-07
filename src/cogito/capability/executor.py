@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -57,10 +58,12 @@ class ToolExecutor:
         registry: CapabilityRegistry,
         policy: ToolPolicy | None = None,
         repo: Any | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._registry = registry
         self._policy = policy or ToolPolicy()
         self._repo = repo  # ToolCallRepository
+        self._on_event = on_event  # DomainEvent 回调（D8）
 
     async def execute(
         self,
@@ -91,6 +94,8 @@ class ToolExecutor:
         # 2. Policy evaluation
         decision = self._policy.evaluate(tool_name, arguments, tool)
         if not decision.is_allowed:
+            self._emit_event("ToolDenied", tool_name, "denied",
+                             decision.reason, 0)
             return ToolResult(
                 tool_call_id, tool_name, "error",
                 error_message=f"Policy denied: {decision.reason}",
@@ -119,6 +124,8 @@ class ToolExecutor:
             result_text = self._truncate_output(result_text)
 
             self._persist_end(tool_call_id, "succeeded")
+            self._emit_event("ToolExecuted", tool_name, "success",
+                             result_text, duration)
             return ToolResult(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
@@ -129,6 +136,8 @@ class ToolExecutor:
         except Exception as e:
             duration = int((datetime.now(UTC) - started_at).total_seconds() * 1000)
             self._persist_end(tool_call_id, "failed")
+            self._emit_event("ToolExecuted", tool_name, "error",
+                             str(e), duration)
             return ToolResult(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
@@ -264,6 +273,29 @@ class ToolExecutor:
                 + f"\n... (truncated, {len(text)} chars)"
             )
         return text
+
+    # ── 事件发布（D8） ──
+
+    def _emit_event(
+        self,
+        event_type: str,
+        tool_name: str,
+        status: str,
+        summary: str,
+        duration_ms: int,
+    ) -> None:
+        if not self._on_event:
+            return
+        try:
+            self._on_event({
+                "event_type": event_type,
+                "tool_name": tool_name,
+                "status": status,
+                "summary": summary[:200],
+                "duration_ms": duration_ms,
+            })
+        except Exception:
+            pass
 
     # ── 结果格式化 ──
 

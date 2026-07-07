@@ -169,3 +169,20 @@ class TestCapabilityRegistry:
         registry.register(_make_tool("a"))
         r = repr(registry)
         assert "1 tools" in r
+
+    def test_description_truncation(self):
+        """超过 512 字符的 description 被截断。"""
+        registry = CapabilityRegistry()
+        long_desc = "x" * 1000
+        tool = ToolDef(
+            name="long_desc_tool",
+            description=long_desc,
+            input_schema={"type": "object", "properties": {}},
+            handler=lambda args, ctx: "ok",
+        )
+        registry.register(tool)
+
+        schemas = registry.get_openai_schemas()
+        desc = schemas[0]["function"]["description"]
+        assert len(desc) <= 515  # 512 + "..."
+        assert desc.endswith("...")
