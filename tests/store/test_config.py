@@ -110,9 +110,12 @@ class TestSaveDefault:
             assert "[worker]" in content
             assert "workspace_path" in content
 
-    def test_save_default_has_no_api_keys(self):
+    def test_save_default_has_api_key_example(self):
+        """默认配置包含 API Key 填写提示。"""
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "config.toml")
             Config().save_default(path)
             content = open(path, encoding="utf-8").read()
-            assert "api_key" not in content.lower()
+            # 现在包含注释示例，让用户知道在哪填写 API Key
+            assert "api_key" in content.lower()
+            assert "sk-your-key" in content

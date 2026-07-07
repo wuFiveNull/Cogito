@@ -1,6 +1,6 @@
 # Cogito 配置示例
 # 复制本文件为 config.toml 并按需修改
-# API Key 等敏感信息通过 secret:// 引用 .env 文件
+# API Key 直接填写明文，或通过 ${ENV_VAR} 引用环境变量
 #
 # 配置层级 (CONFIG-PROFILES / 1):
 #   built-in defaults → profile file → local override → env override
@@ -53,7 +53,9 @@ recovery_grace_period_seconds = 30
 # transport = "sse"
 # enabled = true
 [model]
-# main = { provider = "deepseek", model = "deepseek-v4-flash" }
+# main = { provider = "openai_compat", model = "deepseek-chat", api_key = "sk-your-key-here", base_url = "https://api.deepseek.com/v1" }
+# 或通过环境变量引用：
+# main = { provider = "openai_compat", model = "gpt-4o", api_key = "${OPENAI_API_KEY}", base_url = "https://api.openai.com/v1" }
 
 [channel]
 # gateway_url = "http://127.0.0.1:8080"

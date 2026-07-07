@@ -417,11 +417,12 @@ class Config:
         return str(Path(self.workspace_path) / "logs")
 
     def save_default(self, path: str | Path = DEFAULT_CONFIG_PATH) -> None:
-        """写出默认配置模板（不含 API Key）。"""
+        """写出默认配置模板。"""
         cfg_path = Path(path)
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         content = f"""# Cogito Configuration
-# API Key 等敏感信息存在 .env 文件中，不在本文件写入。
+# API Key 直接填写明文（如 api_key = "sk-xxx"），
+# 或通过 ${{ENV_VAR}} 引用环境变量（如 api_key = "${{MY_API_KEY}}"）。
 # 所有相对路径以 workspace_path 为基准。
 
 workspace_path = "{self.workspace_path}"
@@ -447,6 +448,21 @@ heartbeat_interval_seconds = {self.worker.heartbeat_interval_seconds}
 outbox_lease_ttl_seconds = {self.worker.outbox_lease_ttl_seconds}
 delivery_lease_ttl_seconds = {self.worker.delivery_lease_ttl_seconds}
 recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
+
+# ── 模型配置（必填）──
+# [model]
+# provider = "openai_compat"
+# [model.main]
+# model = "deepseek-chat"
+# api_key = "sk-your-key-here"
+# base_url = "https://api.deepseek.com/v1"
+# timeout_seconds = 60
+
+# ── Agent 运行模式 ──
+# [agent]
+# mode = "reactive"
+# enabled_toolsets = ["core", "terminal", "memory", "search"]
+# disabled_toolsets = []
 """
         cfg_path.write_text(content, encoding="utf-8")
 
