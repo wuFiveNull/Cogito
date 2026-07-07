@@ -11,6 +11,8 @@ import asyncio
 import datetime
 import time
 
+import pydantic
+
 from cogito.channel.clients.qq_official_api.api import QQOfficialClient
 from cogito.channel.clients.qq_official_api.qqofficialevent import QQOfficialEvent
 from cogito.channel.utils import image
@@ -125,9 +127,13 @@ class QQOfficialEventConverter(abstract_platform_adapter.AbstractEventConverter)
 class QQOfficialAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
     """QQ 官方机器人适配器。"""
 
+    model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
+
     bot: QQOfficialClient
     config: dict
     bot_account_id: str
+    adapter_id: str = ""
+    channel_type: str = "qqofficial"
     bot_uuid: str | None = None
     enable_webhook: bool = False
     message_converter: QQOfficialMessageConverter = QQOfficialMessageConverter()
@@ -137,16 +143,18 @@ class QQOfficialAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter
     _inbound_handler: InboundHandler | None = None
 
     def __init__(self, config: dict, logger: abstract_platform_adapter.AbstractEventLogger | None = None):
-        self.adapter_id = str(config.get("uuid", config.get("appid", "qqofficial")[:8]))
-        self.channel_type = "qqofficial"
         enable_webhook = config.get("enable-webhook", False)
         bot = QQOfficialClient(
             app_id=config["appid"], secret=config["secret"],
             token=config["token"], logger=logger or EventLogger("channel.qqofficial"),
             unified_mode=enable_webhook,
         )
-        super().__init__(config=config, logger=logger or EventLogger("channel.qqofficial"),
-                         bot=bot, bot_account_id=config["appid"])
+        adapter_id = str(config.get("uuid", config.get("appid", "qqofficial")[:8]))
+        super().__init__(
+            config=config, logger=logger or EventLogger("channel.qqofficial"),
+            bot=bot, bot_account_id=config["appid"],
+            adapter_id=adapter_id,
+        )
         self.enable_webhook = enable_webhook
         self._ws_task: asyncio.Task = None
         self._stream_ctx: dict = {}

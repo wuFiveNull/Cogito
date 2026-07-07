@@ -6,6 +6,7 @@ import asyncio
 import logging
 import signal
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 from cogito import __version__
@@ -34,6 +35,10 @@ def main() -> None:
     run_parser.add_argument(
         "--debug", action="store_true",
         help="Enable debug logging",
+    )
+    run_parser.add_argument(
+        "--interactive", "-i", action="store_true",
+        help="Interactive mode: type messages in the terminal",
     )
 
     args = parser.parse_args()
@@ -109,7 +114,51 @@ def _cmd_run(args: argparse.Namespace) -> None:
     # 显示启动信息
     _print_startup_banner(config)
 
-    # 启动异步运行
+    # 启动模式选择
+    if args.interactive:
+        _start_interactive(config, conn, args)
+    else:
+        _start_worker(config, conn, args)
+
+
+def _start_worker(
+    config: Config,
+    conn: sqlite3.Connection,
+    args: argparse.Namespace,
+) -> None:
+    """启动 Worker 循环（后台运行模式）。"""
+    try:
+        asyncio.run(_async_run(config, conn, args))
+    except KeyboardInterrupt:
+        print("\n[ok] Shutdown complete.")
+    except Exception as e:
+        logger.exception("Fatal error: %s", e)
+        sys.exit(1)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _start_interactive(
+    config: Config,
+    conn: sqlite3.Connection,
+    args: argparse.Namespace,
+) -> None:
+    """启动交互式 REPL（命令行对话模式）。"""
+    try:
+        asyncio.run(_interactive_run(config, conn, args))
+    except KeyboardInterrupt:
+        print("\n[ok] Bye!")
+    except Exception as e:
+        logger.exception("Fatal error: %s", e)
+        sys.exit(1)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
     try:
         asyncio.run(_async_run(config, conn, args))
     except KeyboardInterrupt:
@@ -280,6 +329,99 @@ async def _async_run(
     if channel_manager:
         logger.info("Stopping channel adapters...")
         await channel_manager.stop_all()
+
+
+async def _interactive_run(
+    config: Config,
+    conn: sqlite3.Connection,
+    args: argparse.Namespace,
+) -> None:
+    """交互式 REPL —— 命令行输入消息，看到回复。
+
+    不依赖任何 Channel 适配器，直接通过 InboundService 注入消息。
+    """
+    # ── 1. 创建 Provider/Router/Runner ──
+    if config.model.main.is_configured():
+        from cogito.model.openai_compat import OpenAICompatProvider
+        provider = OpenAICompatProvider(
+            model=config.model.main.model,
+            api_key=config.model.main.api_key,
+            base_url=config.model.main.base_url,
+            timeout_seconds=config.model.main.timeout_seconds,
+        )
+    else:
+        from cogito.model.stub_provider import StubModelProvider
+        provider = StubModelProvider()
+        print("[stub] 未配置模型，使用 Stub Provider（固定回复）")
+
+    from cogito.model.router import ModelRouter
+    from cogito.service.agent_runner import build_agent_runner
+
+    router = ModelRouter(
+        providers={"main": provider},
+        role_map={"main": "main"},
+    )
+    runner = build_agent_runner(config, conn, provider=provider)
+
+    # ── 2. 创建 InboundService ──
+    from cogito.contracts.envelope import ChannelEnvelope
+    from cogito.service.inbound_service import InboundService
+
+    inbound = InboundService(conn)
+
+    import asyncio
+
+    print()
+    print("  输入消息按回车发送，输入 /quit 退出")
+    print("=" * 50)
+
+    while True:
+        try:
+            text = input(">>> ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        text = text.strip()
+        if not text:
+            continue
+        if text in ("/quit", "/exit", "/q"):
+            break
+
+        # 通过 InboundService 注入消息（会创建 queued turn）
+        result = inbound.accept(ChannelEnvelope(
+            channel_type="terminal",
+            channel_instance_id="terminal",
+            platform_sender_id="user",
+            platform_conversation_id="terminal_conv",
+            platform_message_id="",
+            content_parts=[{"content_type": "text", "inline_data": text}],
+            received_at=datetime.now(UTC).isoformat(),
+        ))
+        logger.debug("Injected message: %s -> turn %s", result.message_id, result.turn_id)
+
+        # 执行一次 Turn 处理
+        outcome = await runner.run_once(args.worker_id)
+        if outcome == RunOutcome.completed:
+            # 读取回复文本
+            row = conn.execute(
+                "SELECT m.message_id, cp.inline_data "
+                "FROM messages m "
+                "JOIN content_parts cp ON cp.message_id = m.message_id "
+                "WHERE m.conversation_id='terminal_conv' "
+                "AND m.role='assistant' "
+                "AND cp.content_type='text' "
+                "ORDER BY m.receive_sequence DESC LIMIT 1",
+            ).fetchone()
+            reply = row["inline_data"] if row else "(no reply)"
+            print(f"\n  🤖 {reply}\n")
+        elif outcome == RunOutcome.failed:
+            print("  ❌ Turn failed")
+        elif outcome == RunOutcome.cancelled:
+            print("  ⏹  Cancelled")
+        else:
+            # idle / lost — 可能是 context builder 出问题
+            print(f"  ⚠️  Unexpected outcome: {outcome}")
 
 
 def _process_one_delivery(
