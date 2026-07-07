@@ -426,12 +426,15 @@ async def _interactive_run(application: RuntimeApplication) -> None:
 
         reply = await application.process_terminal_message(text)
         try:
-            print(f"\n  🤖 {reply}\n")
+            print(f"\n  [bot] {reply}\n")
         except UnicodeEncodeError:
-            # 在 GBK/ASCII 终端降级 (Windows 控制台常见)
+            # 在 GBK/ASCII 终端降级，逐行输出并忽略无法编码字符
             print("")
             for line in reply.splitlines():
-                print(f"  [bot] {line}")
+                try:
+                    print(f"  [bot] {line}")
+                except UnicodeEncodeError:
+                    print(f"  [bot] {line.encode('ascii', errors='replace').decode()}")
             print()
 
 
