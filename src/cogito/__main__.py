@@ -7,11 +7,15 @@ import logging
 import sqlite3
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from cogito import __version__
-from cogito.config import Config, ConfigError
+from cogito.config import DEFAULT_CONFIG_PATH, Config, ConfigError
 from cogito.store.connection import get_connection
 from cogito.store.migration import migrate
+
+if TYPE_CHECKING:
+    from cogito.application import RuntimeApplication
 
 logger = logging.getLogger("cogito")
 
@@ -130,7 +134,7 @@ def _cmd_config(args: argparse.Namespace) -> None:
         print(f"[ok] profile:   {config.runtime.profile}")
         print(f"[ok] workspace: {Path(config.workspace_path).resolve()}")
         print(f"[ok] model:     {model_label}")
-        print(f"[ok] schema:    valid")
+        print("[ok] schema:    valid")
         return
     else:
         raise SystemExit(f"Unknown config subcommand: {args.config_command}")

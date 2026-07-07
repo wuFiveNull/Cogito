@@ -56,7 +56,7 @@ class RuntimeApplication:
     # ── factory ────────────────────────────────────────────────────────────
 
     @classmethod
-    def build(cls, config: Config) -> "RuntimeApplication":
+    def build(cls, config: Config) -> RuntimeApplication:
         """构造完整的 RuntimeApplication。
 
         启动顺序 (LOCAL-OPERATIONS / 3):
