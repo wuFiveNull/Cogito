@@ -81,19 +81,21 @@ def _fts_escape(query: str) -> str:
     return " OR ".join(tokens) if tokens else query
 
 
-# ── 加权评分系数（阶段 7）──
-KEYWORD_WEIGHT = 0.30
-SCOPE_WEIGHT = 0.20
+# ── 加权评分系数（阶段 7+8）──
+KEYWORD_WEIGHT = 0.25
+SEMANTIC_WEIGHT = 0.20
+SCOPE_WEIGHT = 0.15
 IMPORTANCE_WEIGHT = 0.15
-CONFIDENCE_WEIGHT = 0.15
+CONFIDENCE_WEIGHT = 0.10
 RECENCY_WEIGHT = 0.10
-EXPLICITNESS_WEIGHT = 0.10
+EXPLICITNESS_WEIGHT = 0.05
 
 
 def _compute_score(
     item: MemoryItem,
     keyword_hit: bool = False,
     scope_match: bool = False,
+    semantic_similarity: float = 0.0,
     now: datetime | None = None,
 ) -> float:
     """计算记忆的加权检索评分（0.0 ~ 1.0）。"""
@@ -101,13 +103,14 @@ def _compute_score(
         now = datetime.now(UTC)
 
     kw_score = 1.0 if keyword_hit else 0.0
+    sem_score = max(0.0, min(1.0, semantic_similarity))
     sc_score = 1.0 if scope_match else 0.0
     imp_score = item.importance
     conf_score = item.confidence
 
     # 新鲜度：越近分数越高（半衰期 30 天）
-    age_days = (now - item.created_at).total_seconds() / 86400 if item.created_at else 365
-    recency_score = max(0.0, 1.0 - age_days / 365.0)
+    age_days = (item.created_at - now).total_seconds() / 86400 if item.created_at else 365
+    recency_score = max(0.0, 1.0 - abs(age_days) / 365.0)
 
     # 显式性得分
     expl_map = {
@@ -121,6 +124,7 @@ def _compute_score(
 
     return (
         KEYWORD_WEIGHT * kw_score
+        + SEMANTIC_WEIGHT * sem_score
         + SCOPE_WEIGHT * sc_score
         + IMPORTANCE_WEIGHT * imp_score
         + CONFIDENCE_WEIGHT * conf_score
@@ -218,6 +222,48 @@ class MemoryRepository:
         try:
             self._conn.execute(
                 "DELETE FROM memory_fts WHERE memory_id=?", (memory_id,)
+            )
+        except sqlite3.OperationalError:
+            pass
+
+    # ── Embedding 同步（阶段 8）──
+
+    def _sync_embedding_insert(self, memory_id: str, value: str) -> None:
+        """插入一笔 Embedding（占位：需要真实 provider 时扩展）。"""
+        pass
+
+    def _sync_embedding_update(self, memory_id: str, value: str) -> None:
+        """更新一笔 Embedding（先删后插）。"""
+        self._sync_embedding_delete(memory_id)
+        self._sync_embedding_insert(memory_id, value)
+
+    def _sync_embedding_delete(self, memory_id: str) -> None:
+        """删除一笔 Embedding。"""
+        try:
+            self._conn.execute(
+                "DELETE FROM memory_embeddings WHERE memory_id=?", (memory_id,)
+            )
+        except sqlite3.OperationalError:
+            pass
+
+    # ── 检索追踪（阶段 9）──
+
+    def _track_retrieval(self, memory_ids: list[str]) -> None:
+        """更新被检索到的记忆的 exposure 计数和时间。"""
+        if not memory_ids:
+            return
+        from datetime import UTC, datetime
+
+        now = datetime.now(UTC).isoformat()
+        placeholders = ",".join("?" for _ in memory_ids)
+        try:
+            self._conn.execute(
+                f"UPDATE memory_items SET "
+                f"  retrieval_count=retrieval_count+1, "
+                f"  retrieval_weight=MIN(2.0, retrieval_weight+0.05), "
+                f"  last_retrieved_at=? "
+                f"WHERE memory_id IN ({placeholders})",
+                [now] + memory_ids,
             )
         except sqlite3.OperationalError:
             pass
@@ -415,6 +461,9 @@ class MemoryRepository:
             results.append((item, score))
 
         results.sort(key=lambda x: -x[1])
+        # 追踪检索到的记忆（仅前 limit 条）
+        tracked_ids = [r[0].memory_id for r in results[:limit]]
+        self._track_retrieval(tracked_ids)
         return results
 
     def find_by_canonical_key(
@@ -507,6 +556,7 @@ class MemoryRepository:
             ),
         )
         self._sync_fts_insert(memory.memory_id, memory.subject, memory.predicate, memory.value)
+        self._sync_embedding_insert(memory.memory_id, memory.value)
         return memory
 
     def update(self, memory: MemoryItem) -> bool:
@@ -556,6 +606,7 @@ class MemoryRepository:
         )
         if cursor.rowcount > 0:
             self._sync_fts_update(memory.memory_id, memory.subject, memory.predicate, memory.value)
+            self._sync_embedding_update(memory.memory_id, memory.value)
         return cursor.rowcount > 0
 
     # ── 状态转换 ──
@@ -620,11 +671,13 @@ class MemoryRepository:
         )
         if cursor.rowcount > 0:
             self._sync_fts_delete(memory_id)
+            self._sync_embedding_delete(memory_id)
         return cursor.rowcount > 0
 
     def hard_delete(self, memory_id: str) -> bool:
         """物理删除记忆。"""
         self._sync_fts_delete(memory_id)
+        self._sync_embedding_delete(memory_id)
         cursor = self._conn.execute(
             "DELETE FROM memory_items WHERE memory_id=?",
             (memory_id,),
