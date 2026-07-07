@@ -142,6 +142,10 @@ class RuntimeApplication:
             inbound=inbound,
         )
         app._recovery_counts = recovery_counts
+
+        # 构建 Channel 组件（Manager + Gateway），QQ 等渠道在 run_worker 中启动
+        app.build_channel_components()
+
         return app
 
     # ── PR 2: Channel / Gateway 组装 ───────────────────────────────────────
@@ -158,6 +162,24 @@ class RuntimeApplication:
         inbound_dispatcher = InboundDispatcher(self.inbound)
         self.channel_manager = ChannelManager(inbound_dispatcher)
         self.channel_gateway = ChannelGateway(self.conn, self.channel_manager)
+
+    async def _start_enabled_channels(self) -> None:
+        """启动配置中 enabled 的 Channel Adapter。
+
+        目前只处理 QQ OneBot；其他渠道未来扩展。
+        QQ 明确 enabled 时启动失败 → 应用 readiness 失败并退出。
+        """
+        if not self.config.channel.qq.enabled:
+            return
+        from cogito.channel.drivers.qq_onebot import QQOneBotAdapter
+
+        adapter = QQOneBotAdapter(self.config.channel.qq)
+        try:
+            await self.channel_manager.start_adapter("qq", adapter)
+            logger.info("QQ channel adapter started (instance=%s)", adapter.adapter_id)
+        except Exception:
+            logger.exception("Failed to start QQ channel adapter")
+            raise
 
     def build_workers(self) -> None:
         """构建 OutboxWorker / DeliveryWorker / TaskWorker。"""
@@ -312,8 +334,11 @@ class RuntimeApplication:
 
         self._shutdown_event = shutdown_event or asyncio.Event()
 
-        # 创建 workers
+        # 创建 workers（Outbox / Delivery / Task）
         self.build_workers()
+
+        # 启动启用的 Channel Adapter（如 QQ）
+        await self._start_enabled_channels()
 
         task_handler_ctx = TaskHandlerContext(
             connection_factory=lambda p=self.config.resolve_db_path(): get_connection(p),

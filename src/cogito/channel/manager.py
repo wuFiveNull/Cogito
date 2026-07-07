@@ -50,6 +50,30 @@ class ChannelManager:
         self._log.info("Started channel %s", name)
         return adapter
 
+    async def start_adapter(
+        self, name: str, adapter: ChannelAdapter,
+    ) -> ChannelAdapter:
+        """直接注册并启动一个已构造的 Adapter 实例。
+
+        用于 QQ 等不走 registry 路径的 adapter。
+        """
+        if name in self._adapters:
+            raise RuntimeError(f"Channel {name!r} is already running")
+
+        async def handle_inbound(inbound):
+            await self._dispatcher.dispatch(inbound)
+
+        adapter.set_inbound_handler(handle_inbound)
+
+        task = asyncio.create_task(
+            self._run_adapter(name, adapter),
+            name=f"channel:{name}",
+        )
+        self._adapters[name] = adapter
+        self._tasks[name] = task
+        self._log.info("Started channel %s (direct)", name)
+        return adapter
+
     async def stop_channel(self, name: str) -> None:
         """停止一个 Channel 适配器。"""
         adapter = self._adapters.get(name)
@@ -80,6 +104,7 @@ class ChannelManager:
             self._log.exception("Channel %s failed", name)
 
     def get_adapter(self, adapter_id: str) -> ChannelAdapter | None:
+        """按 ID 或注册名获取运行中的适配器。"""
         """按 ID 或注册名获取运行中的适配器。"""
         adapter = self._adapters.get(adapter_id)
         if adapter is not None:
