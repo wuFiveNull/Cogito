@@ -196,8 +196,8 @@ class DeliveryWorker:
         1. 短事务读取并验证当前执行权（status=sending, lease_owner, lease_version, 未过期）
         2. 若无效 → 返回 "stale"，不调用 Gateway
         3. Gateway 调用前读取一次时间（pre-call time）
-        4. 事务外调用 Gateway
-        5. Gateway 返回后重新读取时间（post-call time）
+        4. 事务外调用 Gateway（通过 to_thread + run_coroutine_threadsafe）
+        5. 事务外调用 Gateway
         6. 使用 post-call time 再次验证 Lease 后提交结果
         7. 提交结果时写入对应 Receipt（confirmed/uncertain）
         """
@@ -228,8 +228,26 @@ class DeliveryWorker:
         if lease_expires is None or lease_expires <= pre_call_int:
             return "stale"  # NULL or expired — no Gateway call
 
-        # ── 第三步：事务外调用 Gateway ──
-        result = self._gateway.send(target, content_ref)
+        # ── 第三步：事务外调用 Gateway（结构化版本）──
+        from cogito.channel.base import ChannelSendResult
+        send_result: ChannelSendResult
+        if hasattr(self._gateway, "send_request"):
+            try:
+                send_result = self._gateway.send_request(target, content_ref)
+            except Exception:
+                send_result = ChannelSendResult(status="unknown", error_code="gateway_exception")
+        else:
+            # 遗留 bool|None 兼容
+            legacy_result = self._gateway.send(target, content_ref)
+            if legacy_result is True:
+                send_result = ChannelSendResult(
+                    status="sent",
+                    platform_message_id=f"fake_{lease.delivery_id[:8]}",
+                )
+            elif legacy_result is False:
+                send_result = ChannelSendResult(status="temporary", error_code="legacy_false")
+            else:
+                send_result = ChannelSendResult(status="unknown", error_code="legacy_none")
 
         # ── 第四步：Gateway 返回后重新读取时间（post-call time）──
         post_call = self._now(clock)
@@ -264,9 +282,10 @@ class DeliveryWorker:
                     or current["lease_expires_at"] <= post_call_int:
                 # Gateway was called but we can't commit — enter unknown
                 # 写 uncertain Receipt 作为持久证据
+                safe_result = f"{send_result.status}:{send_result.error_code or ''}"
                 self._write_receipt(uow, lease.delivery_id, attempt_id, req_hash,
-                                    "uncertain", None, str(result) if result is not None else "unknown",
-                                    post_call_int, lease.lease_version)
+                                    "uncertain", send_result.platform_message_id,
+                                    safe_result, post_call_int, lease.lease_version)
                 # 使用 delivery_id 主键直接更新（lease 可能已被 Recovery 推进版本）
                 self._conn.execute(
                     "UPDATE deliveries SET status='unknown', lease_owner=NULL, "
@@ -277,11 +296,13 @@ class DeliveryWorker:
                 uow.commit()
                 return "unknown"
 
-            if result is True:
+            platform_msg_id = send_result.platform_message_id
+
+            if send_result.status == "sent":
                 self._conn.execute(
                     "UPDATE deliveries SET status='sent', platform_message_id=? "
                     "WHERE delivery_id=? AND lease_owner=? AND lease_version=?",
-                    (f"fake_{lease.delivery_id[:8]}", lease.delivery_id, worker_id, lease.lease_version),
+                    (platform_msg_id, lease.delivery_id, worker_id, lease.lease_version),
                 )
                 self._conn.execute(
                     "UPDATE delivery_attempts SET status='succeeded', finished_at=? "
@@ -290,12 +311,29 @@ class DeliveryWorker:
                 )
                 # 写 confirmed Receipt
                 self._write_receipt(uow, lease.delivery_id, attempt_id, req_hash,
-                                    "confirmed", f"fake_{lease.delivery_id[:8]}", "ok",
+                                    "confirmed", platform_msg_id, "ok",
                                     post_call_int, lease.lease_version)
                 uow.commit()
                 return "sent"
 
-            if result is False:
+            if send_result.status == "permanent":
+                self._conn.execute(
+                    "UPDATE deliveries SET status='failed' "
+                    "WHERE delivery_id=? AND lease_owner=? AND lease_version=?",
+                    (lease.delivery_id, worker_id, lease.lease_version),
+                )
+                self._conn.execute(
+                    "UPDATE delivery_attempts SET status='failed', finished_at=? "
+                    "WHERE attempt_id=?",
+                    (post_call_int, attempt_id),
+                )
+                self._write_receipt(uow, lease.delivery_id, attempt_id, req_hash,
+                                    "permanent", None, send_result.error_code or "permanent",
+                                    post_call_int, lease.lease_version)
+                uow.commit()
+                return "failed"
+
+            if send_result.status == "temporary":
                 if lease.attempt_count >= MAX_DELIVERY_TENTATIVE:
                     self._conn.execute(
                         "UPDATE deliveries SET status='failed' "
@@ -303,7 +341,7 @@ class DeliveryWorker:
                         (lease.delivery_id, worker_id, lease.lease_version),
                     )
                 else:
-                    delay = compute_delivery_backoff(lease.attempt_count)
+                    delay = send_result.retry_after_seconds or compute_delivery_backoff(lease.attempt_count)
                     next_at = datetime.fromtimestamp(post_call.timestamp() + delay, tz=UTC)
                     next_at_int = epoch_ms(next_at)
                     self._conn.execute(
@@ -316,10 +354,13 @@ class DeliveryWorker:
                     "WHERE attempt_id=?",
                     (post_call_int, attempt_id),
                 )
+                self._write_receipt(uow, lease.delivery_id, attempt_id, req_hash,
+                                    "temporary", None, send_result.error_code or "temporary",
+                                    post_call_int, lease.lease_version)
                 uow.commit()
-                return "failed"
+                return "failed"  # temporary 失败本轮返回 failed，但实际进入 retry_scheduled
 
-            # result is None → unknown
+            # send_result.status == "unknown"
             self._conn.execute(
                 "UPDATE deliveries SET status='unknown' "
                 "WHERE delivery_id=? AND lease_owner=? AND lease_version=?",
@@ -332,7 +373,8 @@ class DeliveryWorker:
             )
             # 写 uncertain Receipt
             self._write_receipt(uow, lease.delivery_id, attempt_id, req_hash,
-                                "uncertain", None, "unknown",
+                                "uncertain", None,
+                                send_result.error_code or "unknown",
                                 post_call_int, lease.lease_version)
             uow.commit()
             return "unknown"

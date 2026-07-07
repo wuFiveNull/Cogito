@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from typing import Any
 
 from cogito.domain.events import DomainEvent
 from cogito.domain.message import ContentPart, Message, MessageDirection, MessageRole
@@ -171,15 +172,34 @@ class TurnCompletionService:
             for part in message.content_parts:
                 uow.message.insert_content_part(part, message.message_id)
 
-            # 2. 写入 Delivery（pending 状态，等待 Outbox Worker 发送）
+            # 2. 写入 Delivery（pending 状态，等待 DeliveryWorker 发送）
             delivery_id = ""
             if delivery_target or reply_route:
                 import uuid
                 delivery_id = uuid.uuid4().hex
                 now_int = epoch_ms(self._clock.now())
-                target = {"target": delivery_target} if delivery_target else {}
+                target: dict[str, Any] = {"target": delivery_target} if delivery_target else {}
                 if reply_route:
                     target["reply_route"] = reply_route
+                # 携带结构化字段，方便 Gateway 构造 ChannelSendRequest
+                target["delivery_id"] = delivery_id
+                target["idempotency_key"] = f"delivery_{message.message_id}"
+                # adapter_id 优先从 reply_route 取
+                adapter_id = ""
+                if isinstance(reply_route, dict):
+                    adapter_id = (
+                        reply_route.get("channel_instance_id")
+                        or reply_route.get("adapter_id")
+                        or ""
+                    )
+                target["adapter_id"] = adapter_id
+                # target_endpoint_ref
+                target_endpoint_ref = (
+                    reply_route.get("target_endpoint_ref")
+                    if isinstance(reply_route, dict)
+                    else None
+                ) or (reply_route.get("channel_instance_id") if isinstance(reply_route, dict) else None) or ""
+                target["target_endpoint_ref"] = target_endpoint_ref
                 self._conn.execute(
                     "INSERT INTO deliveries (delivery_id, target_snapshot, content_ref, "
                     "status, idempotency_key, created_at) "
