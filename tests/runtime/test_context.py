@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 import pytest
 
 from cogito.runtime.context import ContextBuilder
+from cogito.service.memory_service import SqliteMemoryService
 from cogito.store.migration import migrate
 from cogito.store.time_utils import epoch_ms
 
@@ -42,6 +43,7 @@ def _add_message(
     content: str = "Hello",
     sequence: int = 1,
     trust_label: str = "unverified",
+    principal_id: str = "",
 ) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO conversations (conversation_id, conversation_type, platform_conversation_id) "
@@ -55,9 +57,9 @@ def _add_message(
     )
     conn.execute(
         "INSERT INTO messages (message_id, conversation_id, session_id, role, direction, "
-        "receive_sequence, trust_label, created_at) "
-        "VALUES (?, ?, ?, ?, 'inbound', ?, ?, ?)",
-        (message_id, conversation_id, session_id, role, sequence, trust_label,
+        "sender_principal_id, receive_sequence, trust_label, created_at) "
+        "VALUES (?, ?, ?, ?, 'inbound', ?, ?, ?, ?)",
+        (message_id, conversation_id, session_id, role, principal_id, sequence, trust_label,
          epoch_ms(datetime.now(UTC))),
     )
     conn.execute(
@@ -77,6 +79,7 @@ def _add_message_multi_part(
     role: str = "user",
     sequence: int = 1,
     trust_label: str = "unverified",
+    principal_id: str = "",
 ) -> None:
     """添加含多 ContentPart 的消息。"""
     conn.execute(
@@ -91,9 +94,9 @@ def _add_message_multi_part(
     )
     conn.execute(
         "INSERT INTO messages (message_id, conversation_id, session_id, role, direction, "
-        "receive_sequence, trust_label, created_at) "
-        "VALUES (?, ?, ?, ?, 'inbound', ?, ?, ?)",
-        (message_id, conversation_id, session_id, role, sequence, trust_label,
+        "sender_principal_id, receive_sequence, trust_label, created_at) "
+        "VALUES (?, ?, ?, ?, 'inbound', ?, ?, ?, ?)",
+        (message_id, conversation_id, session_id, role, principal_id, sequence, trust_label,
          epoch_ms(datetime.now(UTC))),
     )
     for i, part in enumerate(parts):
@@ -300,3 +303,207 @@ class TestContextBuilder:
         assert snapshot1.message_upper_bound == 1
         # New snapshot sees the new message (最大 sequence = 2)
         assert snapshot2.message_upper_bound == 2
+
+
+def _add_memory(
+    conn: sqlite3.Connection,
+    memory_id: str = "mem1",
+    kind: str = "fact",
+    subject: str = "user",
+    predicate: str = "likes",
+    value: str = "Python",
+    principal_id: str = "p1",
+    scope_type: str = "",
+    scope_id: str = "",
+    canonical_key: str = "",
+    explicitness: str = "explicit_user_statement",
+    confidence: float = 1.0,
+    importance: float = 0.5,
+) -> None:
+    from datetime import UTC, datetime
+
+    rows = conn.execute(
+        "SELECT memory_id FROM memory_items WHERE memory_id=?",
+        (memory_id,),
+    ).fetchall()
+    if rows:
+        return
+    conn.execute(
+        "INSERT INTO memory_items ("
+        "  memory_id, kind, subject, predicate, value, principal_id,"
+        "  scope_type, scope_id, canonical_key,"
+        "  source_type, source_id, explicitness, confidence, importance,"
+        "  status, version, created_at"
+        ") VALUES (?,?,?,?,?,?, ?,?,?, ?,?,?,?,?, 'confirmed', 1, ?)",
+        (
+            memory_id, kind, subject, predicate, value, principal_id,
+            scope_type, scope_id, canonical_key,
+            "test", "test_src", explicitness, confidence, importance,
+            epoch_ms(datetime.now(UTC)),
+        ),
+    )
+    conn.commit()
+
+
+class TestMemoryInjection:
+    """ContextBuilder 隐式记忆注入测试。"""
+
+    def test_no_memory_service_does_not_crash(self, db):
+        """不传入 memory_service 时，build 正常执行，无记忆注入。"""
+        _add_message(db, message_id="m1", session_id="s1", role="user", content="Hi", sequence=1)
+
+        builder = ContextBuilder(db)
+        snapshot = builder.build("t1", "s1", "m1", system_policy="Be helpful.")
+
+        assert snapshot.snapshot_id
+        assert len(snapshot.memory_ids) == 0
+
+    def test_empty_principal_skips_injection(self, db):
+        """principal_id 为空时不注入记忆。"""
+        _add_message(db, message_id="m1", session_id="s1", role="user", content="Hi", sequence=1,
+                     principal_id="")
+        service = SqliteMemoryService(db)
+        builder = ContextBuilder(db, memory_service=service)
+
+        snapshot = builder.build("t1", "s1", "m1")
+
+        assert len(snapshot.memory_ids) == 0
+
+    def test_injects_global_memory_after_system(self, db):
+        """全局记忆出现在 system policy 之后。"""
+        _add_message(db, message_id="m1", session_id="s1", role="user", content="Hi", sequence=1,
+                     principal_id="p1")
+        _add_memory(db, memory_id="mem1", principal_id="p1",
+                    subject="user", predicate="lang", value="Python",
+                    importance=0.8)
+
+        service = SqliteMemoryService(db)
+        builder = ContextBuilder(db, memory_service=service)
+        snapshot = builder.build("t1", "s1", "m1", system_policy="You are Cogito.")
+
+        # 顺序：system → memory → 历史消息 → 当前输入
+        assert snapshot.items[0].item_type == "system_policy"
+        assert snapshot.items[1].item_type == "memory"
+        assert "<relevant_memories>" in snapshot.items[1].content
+        assert "Python" in snapshot.items[1].content
+        assert "mem1" in snapshot.memory_ids
+
+    def test_memory_format_contains_tags(self, db):
+        """记忆注入格式包含 <relevant_memories> 标签和来源标记。"""
+        _add_message(db, message_id="m1", session_id="s1", role="user", content="Hi", sequence=1,
+                     principal_id="p1")
+        _add_memory(db, memory_id="mem1", principal_id="p1",
+                    subject="user", predicate="lang", value="Python",
+                    explicitness="explicit_user_statement")
+
+        service = SqliteMemoryService(db)
+        builder = ContextBuilder(db, memory_service=service)
+        snapshot = builder.build("t1", "s1", "m1", system_policy="Policy.")
+
+        memory_items = [i for i in snapshot.items if i.item_type == "memory"]
+        assert len(memory_items) == 1
+        content = memory_items[0].content
+        assert "<relevant_memories>" in content
+        assert "</relevant_memories>" in content
+        assert "explicit" in content
+        assert "confidence=" in content
+
+    def test_scope_priority_dedup(self, db):
+        """同 canonical_key 时，session scope 优先于 global。"""
+        _add_message(db, message_id="m1", session_id="s1", role="user", content="Hi", sequence=1,
+                     principal_id="p1")
+        # session-scoped: 低优先级的值
+        _add_memory(db, memory_id="mem_s", principal_id="p1",
+                    subject="user", predicate="lang", value="SessionLang",
+                    scope_type="session", scope_id="s1",
+                    canonical_key="p1.user.lang", importance=0.5)
+        # global: 高优值
+        _add_memory(db, memory_id="mem_g", principal_id="p1",
+                    subject="user", predicate="lang", value="GlobalLang",
+                    scope_type="", scope_id="",
+                    canonical_key="p1.user.lang", importance=0.8)
+
+        service = SqliteMemoryService(db)
+        builder = ContextBuilder(db, memory_service=service)
+        snapshot = builder.build("t1", "s1", "m1", system_policy="Policy.")
+
+        memory_items = [i for i in snapshot.items if i.item_type == "memory"]
+        assert len(memory_items) == 1
+        content = memory_items[0].content
+        # session scope 优先 → SessionLang
+        assert "SessionLang" in content
+        assert "GlobalLang" not in content
+        assert "mem_s" in snapshot.memory_ids
+        assert "mem_g" not in snapshot.memory_ids
+
+    def test_different_principal_isolation(self, db):
+        """不同 principal 不共享记忆。"""
+        _add_message(db, message_id="m1", session_id="s1", role="user", content="Hi", sequence=1,
+                     principal_id="p1")
+        # p2 的记忆
+        _add_memory(db, memory_id="mem_p2", principal_id="p2",
+                    subject="user", predicate="lang", value="Rust")
+
+        service = SqliteMemoryService(db)
+        builder = ContextBuilder(db, memory_service=service)
+        snapshot = builder.build("t1", "s1", "m1")
+
+        # p1 没有记忆
+        assert len(snapshot.memory_ids) == 0
+
+    def test_token_budget_limits_memories(self, db):
+        """记忆超出 token 预算时被裁剪。"""
+        _add_message(db, message_id="m1", session_id="s1", role="user", content="Hi", sequence=1,
+                     principal_id="p1")
+        # 插入大量记忆使 budget 超限
+        for i in range(30):
+            _add_memory(db, memory_id=f"mem_{i}", principal_id="p1",
+                        subject="user", predicate=f"attr_{i}",
+                        value="A" * 200,  # ~50 tokens each
+                        importance=0.5 if i > 0 else 1.0)
+
+        service = SqliteMemoryService(db)
+        builder = ContextBuilder(db, memory_service=service)
+        snapshot = builder.build("t1", "s1", "m1")
+
+        # 至少部分记忆被注入，但不应超过 budget
+        memory_items = [i for i in snapshot.items if i.item_type == "memory"]
+        if memory_items:
+            assert memory_items[0].tokens <= 3000
+        assert len(snapshot.memory_ids) > 0
+
+    def test_memory_between_system_and_history(self, db):
+        """记忆条目位于 system policy 和 历史消息 之间。"""
+        _add_message(db, message_id="m1", session_id="s1", role="user", content="Q1", sequence=1,
+                     principal_id="p1")
+        _add_message(db, message_id="m2", session_id="s1", role="assistant", content="A1", sequence=2,
+                     principal_id="p1")
+        _add_memory(db, memory_id="mem1", principal_id="p1",
+                    subject="user", predicate="lang", value="Python")
+
+        service = SqliteMemoryService(db)
+        builder = ContextBuilder(db, memory_service=service)
+        snapshot = builder.build("t1", "s1", "m2", system_policy="Policy.")
+
+        item_types = [i.item_type for i in snapshot.items]
+        # system → memory → message(history) → message(input)
+        sys_idx = item_types.index("system_policy")
+        mem_idx = item_types.index("memory")
+        msg_idx = item_types.index("message")
+        assert sys_idx < mem_idx < msg_idx
+
+    def test_memory_ids_recorded_in_snapshot(self, db):
+        """注入的记忆 ID 记录在 snapshot.memory_ids 中。"""
+        _add_message(db, message_id="m1", session_id="s1", role="user", content="Hi", sequence=1,
+                     principal_id="p1")
+        _add_memory(db, memory_id="mem_a", principal_id="p1",
+                    subject="user", predicate="lang", value="Python")
+        _add_memory(db, memory_id="mem_b", principal_id="p1",
+                    subject="user", predicate="editor", value="VS Code")
+
+        service = SqliteMemoryService(db)
+        builder = ContextBuilder(db, memory_service=service)
+        snapshot = builder.build("t1", "s1", "m1")
+
+        assert "mem_a" in snapshot.memory_ids
+        assert "mem_b" in snapshot.memory_ids

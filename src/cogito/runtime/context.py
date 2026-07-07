@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from cogito.runtime.clock import Clock, ProductionClock
+from cogito.service.memory_service import SqliteMemoryService
 from cogito.store.time_utils import epoch_ms
 
 # 简单 Token 估算器：每字符约 0.25 token
@@ -45,9 +46,11 @@ class ContextSnapshot:
     - snapshot_id: 稳定标识
     - turn_id: 关联的 Turn
     - session_id: 来源 Session
+    - principal_id: 来源 Principal
     - message_upper_bound: 创建时的消息上界
     - selection_policy_version: 选择策略版本
     - items: 选中的上下文条目
+    - memory_ids: 注入的记忆 ID 列表
     - excluded_summary: 被裁剪的内容摘要说明
     - total_tokens: 条目总 Token 数
     - created_at: 创建时间
@@ -59,12 +62,14 @@ class ContextSnapshot:
     message_upper_bound: int = 0
     selection_policy_version: str = "1"
     items: tuple[ContextItem, ...] = ()
+    memory_ids: tuple[str, ...] = ()
     excluded_summary: str = ""
     total_tokens: int = 0
     created_at: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "items", tuple(self.items))
+        object.__setattr__(self, "memory_ids", tuple(self.memory_ids))
 
 
 class ContextBuilder:
@@ -87,11 +92,13 @@ class ContextBuilder:
         clock: Clock | None = None,
         max_input_tokens: int = 64000,
         policy_version: str = "1",
+        memory_service: SqliteMemoryService | None = None,
     ) -> None:
         self._conn = conn
         self._clock = clock or ProductionClock()
         self._max_input_tokens = max_input_tokens
         self._policy_version = policy_version
+        self._memory_service = memory_service
 
     def build(
         self,
@@ -138,7 +145,10 @@ class ContextBuilder:
                 role="system",
             ))
 
-        # 2. Memory 占位（阶段 3 后注入）
+        # 2. 注入长期记忆（阶段 3）
+        memory_items, memory_ids = self._inject_memories(principal_id, session_id)
+        items.extend(memory_items)
+
         # 3. Summary 占位（阶段 6 后注入）
 
         # 4. 历史消息（时间正序）
@@ -164,6 +174,7 @@ class ContextBuilder:
             turn_id=turn_id,
             session_id=session_id,
             principal_id=principal_id,
+            memory_ids=tuple(memory_ids),
             message_upper_bound=message_upper_bound,
             selection_policy_version=self._policy_version,
             items=tuple(items),
@@ -176,6 +187,122 @@ class ContextBuilder:
         )
 
         return snapshot
+
+    _MEMORY_BUDGET_TOKENS = 2000
+    _MEMORY_MAX_ITEMS = 50
+    _KIND_PRIORITY: dict[str, int] = {
+        "constraint": 0,
+        "preference": 1,
+        "goal": 2,
+        "fact": 3,
+        "episode": 4,
+    }
+
+    def _get_session_conversation(self, session_id: str) -> str:
+        row = self._conn.execute(
+            "SELECT conversation_id FROM sessions WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        return row["conversation_id"] if row else ""
+
+    def _inject_memories(
+        self,
+        principal_id: str,
+        session_id: str,
+    ) -> tuple[list[ContextItem], list[str]]:
+        """检索并构建长期记忆上下文条目。
+
+        Scope 优先级：session → conversation → principal-global
+        同 canonical_key 不重复（高优 scope 胜出）。
+        Memory 条目以 <relevant_memories> XML 块格式化。
+        """
+        if not principal_id or not self._memory_service:
+            return [], []
+
+        # 1. 加载当前 Principal 的全部 confirmed 记忆
+        all_memories = self._memory_service.retrieve(
+            principal_id=principal_id,
+            limit=self._MEMORY_MAX_ITEMS,
+        )
+        if not all_memories:
+            return [], []
+
+        # 2. 取得 conversation_id 用于 scope 过滤
+        conversation_id = self._get_session_conversation(session_id)
+
+        # 3. 按 scope 分组
+        session_mems: list = []
+        conv_mems: list = []
+        global_mems: list = []
+        for m in all_memories:
+            if m.scope_type == "session":
+                if m.scope_id == session_id:
+                    session_mems.append(m)
+            elif m.scope_type == "conversation":
+                if m.scope_id == conversation_id:
+                    conv_mems.append(m)
+            elif m.scope_type in ("", "global", "user"):
+                global_mems.append(m)
+
+        # 4. 合并去重：高优 scope 的 canonical_key 优先
+        seen_keys: set[str] = set()
+        merged: list = []
+        for pool in [session_mems, conv_mems, global_mems]:
+            for m in pool:
+                if m.canonical_key and m.canonical_key in seen_keys:
+                    continue
+                if m.canonical_key:
+                    seen_keys.add(m.canonical_key)
+                merged.append(m)
+
+        # 5. 排序：kind 优先级 > importance DESC > confidence DESC
+        def _sort_key(m):
+            kind_order = self._KIND_PRIORITY.get(str(m.kind), 5)
+            return (kind_order, -m.importance, -m.confidence)
+
+        merged.sort(key=_sort_key)
+
+        # 6. 格式化为 XML 块，控制预算
+        lines: list[str] = ["<relevant_memories>"]
+        memory_ids: list[str] = []
+        budget = self._MEMORY_BUDGET_TOKENS
+        used = 0
+
+        for m in merged:
+            # 构建标签
+            kind_label = str(m.kind)
+            expl_label = "explicit" if m.explicitness in (
+                "explicit_user_statement", "confirmed_inference"
+            ) else "inferred"
+            entry = (
+                f"- [{kind_label}, {expl_label}, "
+                f"confidence={m.confidence:.1f}] "
+                f"{m.subject}/{m.predicate} = {m.value}"
+            )
+            entry_tokens = estimate_tokens(entry)
+
+            if used + entry_tokens > budget:
+                continue
+
+            lines.append(f"  {entry}")
+            used += entry_tokens
+            memory_ids.append(m.memory_id)
+
+        if len(lines) > 1:
+            lines.append("</relevant_memories>")
+            content = "\n".join(lines)
+            item = ContextItem(
+                item_type="memory",
+                item_id="_injected_memory",
+                source="memory",
+                tokens=estimate_tokens(content),
+                trust_label="verified",
+                content=content,
+                role="system",
+            )
+            return [item], memory_ids
+
+        return [], []
 
     def _clip_to_budget(
         self,
@@ -246,6 +373,7 @@ class ContextBuilder:
                 "sequence": msg["sequence"],
                 "trust_label": msg["trust_label"],
                 "session_id": msg["session_id"],
+                "sender_principal_id": msg.get("sender_principal_id", ""),
                 "content": "\n".join(msg["content_parts"]) if msg["content_parts"] else "",
             })
         # 按 receive_sequence 排序

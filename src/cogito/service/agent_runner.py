@@ -33,6 +33,7 @@ from cogito.runtime.context import ContextBuilder
 from cogito.runtime.loop import AgentLoop, LoopResultType
 from cogito.service.completion import TurnCompletionService
 from cogito.service.dispatcher import Dispatcher
+from cogito.service.memory_service import SqliteMemoryService
 from cogito.store.time_utils import epoch_ms
 
 # ── 默认模式-Toolset 映射 (AGENT-COGNITION / 2.2) ──
@@ -70,6 +71,7 @@ class AgentRunner:
         registry: CapabilityRegistry | None = None,
         executor: ToolExecutor | None = None,
         toolsets: set[str] | None = None,
+        memory_service: SqliteMemoryService | None = None,
     ) -> None:
         self._conn = conn
         self._router = router
@@ -85,6 +87,7 @@ class AgentRunner:
         self._dispatcher = Dispatcher(conn, clock=self._clock)
         self._context_builder = ContextBuilder(
             conn, clock=self._clock, max_input_tokens=max_input_tokens,
+            memory_service=memory_service,
         )
         self._loop = AgentLoop(
             router,
@@ -314,13 +317,12 @@ def build_agent_runner(
 
     # 创建 Registry 并发现内置工具
     resolved_registry = registry
+    memory_service: SqliteMemoryService | None = None
     if resolved_registry is None:
         from cogito.capability import CapabilityRegistry
-        from cogito.service.memory_service import SqliteMemoryService
-        from cogito.tools.registry import discover_builtin_tools
 
-        # 创建 MemoryService 供记忆工具使用
         memory_service = SqliteMemoryService(conn=connection)
+        from cogito.tools.registry import discover_builtin_tools
 
         resolved_registry = CapabilityRegistry()
         discover_builtin_tools(resolved_registry, memory_service=memory_service)
@@ -352,6 +354,7 @@ def build_agent_runner(
         registry=resolved_registry,
         executor=executor,
         toolsets=resolved_toolsets,
+        memory_service=memory_service,
     )
 
 
