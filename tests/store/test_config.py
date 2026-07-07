@@ -5,7 +5,7 @@ import tempfile
 
 import pytest
 
-from cogito.config import Config, _mask_sensitive
+from cogito.config import Config, ConfigError, _mask_sensitive
 
 
 class TestDefaultConfig:
@@ -45,7 +45,7 @@ class TestConfigValidation:
             f.write('[unknown_section]\nfoo = 1\n')
             tmp = f.name
         try:
-            with pytest.raises(ValueError, match="Unknown config key/section"):
+            with pytest.raises(ConfigError, match=r"unknown sections/keys: unknown_section"):
                 Config.load(tmp)
         finally:
             os.unlink(tmp)
@@ -55,7 +55,20 @@ class TestConfigValidation:
             f.write('[storage]\nunknown_field = 1\n')
             tmp = f.name
         try:
-            with pytest.raises(ValueError, match="Unknown config fields"):
+            with pytest.raises(ConfigError, match=r"unknown fields: unknown_field"):
+                Config.load(tmp)
+        finally:
+            os.unlink(tmp)
+
+    def test_unknown_field_in_model_raises(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
+            f.write('[model]\nprovider = "openai_compat"\nenable_thinking = true\n')
+            tmp = f.name
+        try:
+            with pytest.raises(
+                ConfigError,
+                match=r"unknown fields: enable_thinking",
+            ):
                 Config.load(tmp)
         finally:
             os.unlink(tmp)

@@ -4,6 +4,22 @@
 #
 # 配置层级 (CONFIG-PROFILES / 1):
 #   built-in defaults → profile file → local override → env override
+# 配置校验 (CONFIG-PROFILES / 6):
+#   - 所有定型节的未知字段会报错并列出字段名
+#   - 启动前路径、Provider、模型和跨字段约束会被检查
+# Secret 安全 (CONFIG-PROFILES / 5):
+#   - 配置输出（repr、config check、启动日志）不会打印 Secret 原值
+#
+# 首次验证：
+#   Copy-Item config.example.toml config.toml
+#   python -m cogito config check
+#
+# 校验成功输出示例：
+#   [ok] config: <绝对路径>
+#   [ok] profile: development
+#   [ok] workspace: <绝对路径>
+#   [ok] model: configured | stub
+#   [ok] schema: valid
 
 workspace_path = ".workspace"
 
@@ -32,28 +48,18 @@ outbox_lease_ttl_seconds = 120
 delivery_lease_ttl_seconds = 120
 recovery_grace_period_seconds = 30
 
-# ── 以下节已声明但尚未定型，保留仅保证不报错 ──
-[agent]
-# max_iterations = 8
-# model_provider = "primary"
+# ── Agent 运行模式（可选）──
+# [agent]
+# max_output_tokens = 4096
+# context_memory_window = 50
 # mode = "reactive"                    # reactive | proactive | scheduled | maintenance
+# system_prompt_mode = "append"        # replace | append
 # enabled_toolsets = ["core", "terminal", "memory", "search"]
 # disabled_toolsets = []
+# system_prompt                    = "额外的系统提示词（append 模式下拼接到默认提示词后）"
 
-# ── MCP Server 配置（Phase 5）──
-# [capability.mcp.servers.filesystem]
-# command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
-# transport = "stdio"
-# enabled = true
-# toolset = "mcp"
-
-# [capability.mcp.servers.custom]
-# url = "http://localhost:3000/mcp"
-# transport = "sse"
-# enabled = true
-# ── 模型配置 ──
-# 取消注释并填入你的配置：
+# ── 模型配置（必填，除非使用 Stub Provider）──
+# 取消注释并填入你的 Provider：
 #
 # [model]
 # provider = "openai_compat"
@@ -66,5 +72,18 @@ recovery_grace_period_seconds = 30
 #
 # 也支持环境变量引用：api_key = "${MY_API_KEY}"
 
-[channel]
+# ── 全局 Channel 网关（可选；首个真实 Channel 阶段再启用）──
+# [channel]
 # gateway_url = "http://127.0.0.1:8080"
+
+# ── MCP Server（Phase 5；可选）──
+# [capability.mcp.servers.filesystem]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
+# transport = "stdio"
+# enabled = true
+# toolset = "mcp"
+
+# ── Embedding（Phase 4；默认关闭）──
+# [embedding]
+# enabled = false

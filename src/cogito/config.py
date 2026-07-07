@@ -47,6 +47,7 @@ WORKER_FIELDS = frozenset({
     "recovery_grace_period_seconds",
 })
 
+MODEL_TOP_FIELDS = frozenset({"provider", "main"})
 MODEL_FIELDS = frozenset({
     "model", "provider", "api_key", "base_url", "timeout_seconds",
 })
@@ -83,6 +84,37 @@ _TOLERATED_SECTIONS = frozenset({
 SENSITIVE_FIELDS = frozenset({"api_key", "token", "secret"})
 
 
+class ConfigError(ValueError):
+    """配置验证失败时抛出的结构化异常。
+
+    不携带任何 Secret 原值；仅携带定位信息 + 原因。
+    """
+
+    def __init__(
+        self,
+        section: str,
+        field: str,
+        reason: str,
+        source_path: str | None = None,
+    ) -> None:
+        self.section = section
+        self.field = field
+        self.reason = reason
+        self.source_path = source_path
+        super().__init__(f"[{section}] {field}: {reason}")
+
+    def format_cli(self) -> str:
+        """转换为单行可操作的错误提示。"""
+        prefix = f"[config:error] [{self.section}]"
+        if self.field:
+            prefix += f".{self.field}"
+        msg = f"{prefix} {self.reason}"
+        if self.source_path:
+            msg += f"\nhint: see {self.source_path}"
+        msg += "\nhint: compare with config.example.toml or run `cogito config check --config ...`"
+        return msg
+
+
 def _mask_sensitive(key: str, value: str) -> str:
     if key.lower() in SENSITIVE_FIELDS and value:
         return value[:4] + "****" if len(value) > 4 else "****"
@@ -92,8 +124,10 @@ def _mask_sensitive(key: str, value: str) -> str:
 def _check_unknown(raw: dict[str, Any], known: frozenset[str], section: str) -> None:
     unknown = set(raw) - known
     if unknown:
-        raise ValueError(
-            f"Unknown config fields in [{section}]: {', '.join(sorted(unknown))}"
+        raise ConfigError(
+            section=section,
+            field="",
+            reason=f"unknown fields: {', '.join(sorted(unknown))}",
         )
 
 
@@ -215,24 +249,40 @@ class WorkerConfig:
 
     def _validate(self) -> None:
         if self.lease_duration_seconds <= self.heartbeat_interval_seconds:
-            raise ValueError(
-                f"lease_duration_seconds ({self.lease_duration_seconds}) must be "
-                f"> heartbeat_interval_seconds ({self.heartbeat_interval_seconds})"
+            raise ConfigError(
+                section="worker",
+                field="lease_duration_seconds",
+                reason=(
+                    f"lease_duration_seconds ({self.lease_duration_seconds}) must be "
+                    f"> heartbeat_interval_seconds ({self.heartbeat_interval_seconds})"
+                ),
             )
         if self.outbox_lease_ttl_seconds <= self.heartbeat_interval_seconds:
-            raise ValueError(
-                f"outbox_lease_ttl_seconds ({self.outbox_lease_ttl_seconds}) must be "
-                f"> heartbeat_interval_seconds ({self.heartbeat_interval_seconds})"
+            raise ConfigError(
+                section="worker",
+                field="outbox_lease_ttl_seconds",
+                reason=(
+                    f"outbox_lease_ttl_seconds ({self.outbox_lease_ttl_seconds}) must be "
+                    f"> heartbeat_interval_seconds ({self.heartbeat_interval_seconds})"
+                ),
             )
         if self.delivery_lease_ttl_seconds <= self.heartbeat_interval_seconds:
-            raise ValueError(
-                f"delivery_lease_ttl_seconds ({self.delivery_lease_ttl_seconds}) must be "
-                f"> heartbeat_interval_seconds ({self.heartbeat_interval_seconds})"
+            raise ConfigError(
+                section="worker",
+                field="delivery_lease_ttl_seconds",
+                reason=(
+                    f"delivery_lease_ttl_seconds ({self.delivery_lease_ttl_seconds}) must be "
+                    f"> heartbeat_interval_seconds ({self.heartbeat_interval_seconds})"
+                ),
             )
         if self.recovery_grace_period_seconds < 0:
-            raise ValueError(
-                f"recovery_grace_period_seconds ({self.recovery_grace_period_seconds}) "
-                f"must be >= 0"
+            raise ConfigError(
+                section="worker",
+                field="recovery_grace_period_seconds",
+                reason=(
+                    f"recovery_grace_period_seconds ({self.recovery_grace_period_seconds}) "
+                    f"must be >= 0"
+                ),
             )
 
     @classmethod
@@ -298,6 +348,7 @@ class ModelConfig:
 
     @classmethod
     def _from_raw(cls, raw: dict[str, Any]) -> ModelConfig:
+        _check_unknown(raw, MODEL_TOP_FIELDS, "model")
         main_raw = dict(raw.get("main", {}))
         return cls(
             provider=str(raw.get("provider", "openai_compat")),
@@ -583,9 +634,13 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
         known_all = KNOWN_TOP_KEYS | KNOWN_SECTIONS
         unknown_keys = set(resolved) - known_all
         if unknown_keys:
-            raise ValueError(
-                f"Unknown config key/section: {', '.join(sorted(unknown_keys))}. "
-                f"Known: {', '.join(sorted(known_all))}"
+            raise ConfigError(
+                section="(top-level)",
+                field="",
+                reason=(
+                    f"unknown sections/keys: {', '.join(sorted(unknown_keys))}"
+                ),
+                source_path=str(cfg_path),
             )
 
         storage_raw = dict(resolved.get("storage", {}))

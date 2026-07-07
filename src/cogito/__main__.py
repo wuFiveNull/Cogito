@@ -11,22 +11,51 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from cogito import __version__
-from cogito.config import DEFAULT_CONFIG_PATH, Config
+from cogito.config import DEFAULT_CONFIG_PATH, Config, ConfigError
 from cogito.store.connection import get_connection
 from cogito.store.migration import migrate
 
 logger = logging.getLogger("cogito")
 
 
+_CONFIG_ARG_FLAG = "--config"
+
+
+def _add_config_arg(p: argparse.ArgumentParser) -> None:
+    """给任何需要读取配置的子命令添加统一的 --config 参数。"""
+    p.add_argument(
+        _CONFIG_ARG_FLAG, default=None,
+        help="Path to config file (default: ./config.toml).",
+    )  # noqa: E501
+
+
+def _resolve_config_path(args: argparse.Namespace) -> Path:
+    """从命令行参数中推导出规范化的配置文件路径。"""
+    raw = getattr(args, "config", None)
+    return Path(raw) if raw else DEFAULT_CONFIG_PATH
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="cogito", description="Cogito — 主动式个人 Agent")
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("init", help="Initialize workspace and database")
-    sub.add_parser("info", help="Show system info")
+    init_parser = sub.add_parser("init", help="Initialize workspace and database")
+    _add_config_arg(init_parser)
+
+    info_parser = sub.add_parser("info", help="Show system info")
+    _add_config_arg(info_parser)
+
+    # ── Config CLI ──
+    config_parser = sub.add_parser("config", help="Configuration management")
+    config_sub = config_parser.add_subparsers(dest="config_command")
+    config_check = config_sub.add_parser(
+        "check", help="Validate configuration file and report status"
+    )
+    _add_config_arg(config_check)
 
     # ── Memory CLI (H1) ──
     memory_parser = sub.add_parser("memory", help="Memory management CLI")
+    _add_config_arg(memory_parser)
     memory_sub = memory_parser.add_subparsers(dest="memory_command")
 
     memory_sub.add_parser("list", help="List memories")
@@ -43,6 +72,7 @@ def main() -> None:
     memory_sub.add_parser("views", help="Regenerate Markdown views")
 
     run_parser = sub.add_parser("run", help="Start the agent runtime loop")
+    _add_config_arg(run_parser)
     run_parser.add_argument(
         "--worker-id", default="worker1",
         help="Worker ID (default: worker1)",
@@ -61,24 +91,58 @@ def main() -> None:
     )
 
     args = parser.parse_args()
-    if args.command == "init":
-        _cmd_init()
-    elif args.command == "info":
-        _cmd_info()
-    elif args.command == "run":
-        _cmd_run(args)
-    elif args.command == "memory":
-        _cmd_memory(args)
+    try:
+        if args.command == "init":
+            _cmd_init(args)
+        elif args.command == "info":
+            _cmd_info(args)
+        elif args.command == "config":
+            _cmd_config(args)
+        elif args.command == "run":
+            _cmd_run(args)
+        elif args.command == "memory":
+            _cmd_memory(args)
+        else:
+            parser.print_help()
+            sys.exit(1)
+    except ConfigError as e:
+        print(e.format_cli(), file=sys.stderr)
+        sys.exit(2)
+
+
+def _cmd_config(args: argparse.Namespace) -> None:
+    """Validate config and report status (RB-A01, RB-A02).
+
+    Output never contains the actual Secret value (CONFIG-PROFILES / 5).
+    Exit codes:
+        0 — config is valid
+        2 — invalid (ConfigError)
+    """
+    if not getattr(args, "config_command", None):
+        # No subcommand: default to check for UX simplicity
+        args.config_command = "check"
+
+    if args.config_command == "check":
+        config_path = _resolve_config_path(args).resolve()
+        # load() raises ConfigError on failure
+        config = Config.load(config_path)
+
+        model_label = "configured" if config.model.main.is_configured() else "stub"
+        print(f"[ok] config:    {config_path}")
+        print(f"[ok] profile:   {config.runtime.profile}")
+        print(f"[ok] workspace: {Path(config.workspace_path).resolve()}")
+        print(f"[ok] model:     {model_label}")
+        print(f"[ok] schema:    valid")
+        return
     else:
-        parser.print_help()
-        sys.exit(1)
+        raise SystemExit(f"Unknown config subcommand: {args.config_command}")
 
 
 def _cmd_memory(args: argparse.Namespace) -> None:
     """H1: Memory management CLI."""
     import json
 
-    config = Config.load()
+    config = Config.load(_resolve_config_path(args))
     db_path = config.resolve_db_path()
     if not Path(db_path).exists():
         print("[!] Database not found. Run 'cogito init' first.")
@@ -206,9 +270,9 @@ def _cmd_memory(args: argparse.Namespace) -> None:
         conn.close()
 
 
-def _cmd_init() -> None:
+def _cmd_init(args: argparse.Namespace) -> None:
     """Create .workspace/ directory and initialize the database."""
-    config = Config.load()
+    config = Config.load(_resolve_config_path(args))
     workspace = Path(config.workspace_path)
     workspace.mkdir(parents=True, exist_ok=True)
 
@@ -231,11 +295,11 @@ def _cmd_init() -> None:
     print("Done.  Run 'cogito run' to start the agent.")
 
 
-def _cmd_info() -> None:
+def _cmd_info(args: argparse.Namespace) -> None:
     print(f"Cogito v{__version__}")
     print("Python 3.12+ personal agent framework")
     print()
-    config = Config.load()
+    config = Config.load(_resolve_config_path(args))
     print(f"Config file:   {DEFAULT_CONFIG_PATH.resolve()}")
     print(f"Workspace:     {config.workspace_path}")
     print(f"Database path: {config.resolve_db_path()}")
@@ -254,7 +318,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    config = Config.load()
+    config = Config.load(_resolve_config_path(args))
     db_path = config.resolve_db_path()
 
     # 确保数据库已初始化
@@ -299,23 +363,14 @@ def _start_interactive(
     conn: sqlite3.Connection,
     args: argparse.Namespace,
 ) -> None:
-    """启动交互式 REPL（命令行对话模式）。"""
+    """启动交互式 REPL（命令行对话模式）。
+
+    RB-02 修复：REPL 返回后不再调用 _async_run，仅关闭连接。
+    """
     try:
         asyncio.run(_interactive_run(config, conn, args))
     except KeyboardInterrupt:
         print("\n[ok] Bye!")
-    except Exception as e:
-        logger.exception("Fatal error: %s", e)
-        sys.exit(1)
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-    try:
-        asyncio.run(_async_run(config, conn, args))
-    except KeyboardInterrupt:
-        print("\n[ok] Shutdown complete.")
     except Exception as e:
         logger.exception("Fatal error: %s", e)
         sys.exit(1)
