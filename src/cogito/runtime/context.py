@@ -29,12 +29,13 @@ def estimate_tokens(text: str) -> int:
 @dataclass(frozen=True)
 class ContextItem:
     """Snapshot 中的单个上下文条目。"""
-    item_type: str  # "message" | "system_policy" | "memory"
+    item_type: str  # "message" | "system_policy" | "memory" | "summary"
     item_id: str
     source: str  # session_id 或 "system"
     tokens: int = 0
     trust_label: str = "unverified"
     content: str = ""
+    role: str = ""  # "user" | "assistant" | "tool" | "system"
 
 
 @dataclass(frozen=True)
@@ -98,18 +99,30 @@ class ContextBuilder:
         input_message_id: str,
         system_policy: str = "",
     ) -> ContextSnapshot:
-        """构建不可变 ContextSnapshot。"""
-        # 获取当前 session 的消息
-        messages = self._load_session_messages(session_id)
-        message_upper_bound = len(messages)
+        """构建不可变 ContextSnapshot。
 
-        # 找到当前输入消息的 sequence
+        装配顺序（RETRIEVAL-CONTEXT / 10）：
+        system policy → memory → summary → 历史消息 → 当前用户输入
+        """
+        # 获取当前 session 的所有消息（按 receive_sequence 排序）
+        messages = self._load_session_messages(session_id)
         input_seq = self._find_input_sequence(input_message_id)
+        # message_upper_bound 使用真实最大 receive_sequence，不是消息数
+        message_upper_bound = max((m["sequence"] for m in messages), default=0)
+
+        # 拆分当前输入和普通历史
+        input_msg = None
+        history: list[dict] = []
+        for msg in messages:
+            if msg["sequence"] == input_seq:
+                input_msg = msg
+            else:
+                history.append(msg)
 
         # 构建上下文条目
         items: list[ContextItem] = []
 
-        # 1. System Policy 必选
+        # 1. System Policy 必选（最前）
         if system_policy:
             items.append(ContextItem(
                 item_type="system_policy",
@@ -118,53 +131,29 @@ class ContextBuilder:
                 tokens=estimate_tokens(system_policy),
                 trust_label="internal",
                 content=system_policy,
+                role="system",
             ))
 
-        # 2. 当前输入必选
-        for msg in messages:
-            if msg["sequence"] == input_seq:
-                items.append(self._message_to_item(msg))
-                break
+        # 2. Memory 占位（阶段 3 后注入）
+        # 3. Summary 占位（阶段 6 后注入）
 
-        # 3. 近期消息按 sequence 排序（去掉已选中的当前输入）
-        for msg in messages:
-            if msg["sequence"] == input_seq:
-                continue
+        # 4. 历史消息（时间正序）
+        for msg in history:
             items.append(self._message_to_item(msg))
 
-        # 4. Token 超限裁剪（从最旧的开始裁剪）
+        # 5. 当前用户输入（最后）
+        if input_msg:
+            items.append(self._message_to_item(input_msg))
+
+        # 6. Token 超限裁剪
+        # 规则：从最旧的普通历史消息开始裁剪（保留 system policy 和当前输入）
         total_tokens = sum(i.tokens for i in items)
         excluded: list[str] = []
 
         if total_tokens > self._max_input_tokens:
-            # 从后往前裁剪（保留最新的），但保留 system policy（index 0）
-            # 和当前输入（index 1）不裁剪
-            keep_indices = {0}  # system policy
-            if system_policy and items[0].item_type == "system_policy":
-                keep_indices = {0}
-                # 找到 input message index
-                for i, item in enumerate(items):
-                    if item.item_id == input_message_id:
-                        keep_indices.add(i)
-                        break
-            else:
-                # 无 system policy，input 在 index 0
-                keep_indices = {0}
-
-            trimmed: list[ContextItem] = []
-            trimmed_tokens = 0
-            for i, item in enumerate(items):
-                if i in keep_indices:
-                    trimmed.append(item)
-                    trimmed_tokens += item.tokens
-                elif trimmed_tokens + item.tokens <= self._max_input_tokens:
-                    trimmed.append(item)
-                    trimmed_tokens += item.tokens
-                else:
-                    excluded.append(f"{item.item_type}:{item.item_id}")
-
-            items = trimmed
-            total_tokens = trimmed_tokens
+            clipped_items, excluded = self._clip_to_budget(items, input_message_id)
+            items = clipped_items
+            total_tokens = sum(i.tokens for i in items)
 
         snapshot = ContextSnapshot(
             snapshot_id=uuid.uuid4().hex,
@@ -183,33 +172,78 @@ class ContextBuilder:
 
         return snapshot
 
+    def _clip_to_budget(
+        self,
+        items: list[ContextItem],
+        input_message_id: str,
+    ) -> tuple[list[ContextItem], list[str]]:
+        """从最旧的普通历史消息开始裁剪，保留 system policy 和当前输入。"""
+        # 找出需要保护的索引（system policy 和当前输入）
+        protected_indices: set[int] = set()
+        for i, item in enumerate(items):
+            if item.item_type == "system_policy":
+                protected_indices.add(i)
+            elif item.item_id == input_message_id:
+                protected_indices.add(i)
+
+        trimmed: list[ContextItem] = []
+        excluded: list[str] = []
+
+        for i, item in enumerate(items):
+            if i in protected_indices:
+                trimmed.append(item)
+            elif sum(i2.tokens for i2 in trimmed) + item.tokens <= self._max_input_tokens:
+                trimmed.append(item)
+            else:
+                excluded.append(f"{item.item_type}:{item.item_id}")
+
+        return trimmed, excluded
+
     def _load_session_messages(self, session_id: str) -> list[dict[str, Any]]:
-        """加载 session 的所有消息（按接收顺序）。"""
+        """加载 session 的所有消息（按接收顺序），聚合多 ContentPart 内容。"""
         rows = self._conn.execute(
             "SELECT m.message_id, m.role, m.direction, m.receive_sequence, "
             "  m.trust_label, m.session_id, "
-            "  COALESCE(cp.inline_data, '') AS content "
+            "  cp.inline_data, cp.content_type "
             "FROM messages m "
             "LEFT JOIN content_parts cp ON cp.message_id = m.message_id "
             "WHERE m.session_id=? "
-            "ORDER BY m.receive_sequence ASC",
+            "ORDER BY m.receive_sequence ASC, cp.part_id ASC",
             (session_id,),
         ).fetchall()
 
-        result = []
-        seen_ids = set()
+        # 按 message_id 聚合 content_parts
+        message_map: dict[str, dict[str, Any]] = {}
         for row in rows:
-            if row["message_id"] not in seen_ids:
-                seen_ids.add(row["message_id"])
-                result.append({
-                    "message_id": row["message_id"],
+            mid = row["message_id"]
+            if mid not in message_map:
+                message_map[mid] = {
+                    "message_id": mid,
                     "role": row["role"],
                     "direction": row["direction"],
                     "sequence": row["receive_sequence"],
                     "trust_label": row["trust_label"],
                     "session_id": row["session_id"],
-                    "content": row["content"] or "",
-                })
+                    "content_parts": [],
+                }
+            # Accumulate all content parts
+            if row["inline_data"]:
+                message_map[mid]["content_parts"].append(row["inline_data"])
+
+        # 组装最终结果，内容为所有文本片段的拼接
+        result = []
+        for msg in message_map.values():
+            result.append({
+                "message_id": msg["message_id"],
+                "role": msg["role"],
+                "direction": msg["direction"],
+                "sequence": msg["sequence"],
+                "trust_label": msg["trust_label"],
+                "session_id": msg["session_id"],
+                "content": "\n".join(msg["content_parts"]) if msg["content_parts"] else "",
+            })
+        # 按 receive_sequence 排序
+        result.sort(key=lambda m: m["sequence"])
         return result
 
     def _find_input_sequence(self, input_message_id: str) -> int:
@@ -227,4 +261,5 @@ class ContextBuilder:
             tokens=estimate_tokens(msg.get("content", "")),
             trust_label=msg.get("trust_label", "unverified"),
             content=msg.get("content", ""),
+            role=msg.get("role", "user"),
         )

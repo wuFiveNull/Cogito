@@ -278,7 +278,8 @@ class AgentLoop:
         """
         messages = []
         for item in context.items:
-            role = "system" if item.item_type == "system_policy" else "user"
+            # 使用 ContextItem 中保留的原始 role，不乱映射
+            role = item.role or ("system" if item.item_type == "system_policy" else "user")
             messages.append({
                 "role": role,
                 "content": item.content,

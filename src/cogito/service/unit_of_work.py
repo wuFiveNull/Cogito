@@ -9,6 +9,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
+from cogito.store.memory_repo import MemoryRepository
 from cogito.store.repositories import (
     ConversationRepository,
     EndpointRepository,
@@ -45,6 +46,7 @@ class UnitOfWork:
         self._message: MessageRepository | None = None
         self._turn: TurnRepository | None = None
         self._outbox: OutboxRepository | None = None
+        self._memory: MemoryRepository | None = None
 
     @property
     def inbox(self) -> InboxRepository:
@@ -93,6 +95,12 @@ class UnitOfWork:
         if self._outbox is None:
             self._outbox = OutboxRepository(self._conn)
         return self._outbox
+
+    @property
+    def memory(self) -> MemoryRepository:
+        if self._memory is None:
+            self._memory = MemoryRepository(self._conn)
+        return self._memory
 
     # ── 事务边界 ──
 
