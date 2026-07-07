@@ -17,8 +17,11 @@ Plan 01 / 十、AgentRunner：
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 from enum import StrEnum
+
+_LOGGER = logging.getLogger("cogito.agent_runner")
 
 from cogito.capability import CapabilityRegistry
 from cogito.capability.executor import ToolExecutor
@@ -126,14 +129,23 @@ class AgentRunner:
             loop_result = await self._run_loop_with_heartbeat(
                 turn, attempt, worker_id, context,
             )
-        except Exception:
+        except Exception as e:
+            _LOGGER.exception("AgentLoop.run() threw: %s", e)
             self._fail_safe(turn, attempt)
             return RunOutcome.failed
 
         # ── 检查 Loop 是否成功 ──
         if not loop_result.is_success:
+            _LOGGER.warning(
+                "Loop did not succeed: type=%s error=%s text=%s",
+                loop_result.result_type,
+                loop_result.error_message,
+                loop_result.text[:200] if loop_result.text else "(empty)",
+            )
             if loop_result.result_type == LoopResultType.cancelled:
                 return RunOutcome.cancelled
+            if loop_result.error_message:
+                _LOGGER.error("Loop failed: %s", loop_result.error_message)
             self._fail_safe(turn, attempt)
             return RunOutcome.failed
 
@@ -157,7 +169,8 @@ class AgentRunner:
             if message_id is None:
                 return RunOutcome.failed
             return RunOutcome.completed
-        except Exception:
+        except Exception as e:
+            _LOGGER.exception("complete_reply failed: %s", e)
             self._fail_safe(turn, attempt)
             return RunOutcome.failed
 
