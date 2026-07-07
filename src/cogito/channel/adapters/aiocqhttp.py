@@ -684,6 +684,10 @@ class AiocqhttpAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter)
     async def run_async(self):
         await self.bot._server_app.run_task(**self.config)
 
+    async def is_stream_output_supported(self) -> bool:
+        # OneBot 11 + aiocqhttp 不支持流式输出
+        return False
+
     async def kill(self) -> bool:
         # Current issue: existing connection will not be closed
         # self.should_shutdown = True
