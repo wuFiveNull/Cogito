@@ -157,9 +157,9 @@ def _poll_connector(
 
             if model_router is not None:
                 try:
-                    summary_text = summarize_item(
+                    summary_text = asyncio.run(summarize_item(
                         entry.title, entry.summary, model_router,
-                    )
+                    ))
                 except Exception:
                     _LOGGER.warning("summary failed for %s", entry.source_item_id)
 

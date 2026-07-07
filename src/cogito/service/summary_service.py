@@ -31,7 +31,7 @@ RSS_SUMMARY_SYSTEM_PROMPT = (
 )
 
 
-def summarize_item(
+async def summarize_item(
     title: str,
     content: str,
     model_router: Any,
@@ -57,7 +57,7 @@ def summarize_item(
             {"role": "user", "content": f"Title: {title}\n\nContent: {text[:2000]}"},
         ]
         request = ModelRequest(messages=messages, max_output_tokens=200)
-        response = model_router.generate(request, model_role=role)
+        response = await model_router.generate(request, model_role=role)
         summary = (response.text or "").strip()
         return summary[:max_chars] if summary else text[:max_chars]
     except Exception as e:
