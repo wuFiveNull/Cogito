@@ -80,8 +80,15 @@ class ChannelManager:
             self._log.exception("Channel %s failed", name)
 
     def get_adapter(self, adapter_id: str) -> ChannelAdapter | None:
-        """按 ID 获取运行中的适配器。"""
-        return self._adapters.get(adapter_id)
+        """按 ID 或注册名获取运行中的适配器。"""
+        adapter = self._adapters.get(adapter_id)
+        if adapter is not None:
+            return adapter
+        # fallback: 按 adapter.adapter_id 属性匹配
+        for a in self._adapters.values():
+            if a.adapter_id == adapter_id:
+                return a
+        return None
 
     def get_event_loop(self) -> asyncio.AbstractEventLoop:
         """获取运行事件循环。"""

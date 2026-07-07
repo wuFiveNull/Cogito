@@ -433,10 +433,10 @@ def _process_one_delivery(
         lease = delivery_worker.lease_next(worker_id)
         if lease is None:
             return
-        delivery_worker.deliver(lease, worker_id)
-        logger.debug("Delivery sent: %s", lease.delivery_id)
+        result = delivery_worker.deliver(lease, worker_id)
+        logger.info("Delivery %s: %s -> %s", lease.delivery_id[:12], lease.content_ref[:40], result)
     except Exception:
-        logger.debug("No pending delivery")
+        logger.warning("Delivery processing failed", exc_info=True)
 
 
 if __name__ == "__main__":
