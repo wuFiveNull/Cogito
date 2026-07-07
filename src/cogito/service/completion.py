@@ -162,6 +162,10 @@ class TurnCompletionService:
             reply_route: 来自输入消息的回复路由快照。创建 Delivery 时使用。
         """
         with UnitOfWork(self._conn) as uow:
+            # 为 outbound 消息分配 receive_sequence
+            if message.receive_sequence == 0:
+                message.receive_sequence = uow.message.next_receive_sequence(message.conversation_id)
+
             # 1. 写入 Assistant Message
             uow.message.insert(message)
             for part in message.content_parts:

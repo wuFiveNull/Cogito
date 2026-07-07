@@ -300,7 +300,7 @@ async def _async_run(
             if outcome == RunOutcome.idle:
                 # 无可用 Turn，顺带处理 Delivery
                 if delivery_worker:
-                    _process_one_delivery(delivery_worker, args.worker_id)
+                    await _process_one_delivery(delivery_worker, args.worker_id)
                 # 等待后重试
                 try:
                     await asyncio.wait_for(
@@ -313,7 +313,7 @@ async def _async_run(
                 logger.info("Turn completed successfully")
                 # 完成 Turn 后立即处理一次 Delivery
                 if delivery_worker:
-                    _process_one_delivery(delivery_worker, args.worker_id)
+                    await _process_one_delivery(delivery_worker, args.worker_id)
             elif outcome == RunOutcome.failed:
                 logger.warning("Turn execution failed")
             elif outcome == RunOutcome.lost:
@@ -424,16 +424,16 @@ async def _interactive_run(
             print(f"  ⚠️  Unexpected outcome: {outcome}")
 
 
-def _process_one_delivery(
+async def _process_one_delivery(
     delivery_worker: "DeliveryWorker",  # noqa: F821
     worker_id: str,
 ) -> None:
-    """领取并发送一条待投递消息。"""
+    """领取并发送一条待投递消息（不阻塞事件循环）。"""
     try:
         lease = delivery_worker.lease_next(worker_id)
         if lease is None:
             return
-        result = delivery_worker.deliver(lease, worker_id)
+        result = await asyncio.to_thread(delivery_worker.deliver, lease, worker_id)
         logger.info("Delivery %s: %s -> %s", lease.delivery_id[:12], lease.content_ref[:40], result)
     except Exception:
         logger.warning("Delivery processing failed", exc_info=True)

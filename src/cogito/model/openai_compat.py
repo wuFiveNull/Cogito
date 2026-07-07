@@ -42,6 +42,8 @@ class OpenAICompatProvider(ModelProvider):
     Ollama、vLLM、LiteLLM 等兼容接口。
     """
 
+    HEALTH_CACHE_TTL_S = 30  # 健康检查缓存时间
+
     def __init__(
         self,
         model: str,
@@ -64,6 +66,9 @@ class OpenAICompatProvider(ModelProvider):
             timeout=httpx.Timeout(timeout_seconds),
             follow_redirects=True,
         )
+
+        # 健康检查缓存
+        self._health_cache: tuple[HealthStatus, float] | None = None
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
         """非流式生成。
@@ -155,20 +160,29 @@ class OpenAICompatProvider(ModelProvider):
         )
 
     async def health(self) -> HealthStatus:
-        """通过列出模型检查 Provider 可用性。"""
+        """检查 Provider 可用性（带 30s 缓存）。"""
+        import time
+        now = time.monotonic()
+        if self._health_cache is not None and now - self._health_cache[1] < self.HEALTH_CACHE_TTL_S:
+            return self._health_cache[0]
+
         try:
             response = await self._client.get(
                 "/models",
                 headers={"Authorization": f"Bearer {self._api_key}"},
             )
             if response.status_code == 200:
-                return HealthStatus(healthy=True, latency_ms=0)
-            return HealthStatus(
-                healthy=False,
-                message=f"Health check failed: HTTP {response.status_code}",
-            )
+                status = HealthStatus(healthy=True, latency_ms=0)
+            else:
+                status = HealthStatus(
+                    healthy=False,
+                    message=f"Health check failed: HTTP {response.status_code}",
+                )
         except Exception as e:
-            return HealthStatus(healthy=False, message=str(e))
+            status = HealthStatus(healthy=False, message=str(e))
+
+        self._health_cache = (status, now)
+        return status
 
     def close(self) -> None:
         """关闭底层 HTTP 客户端。"""

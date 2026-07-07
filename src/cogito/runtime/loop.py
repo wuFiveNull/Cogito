@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
+
+_LOGGER = logging.getLogger(__name__)
 
 from cogito.capability.executor import ToolExecutor
 from cogito.capability.models import ToolContext
@@ -186,6 +189,15 @@ class AgentLoop:
                 iter_latency = int(
                     (datetime.now(UTC) - iter_start).total_seconds() * 1000
                 )
+                _LOGGER.info(
+                    "AgentLoop iteration %d/%d: model call took %dms, "
+                    "finish=%s, tool_calls=%d, text_len=%d",
+                    state.iteration_no, self._max_iterations,
+                    iter_latency,
+                    response.finish_reason.value,
+                    len(response.tool_calls),
+                    len(response.text),
+                )
             except RouterError as e:
                 return self._make_result(
                     LoopResultType.error, state,
@@ -226,7 +238,16 @@ class AgentLoop:
                         "Tool calls not supported: no executor configured",
                         finish_reason=FinishReason.error,
                     )
+                tool_start = datetime.now(UTC)
                 loop_detected = await self._execute_tool_calls(state, response)
+                tool_latency = int(
+                    (datetime.now(UTC) - tool_start).total_seconds() * 1000
+                )
+                _LOGGER.info(
+                    "AgentLoop iteration %d: tool execution took %dms, "
+                    "tool_call_count=%d",
+                    state.iteration_no, tool_latency, state.tool_call_count,
+                )
                 if loop_detected:
                     return self._make_result(
                         LoopResultType.repetition, state,

@@ -8,6 +8,7 @@ Delivery (DB) → DeliveryWorker.lease_next() → deliver()
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 
@@ -25,6 +26,7 @@ class ChannelGateway(Gateway):
     def __init__(self, conn: sqlite3.Connection, channel_manager: ChannelManager) -> None:
         self._conn = conn
         self._channel_manager = channel_manager
+        self._loop = asyncio.get_running_loop()
 
     def send(self, target_snapshot: str, content_ref: str) -> bool | None:
         """发送消息到平台。
@@ -37,8 +39,6 @@ class ChannelGateway(Gateway):
         Returns:
             True=成功, False=失败, None=未知
         """
-        import asyncio
-
         try:
             target = json.loads(target_snapshot) if isinstance(target_snapshot, str) else target_snapshot
         except (json.JSONDecodeError, TypeError):
@@ -71,7 +71,7 @@ class ChannelGateway(Gateway):
                     conversation_id=str(conversation_id),
                     message=text,
                 ),
-                self._channel_manager.get_event_loop(),
+                self._loop,
             )
             response = result.result(timeout=30)
             return bool(response)
