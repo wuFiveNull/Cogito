@@ -9,6 +9,7 @@ Memory、Goal、Summary 暂为空源，但保留来源接口。
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -149,7 +150,44 @@ class ContextBuilder:
         memory_items, memory_ids = self._inject_memories(principal_id, session_id)
         items.extend(memory_items)
 
-        # 3. Summary 占位（阶段 6 后注入）
+        # 3. 上下文压缩（阶段 6）：按 token 压力替换旧消息为摘要
+        history_itemized = [self._message_to_item(m) for m in history]
+        input_itemized = self._message_to_item(input_msg) if input_msg else None
+
+        base_tokens = sum(i.tokens for i in items)
+        history_tokens = sum(i.tokens for i in history_itemized)
+        input_tokens = input_itemized.tokens if input_itemized else 0
+        total_estimate = base_tokens + history_tokens + input_tokens
+        token_ratio = total_estimate / self._max_input_tokens if self._max_input_tokens > 0 else 0
+
+        compressed = False
+        if token_ratio >= self.BACKGROUND_THRESHOLD:
+            summary = self._load_active_summary(session_id)
+            if summary:
+                covers_to = summary["covers_to_seq"]
+                keep_min = min(self.KEEP_RECENT_COUNT, len(history))
+                cutoff_idx = len(history) - keep_min
+                old_count = 0
+                recent: list[dict] = []
+                for i, msg in enumerate(history):
+                    if i < cutoff_idx and msg.get("sequence", 0) <= covers_to:
+                        old_count += 1
+                    else:
+                        recent.append(msg)
+
+                if old_count > 0:
+                    summary_content = self._format_summary(summary["content_json"])
+                    items.append(ContextItem(
+                        item_type="summary",
+                        item_id=summary["summary_id"],
+                        source=session_id,
+                        tokens=estimate_tokens(summary_content),
+                        trust_label="verified",
+                        content=summary_content,
+                        role="system",
+                    ))
+                    history = recent
+                    compressed = True
 
         # 4. 历史消息（时间正序）
         for msg in history:
@@ -198,12 +236,60 @@ class ContextBuilder:
         "episode": 4,
     }
 
+    # ── 上下文压缩常量（阶段 6）──
+    SOFT_THRESHOLD = 0.65      # 仅记录压力
+    BACKGROUND_THRESHOLD = 0.75  # 尝试加载摘要
+    HARD_THRESHOLD = 0.85      # 必须应用摘要
+    EMERGENCY_THRESHOLD = 0.95 # 强制裁剪兜底
+    KEEP_RECENT_COUNT = 10     # 保留的最近消息数
+    KEEP_RECENT_TOKENS = 2000  # 保留的最近消息最低 token 数
+
     def _get_session_conversation(self, session_id: str) -> str:
         row = self._conn.execute(
             "SELECT conversation_id FROM sessions WHERE session_id=?",
             (session_id,),
         ).fetchone()
         return row["conversation_id"] if row else ""
+
+    def _load_active_summary(self, session_id: str) -> dict | None:
+        """加载 session 的最新活跃摘要。"""
+        row = self._conn.execute(
+            "SELECT summary_id, covers_to_seq, content_json "
+            "FROM session_summaries "
+            "WHERE session_id=? AND status='active' "
+            "ORDER BY summary_version DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "summary_id": row["summary_id"],
+            "covers_to_seq": row["covers_to_seq"],
+            "content_json": row["content_json"],
+        }
+
+    @staticmethod
+    def _format_summary(content_json: str) -> str:
+        """将 session_summary 的 JSON 格式化为模型可读的摘要文本。"""
+        try:
+            data = json.loads(content_json)
+        except (json.JSONDecodeError, TypeError):
+            return f"Session Summary: {content_json[:500]}"
+
+        if isinstance(data, dict):
+            lines = ["## Session Summary"]
+            for key in ("conversation_goal", "summary", "user_intent", "current_state"):
+                val = data.get(key)
+                if val:
+                    label = key.replace("_", " ").title()
+                    lines.append(f"{label}: {val}")
+            for key in ("confirmed_facts", "decisions", "constraints", "completed_work"):
+                val = data.get(key)
+                if val and isinstance(val, list):
+                    for item in val:
+                        lines.append(f"- {item}")
+            return "\n".join(lines)
+        return f"Session Summary: {content_json[:500]}"
 
     def _inject_memories(
         self,

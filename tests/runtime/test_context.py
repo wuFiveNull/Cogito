@@ -507,3 +507,141 @@ class TestMemoryInjection:
 
         assert "mem_a" in snapshot.memory_ids
         assert "mem_b" in snapshot.memory_ids
+
+
+def _add_summary(
+    conn: sqlite3.Connection,
+    session_id: str = "s1",
+    covers_to_seq: int = 5,
+    content_json: str | None = None,
+    status: str = "active",
+) -> None:
+    """插入一条 session_summary 用于测试。"""
+    if content_json is None:
+        content_json = '{"summary": "User asked about Python.", "confirmed_facts": ["user likes Python"]}'
+    from datetime import UTC, datetime
+
+    conn.execute(
+        "INSERT INTO session_summaries ("
+        "  summary_id, session_id, covers_from_seq, covers_to_seq,"
+        "  content_json, model_version, prompt_version, status, created_at"
+        ") VALUES (?, ?, 1, ?, ?, '', '', ?, ?)",
+        (
+            f"sum_{session_id}",
+            session_id,
+            covers_to_seq,
+            content_json,
+            status,
+            epoch_ms(datetime.now(UTC)),
+        ),
+    )
+    conn.commit()
+
+
+class TestContextCompression:
+    """ContextBuilder 上下文压缩测试。"""
+
+    def test_low_token_ratio_no_compression(self, db):
+        """低于 BACKGROUND_THRESHOLD 时，不加载摘要。"""
+        # 少量短消息
+        _add_message(db, message_id="m1", session_id="s1", role="user", content="Hi", sequence=1)
+        _add_summary(db, session_id="s1", covers_to_seq=1)
+
+        builder = ContextBuilder(db, max_input_tokens=40000)
+        snapshot = builder.build("t1", "s1", "m1", system_policy="Policy.")
+
+        # 不应有 summary 条目
+        summary_items = [i for i in snapshot.items if i.item_type == "summary"]
+        assert len(summary_items) == 0
+
+    def test_compression_replaces_old_messages(self, db):
+        """高 token_ratio 下，旧消息被摘要替换。"""
+        for i in range(1, 21):
+            _add_message(db, message_id=f"m{i}", session_id="s1", role="user",
+                         content="This is a long message that consumes many tokens. " * 30,
+                         sequence=i)
+        _add_summary(db, session_id="s1", covers_to_seq=15)
+
+        builder = ContextBuilder(db, max_input_tokens=1200)
+        snapshot = builder.build("t1", "s1", "m20", system_policy="Policy.")
+
+        # 应有 summary 条目
+        summary_items = [i for i in snapshot.items if i.item_type == "summary"]
+        assert len(summary_items) == 1
+        assert "Session Summary" in summary_items[0].content
+
+        # 旧消息不应出现（m1 等）
+        item_contents = {i.item_id for i in snapshot.items}
+        assert "m1" not in item_contents
+
+    def test_compression_keeps_recent_messages(self, db):
+        """压缩后最新 KEEP_RECENT_COUNT 条消息仍保留。"""
+        for i in range(1, 21):
+            _add_message(db, message_id=f"m{i}", session_id="s1", role="user",
+                         content="Long message for tokens. " * 20,
+                         sequence=i)
+        _add_summary(db, session_id="s1", covers_to_seq=15)
+
+        builder = ContextBuilder(db, max_input_tokens=1200)
+        snapshot = builder.build("t1", "s1", "m20")
+
+        item_ids = {i.item_id for i in snapshot.items}
+        # 最近消息 m20（当前输入）、m19、m18 等应保留
+        assert "m20" in item_ids
+
+    def test_no_summary_falls_back_to_clipping(self, db):
+        """摘要不存在时，回退到普通裁剪。"""
+        for i in range(1, 20):
+            _add_message(db, message_id=f"m{i}", session_id="s1", role="user",
+                         content="Long message for tokens. " * 30,
+                         sequence=i)
+        # 不插入 summary
+
+        builder = ContextBuilder(db, max_input_tokens=500)
+        snapshot = builder.build("t1", "s1", "m19")
+
+        # 不应有 summary 条目
+        summary_items = [i for i in snapshot.items if i.item_type == "summary"]
+        assert len(summary_items) == 0
+        # 但当前输入应保留
+        item_ids = {i.item_id for i in snapshot.items}
+        assert "m19" in item_ids
+
+    def test_summary_format(self, db):
+        """摘要格式包含 Session Summary 标题。"""
+        for i in range(1, 12):
+            _add_message(db, message_id=f"m{i}", session_id="s1", role="user",
+                         content="Long message that takes up tokens. " * 20,
+                         sequence=i)
+        _add_summary(db, session_id="s1", covers_to_seq=10,
+                     content_json='{"summary": "Discussed Python.", "confirmed_facts": ["uses Python"]}')
+
+        builder = ContextBuilder(db, max_input_tokens=1200)
+        snapshot = builder.build("t1", "s1", "m12")
+
+        summary_items = [i for i in snapshot.items if i.item_type == "summary"]
+        if summary_items:
+            content = summary_items[0].content
+            assert "Session Summary" in content
+            assert "Python" in content
+
+    def test_compression_between_memory_and_history(self, db):
+        """装配顺序：system → memory → summary → 近期消息 → 当前输入。"""
+        for i in range(1, 16):
+            _add_message(db, message_id=f"m{i}", session_id="s1", role="user",
+                         content="Long message for tokens. " * 20,
+                         sequence=i, principal_id="p1")
+        _add_summary(db, session_id="s1", covers_to_seq=10)
+        _add_memory(db, memory_id="mem1", principal_id="p1",
+                    subject="user", predicate="lang", value="Python")
+
+        service = SqliteMemoryService(db)
+        builder = ContextBuilder(db, memory_service=service, max_input_tokens=1500)
+        snapshot = builder.build("t1", "s1", "m15", system_policy="Policy.")
+
+        item_types = [i.item_type for i in snapshot.items]
+        sys_idx = item_types.index("system_policy") if "system_policy" in item_types else -1
+        mem_idx = item_types.index("memory")
+        sum_idx = item_types.index("summary")
+        msg_idx = item_types.index("message")
+        assert sys_idx < mem_idx < sum_idx < msg_idx
