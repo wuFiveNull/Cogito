@@ -40,6 +40,18 @@ recovery_grace_period_seconds = 30
 # enabled_toolsets = ["core", "terminal", "memory", "search"]
 # disabled_toolsets = []
 
+# ── MCP Server 配置（Phase 5）──
+# [capability.mcp.servers.filesystem]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
+# transport = "stdio"
+# enabled = true
+# toolset = "mcp"
+
+# [capability.mcp.servers.custom]
+# url = "http://localhost:3000/mcp"
+# transport = "sse"
+# enabled = true
 [model]
 # main = { provider = "deepseek", model = "deepseek-v4-flash" }
 

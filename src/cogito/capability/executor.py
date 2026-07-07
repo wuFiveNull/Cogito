@@ -1,25 +1,33 @@
 """ToolExecutor — 执行工具调用。
 
 TOOL-SANDBOX / 1. 执行链：
-ToolRequest → Registry resolve → input schema → Policy → execute → return ToolResult
+ToolRequest → Registry resolve → input schema → Policy → persist → execute → persist → return ToolResult
 
 当前阶段实现：
 - Registry resolve
+- Policy evaluation（TOOL-SANDBOX / 3）
 - 参数校验（JSON Schema / TypeAdapter）
 - Handler 调度
 - 结果格式化
-
-Policy 集成见 Phase 6。
+- ToolCallRepository 持久化（TOOL-SANDBOX / 2）
+- 并发执行（asyncio.gather）
+- 输出大小限制（TOOL-SANDBOX / 10）
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from typing import Any
 
 from cogito.capability.models import ToolCallState, ToolContext, ToolDef, ToolResult
+from cogito.capability.policy import ToolPolicy
 from cogito.capability.registry import CapabilityRegistry
+from cogito.store.time_utils import epoch_ms
+
+# 最大输出字符数
+MAX_TOOL_OUTPUT_CHARS = 100_000
 
 
 class ToolValidationError(Exception):
@@ -37,13 +45,22 @@ class ToolExecutor:
 
     职责：
     - 按名称解析 ToolDef
+    - 策略评估（allow/deny）
     - 校验参数
     - 执行 handler
+    - 持久化 ToolCall 记录
     - 格式化 ToolResult
     """
 
-    def __init__(self, registry: CapabilityRegistry) -> None:
+    def __init__(
+        self,
+        registry: CapabilityRegistry,
+        policy: ToolPolicy | None = None,
+        repo: Any | None = None,
+    ) -> None:
         self._registry = registry
+        self._policy = policy or ToolPolicy()
+        self._repo = repo  # ToolCallRepository
 
     async def execute(
         self,
@@ -54,31 +71,54 @@ class ToolExecutor:
     ) -> ToolResult:
         """执行单个工具调用。
 
-        Args:
-            tool_call_id: 本次调用的 ID（来自模型响应）。
-            tool_name: 工具名称。
-            arguments: 参数（JSON 对象）。
-            context: 执行上下文（attempt_id, trace_id）。
-
-        Returns: ToolResult（成功或异常）。
-
-        Raises:
-            KeyError: 工具未注册。
-            ToolValidationError: 参数校验失败。
+        执行链：
+        1. Registry resolve
+        2. Policy evaluation
+        3. 持久化 "executing" 状态
+        4. 参数校验
+        5. Handler 执行
+        6. 结果截断
+        7. 持久化最终状态
         """
         # 1. Resolve
         tool = self._registry.get(tool_name)
         if tool is None:
-            raise KeyError(f"Tool '{tool_name}' not found in registry")
+            return ToolResult(
+                tool_call_id, tool_name, "error",
+                error_message=f"Tool '{tool_name}' not found in registry",
+            )
 
-        # 2. 参数校验
-        validated = self._validate(tool, arguments)
+        # 2. Policy evaluation
+        decision = self._policy.evaluate(tool_name, arguments, tool)
+        if not decision.is_allowed:
+            return ToolResult(
+                tool_call_id, tool_name, "error",
+                error_message=f"Policy denied: {decision.reason}",
+            )
 
-        # 3. 执行
+        # 3. 持久化 executing
+        self._persist_start(tool_call_id, context.attempt_id, tool_name, arguments)
+
+        # 4. 参数校验
+        try:
+            validated = self._validate(tool, arguments)
+        except ToolValidationError as e:
+            self._persist_end(tool_call_id, "failed")
+            return ToolResult(
+                tool_call_id, tool_name, "error",
+                error_message=str(e),
+            )
+
+        # 5. 执行
         started_at = datetime.now(UTC)
         try:
             result_text = await tool.handler(validated, context)
             duration = int((datetime.now(UTC) - started_at).total_seconds() * 1000)
+
+            # 6. 结果截断
+            result_text = self._truncate_output(result_text)
+
+            self._persist_end(tool_call_id, "succeeded")
             return ToolResult(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
@@ -88,6 +128,7 @@ class ToolExecutor:
             )
         except Exception as e:
             duration = int((datetime.now(UTC) - started_at).total_seconds() * 1000)
+            self._persist_end(tool_call_id, "failed")
             return ToolResult(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
@@ -101,20 +142,77 @@ class ToolExecutor:
         calls: list[ToolCallState],
         context: ToolContext,
     ) -> list[ToolResult]:
-        """顺序执行多个工具调用。
+        """并发执行多个工具调用。
 
-        并行执行需在调用方通过 asyncio.gather 编排。
+        使用 asyncio.gather 并发执行无依赖的工具。
+        结果按原始调用顺序稳定合并。
         """
-        results: list[ToolResult] = []
-        for call in calls:
-            result = await self.execute(
+        async def execute_one(call: ToolCallState) -> ToolResult:
+            return await self.execute(
                 call.tool_call_id,
                 call.tool_name,
                 call.arguments,
                 context,
             )
-            results.append(result)
-        return results
+
+        results = await asyncio.gather(
+            *[execute_one(c) for c in calls],
+            return_exceptions=True,
+        )
+
+        # 将异常转换为 ToolResult
+        final: list[ToolResult] = []
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                final.append(ToolResult(
+                    tool_call_id=calls[i].tool_call_id,
+                    tool_name=calls[i].tool_name,
+                    status="error",
+                    error_message=str(r),
+                ))
+            else:
+                final.append(r)
+        return final
+
+    # ── 持久化 ──
+
+    def _persist_start(
+        self,
+        tool_call_id: str,
+        attempt_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> None:
+        if not self._repo:
+            return
+        from cogito.store.tool_call_repo import ToolCallRecord
+
+        try:
+            self._repo.insert(ToolCallRecord(
+                tool_call_id=tool_call_id,
+                attempt_id=attempt_id,
+                attempt_type="run",
+                tool_name=tool_name,
+                arguments=json.dumps(arguments, ensure_ascii=False),
+                status="executing",
+                started_at=epoch_ms(datetime.now(UTC)),
+            ))
+        except Exception:
+            pass  # 持久化失败不阻断主流程
+
+    def _persist_end(
+        self, tool_call_id: str, status: str,
+    ) -> None:
+        if not self._repo:
+            return
+        try:
+            self._repo.update_status(
+                tool_call_id,
+                status,
+                completed_at=epoch_ms(datetime.now(UTC)),
+            )
+        except Exception:
+            pass
 
     # ── 参数校验 ──
 
@@ -127,7 +225,6 @@ class ToolExecutor:
         schema = tool.input_schema
         adapter = TypeAdapter(dict[str, Any])
 
-        # 简单参数校验：检查必填字段和类型
         properties = schema.get("properties", {})
         required = schema.get("required", [])
 
@@ -156,6 +253,17 @@ class ToolExecutor:
             ) from e
 
         return arguments
+
+    # ── 输出截断 ──
+
+    @staticmethod
+    def _truncate_output(text: str) -> str:
+        if len(text) > MAX_TOOL_OUTPUT_CHARS:
+            return (
+                text[:MAX_TOOL_OUTPUT_CHARS]
+                + f"\n... (truncated, {len(text)} chars)"
+            )
+        return text
 
     # ── 结果格式化 ──
 

@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 
 from cogito.capability import CapabilityRegistry
-from cogito.capability.executor import ToolExecutor, ToolValidationError
+from cogito.capability.executor import ToolExecutor
 from cogito.capability.models import (
     ToolCallState,
     ToolContext,
@@ -119,14 +119,16 @@ class TestToolExecutor:
     @pytest.mark.asyncio
     async def test_tool_not_found(self, registry, ctx):
         executor = ToolExecutor(registry)
-        with pytest.raises(KeyError, match="not found"):
-            await executor.execute("tc1", "nonexistent", {}, ctx)
+        result = await executor.execute("tc1", "nonexistent", {}, ctx)
+        assert result.status == "error"
+        assert "not found" in result.error_message
 
     @pytest.mark.asyncio
     async def test_missing_required_param(self, registry, ctx):
         executor = ToolExecutor(registry)
-        with pytest.raises(ToolValidationError, match="missing required"):
-            await executor.execute("tc1", "greet", {}, ctx)
+        result = await executor.execute("tc1", "greet", {}, ctx)
+        assert result.status == "error"
+        assert "missing required" in result.error_message
 
     @pytest.mark.asyncio
     async def test_enum_validation(self, registry, ctx):
@@ -136,9 +138,10 @@ class TestToolExecutor:
         result = await executor.execute("tc1", "enum_tool", {"choice": "a"}, ctx)
         assert result.status == "success"
 
-        # 非法值
-        with pytest.raises(ToolValidationError, match="must be one of"):
-            await executor.execute("tc1", "enum_tool", {"choice": "x"}, ctx)
+        # 非法值返回 error
+        result = await executor.execute("tc1", "enum_tool", {"choice": "x"}, ctx)
+        assert result.status == "error"
+        assert "must be one of" in result.error_message
 
     @pytest.mark.asyncio
     async def test_handler_error_returns_error_status(self, registry, ctx):

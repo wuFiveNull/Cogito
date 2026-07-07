@@ -45,6 +45,7 @@ class ModelRouter:
         max_retries: int = 2,
         router_policy_version: str = "1",
         on_call_completed: Callable[[dict], None] | None = None,
+        allow_fallback_after_tool_delivery: bool = False,
     ) -> None:
         self._providers = providers
         self._role_map = role_map  # role → provider_id
@@ -52,6 +53,7 @@ class ModelRouter:
         self._max_retries = max_retries
         self._router_policy_version = router_policy_version
         self._on_call_completed = on_call_completed
+        self._allow_fallback_after_tool_delivery = allow_fallback_after_tool_delivery
 
     def get_provider(self, model_role: str = "main") -> ModelProvider:
         """按 model_role 获取 Provider。"""
@@ -82,6 +84,13 @@ class ModelRouter:
         tried_providers: list[str] = []
 
         provider_ids = self._resolve_provider_chain(model_role)
+
+        # MODEL-ADAPTER / 8: 已交付 Tool Call 后不得切换 Provider
+        has_tool_messages = any(
+            m.get("role") == "tool" for m in request.messages
+        )
+        if has_tool_messages and not self._allow_fallback_after_tool_delivery:
+            provider_ids = provider_ids[:1]
 
         for attempt in range(self._max_retries + 1):
             for provider_id in provider_ids:

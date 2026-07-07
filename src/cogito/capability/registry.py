@@ -128,5 +128,21 @@ class CapabilityRegistry:
     def __contains__(self, name: str) -> bool:
         return name in self._tools
 
+    # ── 取消注册 ──
+
+    def unregister(self, name: str) -> None:
+        """按名称移除一个工具。"""
+        self._tools.pop(name, None)
+
+    def unregister_by_prefix(self, prefix: str) -> list[str]:
+        """移除所有名称以指定前缀开头的工具。
+
+        Returns: 被移除的工具名列表。
+        """
+        removed = [n for n in self._tools if n.startswith(prefix)]
+        for n in removed:
+            del self._tools[n]
+        return removed
+
     def __repr__(self) -> str:
         return f"CapabilityRegistry({len(self._tools)} tools)"

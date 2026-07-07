@@ -57,14 +57,7 @@ class MCPServerManager:
             await client.stop()
 
         # 注销所有以 server_name 前缀的工具
-        tools_to_remove = [
-            t for t in self._registry.all_tools()
-            if t.name.startswith(f"{name}_")
-        ]
-        for t in tools_to_remove:
-            # CapabilityRegistry 不直接支持删除，标记为移除
-            # 重新创建 registry 或使用特殊标记
-            pass
+        self._registry.unregister_by_prefix(f"{name}_")
 
     async def stop_all(self) -> None:
         """停止所有 MCP Server。"""
