@@ -48,7 +48,7 @@ WORKER_FIELDS = frozenset({
 })
 
 MODEL_FIELDS = frozenset({
-    "provider", "api_key", "base_url", "timeout_seconds",
+    "model", "provider", "api_key", "base_url", "timeout_seconds",
 })
 
 AGENT_FIELDS = frozenset({
