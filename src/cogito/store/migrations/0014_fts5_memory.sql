@@ -1,0 +1,8 @@
+-- 0014: FTS5 full-text search for memories (optional)
+-- Applied at version 14
+--
+-- This migration is a version marker only.
+-- The memory_fts virtual table is created lazily by MemoryRepository
+-- at runtime, since FTS5 may not be compiled into the SQLite build.
+--
+-- See: src/cogito/store/memory_repo.py (FTS setup in __init__)

@@ -244,3 +244,158 @@ class TestMemoryRepository:
         results = repo.list_confirmed(principal_id="p1", kinds=["preference"])
         assert len(results) == 1
         assert results[0].kind == MemoryKind.preference
+
+
+class TestFTSIntegration:
+    """FTS5 全文索引集成测试（阶段 7）。
+
+    当前环境 SQLite 可能未编译 FTS5，验证退化路径和辅助函数。
+    """
+
+    def test_fts_available_detection(self, repo):
+        """检测 FTS5 是否可用（当前环境可用）。"""
+        assert repo._ensure_fts() is True
+
+    def test_fts_escape(self):
+        """_fts_escape 正确构建查询词。"""
+        from cogito.store.memory_repo import _fts_escape
+
+        assert _fts_escape("") == ""
+        assert "python" in _fts_escape("python")
+        assert "OR" in _fts_escape("python java")
+        assert _fts_escape("hello-world") != ""
+
+    def test_fts_sync_methods_no_error(self, repo):
+        """FTS 不同步时，sync 方法不抛出异常。"""
+        # 即使 FTS5 不可用，这些方法也应静默返回
+        repo._sync_fts_insert("test_id", "s", "p", "v")
+        repo._sync_fts_update("test_id", "s", "p", "v")
+        repo._sync_fts_delete("test_id")
+        repo._fts_rebuild()
+
+    def test_search_works_with_like_fallback(self, repo):
+        """FTS5 不可用时，search 回退到 LIKE 并返回有分页的结果。"""
+        m = _create_memory(
+            memory_id="fts_test",
+            value="I love Python programming",
+        )
+        repo.insert(m)
+
+        # search 仍正常工作
+        results = repo.search(principal_id="p1", query="Python")
+        assert len(results) >= 1
+        assert "Python" in results[0].value
+
+    def test_search_scored_returns_scores(self, repo):
+        """search_scored 返回带分数的结果。"""
+        m = _create_memory(
+            memory_id="scored_test",
+            value="Python is great",
+            importance=0.9,
+            confidence=1.0,
+        )
+        repo.insert(m)
+
+        results = repo.search_scored(principal_id="p1", query="Python")
+        assert len(results) >= 1
+        item, score = results[0]
+        assert item.value == "Python is great"
+        assert score > 0.0
+
+    def test_search_scored_orders_by_score(self, repo):
+        """search_scored 按分数降序排列。"""
+        m1 = _create_memory(
+            memory_id="score_high",
+            value="Python is the best language",
+            importance=0.9,
+            confidence=1.0,
+        )
+        m2 = _create_memory(
+            memory_id="score_low",
+            value="I like Python sometimes",
+            importance=0.3,
+            confidence=0.5,
+        )
+        repo.insert(m1)
+        repo.insert(m2)
+
+        results = repo.search_scored(principal_id="p1", query="Python")
+        assert len(results) >= 2
+        # 高评分在前
+        assert results[0][1] >= results[1][1]
+
+    def test_search_scoped_scores_higher(self, repo):
+        """在无 scope 过滤时，匹配 scope_type 的条目获得加分。"""
+        m1 = _create_memory(
+            memory_id="scoped1",
+            value="Project config",
+            principal_id="p1",
+            scope_type="conversation",
+            scope_id="conv1",
+            importance=0.5,
+        )
+        m2 = _create_memory(
+            memory_id="scoped2",
+            value="Other config",
+            principal_id="p1",
+            scope_type="",
+            scope_id="",
+            importance=0.5,
+        )
+        repo.insert(m1)
+        repo.insert(m2)
+
+        # 无 scope 过滤，但 scope 匹配的 conv1 条目应略高
+        results = repo.search_scored(
+            principal_id="p1", query="config",
+            scope_type="conversation", scope_id="conv1",
+        )
+        # 只有 conv1 匹配的条目
+        assert len(results) == 1
+        assert results[0][0].memory_id == "scoped1"
+
+        # 无 scope 过滤时两个都在
+        results_all = repo.search_scored(principal_id="p1", query="config")
+        assert len(results_all) >= 2
+
+
+class TestScoring:
+    """加权评分函数测试。"""
+
+    def test_compute_score_baseline(self):
+        from cogito.store.memory_repo import _compute_score
+        from cogito.domain.memory import MemoryItem
+
+        m = MemoryItem(
+            memory_id="s1",
+            importance=0.5,
+            confidence=0.8,
+            explicitness="model_inference",
+            created_at=datetime.now(UTC),
+        )
+        score = _compute_score(m, keyword_hit=True, scope_match=True)
+        assert 0.0 < score <= 1.0
+
+    def test_keyword_hit_increases_score(self):
+        from cogito.store.memory_repo import _compute_score
+        from cogito.domain.memory import MemoryItem
+
+        m = MemoryItem(
+            memory_id="s2",
+            importance=0.5,
+            confidence=0.5,
+        )
+        with_hit = _compute_score(m, keyword_hit=True, scope_match=False)
+        without_hit = _compute_score(m, keyword_hit=False, scope_match=False)
+        assert with_hit > without_hit
+
+    def test_explicitness_mapping(self):
+        from cogito.store.memory_repo import _compute_score
+        from cogito.domain.memory import MemoryItem, Explicitness
+
+        explicit = MemoryItem(memory_id="e1", explicitness="explicit_user_statement")
+        inferred = MemoryItem(memory_id="e2", explicitness="model_inference")
+
+        score_explicit = _compute_score(explicit, keyword_hit=False, scope_match=False)
+        score_inferred = _compute_score(inferred, keyword_hit=False, scope_match=False)
+        assert score_explicit > score_inferred

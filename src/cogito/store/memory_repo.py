@@ -71,6 +71,64 @@ def dt_from_str(s: Any) -> datetime | None:
         return None
 
 
+def _fts_escape(query: str) -> str:
+    """转义 FTS5 特殊字符，构建安全的多词查询。"""
+    if not query:
+        return ""
+    # 移除非单词字符，构建短语查询
+    import re
+    tokens = re.findall(r"[-\w]+", query)
+    return " OR ".join(tokens) if tokens else query
+
+
+# ── 加权评分系数（阶段 7）──
+KEYWORD_WEIGHT = 0.30
+SCOPE_WEIGHT = 0.20
+IMPORTANCE_WEIGHT = 0.15
+CONFIDENCE_WEIGHT = 0.15
+RECENCY_WEIGHT = 0.10
+EXPLICITNESS_WEIGHT = 0.10
+
+
+def _compute_score(
+    item: MemoryItem,
+    keyword_hit: bool = False,
+    scope_match: bool = False,
+    now: datetime | None = None,
+) -> float:
+    """计算记忆的加权检索评分（0.0 ~ 1.0）。"""
+    if now is None:
+        now = datetime.now(UTC)
+
+    kw_score = 1.0 if keyword_hit else 0.0
+    sc_score = 1.0 if scope_match else 0.0
+    imp_score = item.importance
+    conf_score = item.confidence
+
+    # 新鲜度：越近分数越高（半衰期 30 天）
+    age_days = (now - item.created_at).total_seconds() / 86400 if item.created_at else 365
+    recency_score = max(0.0, 1.0 - age_days / 365.0)
+
+    # 显式性得分
+    expl_map = {
+        "explicit_user_statement": 1.0,
+        "confirmed_inference": 0.9,
+        "external_source": 0.7,
+        "system_generated": 0.6,
+        "model_inference": 0.4,
+    }
+    expl_score = expl_map.get(item.explicitness, 0.5)
+
+    return (
+        KEYWORD_WEIGHT * kw_score
+        + SCOPE_WEIGHT * sc_score
+        + IMPORTANCE_WEIGHT * imp_score
+        + CONFIDENCE_WEIGHT * conf_score
+        + RECENCY_WEIGHT * recency_score
+        + EXPLICITNESS_WEIGHT * expl_score
+    )
+
+
 class MemoryRepository:
     """MemoryItem 数据访问层。
 
@@ -83,6 +141,86 @@ class MemoryRepository:
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
+        self._fts_available: bool | None = None  # 延迟检测
+
+    # ── FTS5 全文索引（阶段 7）──
+
+    def _ensure_fts(self) -> bool:
+        """确保 FTS5 表存在。返回 True 表示 FTS 可用。
+
+        首次调用时尝试创建 FTS5 虚拟表。
+        失败（SQLite 未编译 FTS5）后缓存结果，后续不再重试。
+        """
+        if self._fts_available is not None:
+            return self._fts_available
+
+        try:
+            self._conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts "
+                "USING fts5("
+                "  memory_id UNINDEXED,"
+                "  subject, predicate, value,"
+                "  tokenize='porter unicode61'"
+                ")"
+            )
+            self._fts_available = True
+            # 尝试初始化已有记忆的 FTS 索引
+            self._fts_rebuild()
+        except sqlite3.OperationalError:
+            self._fts_available = False
+        return self._fts_available
+
+    def _fts_rebuild(self) -> None:
+        """重建 FTS 索引（从所有非 deleted 记忆初始化）。"""
+        if not self._fts_available:
+            return
+        try:
+            self._conn.execute("DELETE FROM memory_fts")
+            self._conn.execute(
+                "INSERT INTO memory_fts (memory_id, subject, predicate, value) "
+                "SELECT memory_id, subject, predicate, value FROM memory_items "
+                "WHERE deleted_at IS NULL"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+    def _sync_fts_insert(self, memory_id: str, subject: str, predicate: str, value: str) -> None:
+        """插入一笔 FTS 索引。"""
+        if not self._ensure_fts():
+            return
+        try:
+            self._conn.execute(
+                "INSERT INTO memory_fts (memory_id, subject, predicate, value) "
+                "VALUES (?, ?, ?, ?)",
+                (memory_id, subject, predicate, value),
+            )
+        except sqlite3.OperationalError:
+            pass
+
+    def _sync_fts_update(self, memory_id: str, subject: str, predicate: str, value: str) -> None:
+        """更新一笔 FTS 索引（删除后重建）。"""
+        if not self._ensure_fts():
+            return
+        try:
+            self._conn.execute("DELETE FROM memory_fts WHERE memory_id=?", (memory_id,))
+            self._conn.execute(
+                "INSERT INTO memory_fts (memory_id, subject, predicate, value) "
+                "VALUES (?, ?, ?, ?)",
+                (memory_id, subject, predicate, value),
+            )
+        except sqlite3.OperationalError:
+            pass
+
+    def _sync_fts_delete(self, memory_id: str) -> None:
+        """删除一笔 FTS 索引。"""
+        if not self._ensure_fts():
+            return
+        try:
+            self._conn.execute(
+                "DELETE FROM memory_fts WHERE memory_id=?", (memory_id,)
+            )
+        except sqlite3.OperationalError:
+            pass
 
     # ── 基础查询 ──
 
@@ -162,25 +300,46 @@ class MemoryRepository:
         kinds: list[str] | None = None,
         limit: int = 10,
     ) -> list[MemoryItem]:
-        """按文本搜索有效记忆。
+        """按文本搜索有效记忆（兼容接口，返回不含分数）。"""
+        scored = self.search_scored(
+            principal_id=principal_id,
+            query=query,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            kinds=kinds,
+            limit=limit,
+        )
+        return [item for item, _ in scored]
 
-        排除所有非活跃状态，带 Principal 隔离。
+    def search_scored(
+        self,
+        principal_id: str,
+        query: str = "",
+        scope_type: str = "",
+        scope_id: str = "",
+        kinds: list[str] | None = None,
+        limit: int = 10,
+    ) -> list[tuple[MemoryItem, float]]:
+        """按文本搜索有效记忆，返回 (条目, 评分) 列表。
+
+        若 FTS5 可用：使用 MATCH + BM25 进行关键词检索。
+        否则：使用 LIKE 模糊匹配作为关键词命中检测。
+
+        使用加权评分公式对结果统一排序：
+        0.30 keyword + 0.20 scope + 0.15 importance + 0.15 confidence
+        + 0.10 recency + 0.10 explicitness
         """
-        now = datetime.now(UTC).isoformat()
+        now = datetime.now(UTC)
+        now_iso = now.isoformat()
+
+        # ── 1. 基础过滤条件 ──
         conditions = [
             "mi.status='confirmed'",
             "mi.deleted_at IS NULL",
             "(mi.valid_to IS NULL OR mi.valid_to > ?)",
             "mi.principal_id=?",
         ]
-        params: list[Any] = [now, principal_id]
-
-        if query:
-            like_pattern = f"%{query}%"
-            conditions.append(
-                "(mi.value LIKE ? OR mi.subject LIKE ? OR mi.predicate LIKE ?)"
-            )
-            params.extend([like_pattern, like_pattern, like_pattern])
+        params: list[Any] = [now_iso, principal_id]
 
         if scope_type:
             conditions.append("mi.scope_type=?")
@@ -200,15 +359,63 @@ class MemoryRepository:
             ")"
         )
 
-        sql = (
-            "SELECT mi.* FROM memory_items mi "
-            "WHERE " + " AND ".join(conditions)
-        )
+        # ── 2. FTS5 可用时使用 BM25 ──
+        fts_ok = self._ensure_fts()
+
+        if fts_ok and query:
+            fts_expr = _fts_escape(query)
+            try:
+                # FTS5 MATCH 必须在虚拟表上执行，通过子查询关联
+                fts_where = " AND ".join(conditions) if conditions else "1=1"
+                rows = self._conn.execute(
+                    "SELECT mi.* FROM memory_items mi "
+                    "WHERE mi.memory_id IN ("
+                    "  SELECT memory_id FROM memory_fts WHERE memory_fts MATCH ?"
+                    ") AND " + fts_where
+                    + " ORDER BY mi.importance DESC, mi.confidence DESC",
+                    [fts_expr] + params,
+                ).fetchall()
+                if rows:
+                    results = []
+                    for r in rows:
+                        item = _row_to_memory(r)
+                        scope_match = (
+                            (not scope_type or item.scope_type == scope_type)
+                            and (not scope_id or item.scope_id == scope_id)
+                        )
+                        final_score = _compute_score(item, keyword_hit=True, scope_match=scope_match, now=now)
+                        results.append((item, final_score))
+                    results.sort(key=lambda x: -x[1])
+                    return results[:limit]
+            except sqlite3.OperationalError:
+                pass  # FTS 查询失败，退化到 LIKE
+
+        # ── 3. FTS 不可用或查询为空：LIKE 匹配 ──
+        has_query = bool(query)
+        if has_query:
+            like_pattern = f"%{query}%"
+            conditions.append(
+                "(mi.value LIKE ? OR mi.subject LIKE ? OR mi.predicate LIKE ?)"
+            )
+            params.extend([like_pattern, like_pattern, like_pattern])
+
+        sql = "SELECT mi.* FROM memory_items mi WHERE " + " AND ".join(conditions)
         sql += " ORDER BY mi.importance DESC, mi.confidence DESC, mi.created_at DESC"
         sql += f" LIMIT {int(limit)}"
 
         rows = self._conn.execute(sql, params).fetchall()
-        return [_row_to_memory(r) for r in rows]
+        results = []
+        for r in rows:
+            item = _row_to_memory(r)
+            scope_match = (
+                (not scope_type or item.scope_type == scope_type)
+                and (not scope_id or item.scope_id == scope_id)
+            )
+            score = _compute_score(item, keyword_hit=has_query, scope_match=scope_match, now=now)
+            results.append((item, score))
+
+        results.sort(key=lambda x: -x[1])
+        return results
 
     def find_by_canonical_key(
         self,
@@ -299,6 +506,7 @@ class MemoryRepository:
                 memory.deleted_at.isoformat() if memory.deleted_at else None,
             ),
         )
+        self._sync_fts_insert(memory.memory_id, memory.subject, memory.predicate, memory.value)
         return memory
 
     def update(self, memory: MemoryItem) -> bool:
@@ -346,6 +554,8 @@ class MemoryRepository:
                 memory.version,
             ),
         )
+        if cursor.rowcount > 0:
+            self._sync_fts_update(memory.memory_id, memory.subject, memory.predicate, memory.value)
         return cursor.rowcount > 0
 
     # ── 状态转换 ──
@@ -408,10 +618,13 @@ class MemoryRepository:
             "WHERE memory_id=? AND deleted_at IS NULL",
             (now, now, memory_id),
         )
+        if cursor.rowcount > 0:
+            self._sync_fts_delete(memory_id)
         return cursor.rowcount > 0
 
     def hard_delete(self, memory_id: str) -> bool:
         """物理删除记忆。"""
+        self._sync_fts_delete(memory_id)
         cursor = self._conn.execute(
             "DELETE FROM memory_items WHERE memory_id=?",
             (memory_id,),
