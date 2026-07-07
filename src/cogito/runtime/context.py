@@ -55,6 +55,7 @@ class ContextSnapshot:
     snapshot_id: str = ""
     turn_id: str = ""
     session_id: str = ""
+    principal_id: str = ""
     message_upper_bound: int = 0
     selection_policy_version: str = "1"
     items: tuple[ContextItem, ...] = ()
@@ -119,6 +120,9 @@ class ContextBuilder:
             else:
                 history.append(msg)
 
+        # 从输入消息推导 Principal
+        principal_id = (input_msg or {}).get("sender_principal_id", "") or ""
+
         # 构建上下文条目
         items: list[ContextItem] = []
 
@@ -159,6 +163,7 @@ class ContextBuilder:
             snapshot_id=uuid.uuid4().hex,
             turn_id=turn_id,
             session_id=session_id,
+            principal_id=principal_id,
             message_upper_bound=message_upper_bound,
             selection_policy_version=self._policy_version,
             items=tuple(items),
@@ -203,7 +208,7 @@ class ContextBuilder:
         """加载 session 的所有消息（按接收顺序），聚合多 ContentPart 内容。"""
         rows = self._conn.execute(
             "SELECT m.message_id, m.role, m.direction, m.receive_sequence, "
-            "  m.trust_label, m.session_id, "
+            "  m.trust_label, m.session_id, m.sender_principal_id, "
             "  cp.inline_data, cp.content_type "
             "FROM messages m "
             "LEFT JOIN content_parts cp ON cp.message_id = m.message_id "
@@ -224,6 +229,7 @@ class ContextBuilder:
                     "sequence": row["receive_sequence"],
                     "trust_label": row["trust_label"],
                     "session_id": row["session_id"],
+                    "sender_principal_id": row["sender_principal_id"],
                     "content_parts": [],
                 }
             # Accumulate all content parts

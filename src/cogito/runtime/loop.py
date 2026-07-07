@@ -239,7 +239,7 @@ class AgentLoop:
                         finish_reason=FinishReason.error,
                     )
                 tool_start = datetime.now(UTC)
-                loop_detected = await self._execute_tool_calls(state, response)
+                loop_detected = await self._execute_tool_calls(state, response, context)
                 tool_latency = int(
                     (datetime.now(UTC) - tool_start).total_seconds() * 1000
                 )
@@ -321,7 +321,7 @@ class AgentLoop:
         return msg
 
     async def _execute_tool_calls(
-        self, state: LoopState, response: ModelResponse,
+        self, state: LoopState, response: ModelResponse, context: ContextSnapshot,
     ) -> bool:
         """执行模型返回的 Tool Calls。
 
@@ -375,6 +375,8 @@ class AgentLoop:
                 attempt_id=state.attempt_id,
                 trace_id=state.turn_id,
                 tool_call_id=tool_call_id,
+                principal_id=context.principal_id,
+                session_id=context.session_id,
             )
 
             # AGENT-LOOP / 7: 副作用工具执行前写 checkpoint

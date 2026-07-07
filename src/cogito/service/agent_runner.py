@@ -316,9 +316,14 @@ def build_agent_runner(
     resolved_registry = registry
     if resolved_registry is None:
         from cogito.capability import CapabilityRegistry
+        from cogito.service.memory_service import SqliteMemoryService
         from cogito.tools.registry import discover_builtin_tools
+
+        # 创建 MemoryService 供记忆工具使用
+        memory_service = SqliteMemoryService(conn=connection)
+
         resolved_registry = CapabilityRegistry()
-        discover_builtin_tools(resolved_registry)
+        discover_builtin_tools(resolved_registry, memory_service=memory_service)
 
     # 创建 Executor
     executor = ToolExecutor(resolved_registry)

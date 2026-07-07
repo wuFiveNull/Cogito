@@ -22,6 +22,8 @@ def ctx() -> ToolContext:
         attempt_id="a1",
         trace_id="t1",
         tool_call_id="tc1",
+        principal_id="p1",
+        session_id="s1",
     )
 
 
@@ -90,7 +92,9 @@ class TestToolRegistry:
         assert "echo" in r
         assert "now" in r
         assert "recall_memory" in r
-        assert len(r) >= 3
+        assert "remember_memory" in r
+        assert "forget_memory" in r
+        assert len(r) >= 5
 
     def test_builtin_tool_schemas_are_valid(self):
         from cogito.capability import CapabilityRegistry
@@ -99,7 +103,7 @@ class TestToolRegistry:
         discover_builtin_tools(r)
 
         schemas = r.get_openai_schemas()
-        assert len(schemas) >= 3
+        assert len(schemas) >= 5
 
         for s in schemas:
             assert s["type"] == "function"
@@ -120,6 +124,8 @@ class TestToolRegistry:
         assert "echo" in core_tools
         assert "now" in core_tools
 
-        # recall_memory is in both "core" and "memory"
+        # All memory tools are in both "core" and "memory"
         memory_tools = {t.name for t in r.list_by_toolset("memory")}
         assert "recall_memory" in memory_tools
+        assert "remember_memory" in memory_tools
+        assert "forget_memory" in memory_tools

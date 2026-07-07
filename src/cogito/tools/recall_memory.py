@@ -11,65 +11,56 @@ from cogito.store.memory_repo import MemoryRepository
 
 TOOL_NAME = "recall_memory"
 
-# 在注册时通过闭包注入 repo/service
-_service: SqliteMemoryService | None = None
-_repo: MemoryRepository | None = None
 
+def _make_handler(
+    service: SqliteMemoryService | None = None,
+    repo: MemoryRepository | None = None,
+):
+    """创建 handler 闭包，捕获 service/repo 依赖。"""
+    async def handler(args: dict, ctx: ToolContext) -> str:
+        """搜索记忆存储中的条目。"""
+        query = args.get("query", "")
+        limit = int(args.get("limit", 5))
+        principal_id = ctx.principal_id or ""
 
-def _set_service(service: SqliteMemoryService) -> None:
-    global _service, _repo
-    _service = service
-    _repo = None  # 优先使用 service
+        if not query:
+            return "Please provide a query."
 
+        if not principal_id:
+            return f"[recall_memory] Search for '{query}': principal not available."
 
-def _set_repo(repo: MemoryRepository) -> None:
-    global _repo, _service
-    _repo = repo
-    _service = None
+        # 优先使用 service，其次 repo
+        if service:
+            items = service.retrieve(
+                principal_id=principal_id,
+                query=query,
+                limit=min(limit, 20),
+            )
+        elif repo:
+            items = repo.search(
+                principal_id=principal_id,
+                query=query,
+                limit=min(limit, 20),
+            )
+        else:
+            return (
+                f"[recall_memory] Search for '{query}': "
+                "memory service not available."
+            )
 
+        if not items:
+            return f"No memories found matching '{query}'."
 
-async def handler(args: dict, ctx: ToolContext) -> str:
-    """搜索记忆存储中的条目。"""
-    query = args.get("query", "")
-    limit = int(args.get("limit", 5))
-    principal_id = getattr(ctx, "principal_id", "") or ""
+        lines = [f"Found {len(items)} memory result(s) for '{query}':"]
+        for i, item in enumerate(items, 1):
+            lines.append(
+                f"{i}. [{item.kind}] {item.subject} "
+                f"{item.predicate} {item.value} "
+                f"(confidence: {item.confidence:.1f})"
+            )
+        return "\n".join(lines)
 
-    if not query:
-        return "Please provide a query."
-
-    if not principal_id:
-        return f"[recall_memory] Search for '{query}': principal not available."
-
-    # 优先使用 service，其次 repo
-    if _service:
-        items = _service.retrieve(
-            principal_id=principal_id,
-            query=query,
-            limit=min(limit, 20),
-        )
-    elif _repo:
-        items = _repo.search(
-            principal_id=principal_id,
-            query=query,
-            limit=min(limit, 20),
-        )
-    else:
-        return (
-            f"[recall_memory] Search for '{query}': "
-            "memory service not available."
-        )
-
-    if not items:
-        return f"No memories found matching '{query}'."
-
-    lines = [f"Found {len(items)} memory result(s) for '{query}':"]
-    for i, item in enumerate(items, 1):
-        lines.append(
-            f"{i}. [{item.kind}] {item.subject} "
-            f"{item.predicate} {item.value} "
-            f"(confidence: {item.confidence:.1f})"
-        )
-    return "\n".join(lines)
+    return handler
 
 
 def create_tool_def(
@@ -82,11 +73,6 @@ def create_tool_def(
         repo: 可选的 MemoryRepository。
         service: 可选的 MemoryService（优先于 repo）。
     """
-    if service is not None:
-        _set_service(service)
-    elif repo is not None:
-        _set_repo(repo)
-
     return ToolDef(
         name=TOOL_NAME,
         description=(
@@ -109,6 +95,6 @@ def create_tool_def(
             "required": ["query"],
         },
         toolset=("core", "memory"),
-        handler=handler,
+        handler=_make_handler(service=service, repo=repo),
         risk_level="low",
     )

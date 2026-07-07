@@ -99,3 +99,5 @@ class ToolContext:
     attempt_id: str
     trace_id: str
     tool_call_id: str
+    principal_id: str = ""
+    session_id: str = ""
