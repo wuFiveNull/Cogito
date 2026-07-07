@@ -87,7 +87,9 @@ class TestNewWorkspaceStubInteractive:
             conn = _open_db(db_path)
             try:
                 row = conn.execute("SELECT MAX(version) FROM _schema_version").fetchone()
-                assert row[0] == 20, f"expected migration v20, got v{row[0]}"
+                from cogito.store.migration import _discover
+                expected = max(mf.version for mf in _discover())
+                assert row[0] == expected, f"expected migration v{expected}, got v{row[0]}"
 
                 # FK check must be empty (done by migration runner)
                 fk = conn.execute("PRAGMA foreign_key_check").fetchall()
@@ -225,11 +227,13 @@ class TestNewWorkspaceStubInteractive:
                 ).fetchone()[0]
                 # at least one new user + one new assistant (stub reply may skip memory msg)
                 assert after > before
-                # schema version still v19
+                # schema version matches all applied migrations
+                from cogito.store.migration import _discover
+                expected = max(mf.version for mf in _discover())
                 v = conn.execute(
                     "SELECT MAX(version) FROM _schema_version"
                 ).fetchone()[0]
-                assert v == 20
+                assert v == expected
             finally:
                 conn.close()
 
@@ -327,7 +331,7 @@ class TestRecoveryAtStartup:
         try:
             # New workspace has no stale state; counts dict keys must be present
             counts = app.recovery_counts()
-            assert set(counts.keys()) >= {"outbox_leases", "delivery_leases", "stale_turns"}
+            assert set(counts.keys()) >= {"outbox_leases", "delivery_leases", "stale_turns", "stale_tasks"}
         finally:
             app.close()
 
