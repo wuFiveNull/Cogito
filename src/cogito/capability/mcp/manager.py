@@ -1,9 +1,6 @@
 """MCP Server Manager — 管理多个 MCP Server 的生命周期。"""
 from __future__ import annotations
 
-import asyncio
-from typing import Any
-
 from cogito.capability.mcp import MCPServerConfig
 from cogito.capability.mcp.client import MCPClient
 from cogito.capability.models import ToolContext, ToolDef

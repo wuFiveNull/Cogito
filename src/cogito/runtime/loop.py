@@ -377,6 +377,9 @@ class AgentLoop:
                 tool_call_id=tool_call_id,
                 principal_id=context.principal_id,
                 session_id=context.session_id,
+                turn_id=context.turn_id,
+                input_message_id=context.input_message_id,
+                conversation_id=context.conversation_id,
             )
 
             # AGENT-LOOP / 7: 副作用工具执行前写 checkpoint

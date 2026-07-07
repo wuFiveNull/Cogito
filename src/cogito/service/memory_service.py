@@ -14,7 +14,9 @@ MemoryService 是唯一拥有 Memory 写入行为的模块：
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
+import unicodedata
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -26,21 +28,58 @@ from cogito.domain.memory import (
 from cogito.store.memory_repo import MemoryRepository
 
 
+def _normalize_text(text: str) -> str:
+    """规范化文本用于 canonical key 生成。
+
+    确定性规范化（D3）：
+    - Unicode NFC 归一化
+    - 小写化
+    - 去除首尾空白
+    - 连续空白折叠为单个空格
+    """
+    if not text:
+        return ""
+    # Unicode NFC 归一化
+    text = unicodedata.normalize("NFC", text)
+    # 小写化
+    text = text.casefold()
+    # 去除首尾空白 + 连续空白折叠
+    text = text.strip()
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
 def _make_canonical_key(
     principal_id: str,
     subject: str,
     predicate: str,
+    scope_type: str = "",
+    scope_id: str = "",
     value: str = "",
 ) -> str:
     """生成稳定规范键用于去重。
 
-    canonical_key 格式：{principal_id}.{subject}.{predicate}
-    对于 subject 和 predicate 为空的条目，使用 hash(value) 作为键。
+    canonical_key 格式：{principal_id}.{scope}.{subject}.{predicate}
+    value 不属于 canonical key；value 用于判断同值强化或新值覆盖。
+
+    规范化规则（D3）：
+    - Unicode NFC + casefold + trim + 空白折叠
+    - 不包含业务关键词正则推断
     """
-    if not subject and not predicate:
-        hash_input = value or "empty"
-        return f"{principal_id}.hash.{hashlib.md5(hash_input.encode()).hexdigest()[:12]}"
-    return f"{principal_id}.{subject}.{predicate}"
+    norm_subject = _normalize_text(subject)
+    norm_predicate = _normalize_text(predicate)
+    scope_part = f"{scope_type}:{scope_id}" if scope_type else ""
+
+    if not norm_subject and not norm_predicate:
+        # subject 和 predicate 都为空时使用 hash(value)
+        norm_value = _normalize_text(value) or "empty"
+        return f"{principal_id}.hash.{hashlib.md5(norm_value.encode()).hexdigest()[:12]}"
+
+    parts = [principal_id]
+    if scope_part:
+        parts.append(scope_part)
+    parts.extend([norm_subject, norm_predicate])
+    return ".".join(parts)
 
 
 class MemoryService(Protocol):
@@ -150,10 +189,39 @@ class SqliteMemoryService:
         confidence: float = 0.5,
         importance: float = 0.5,
         status: str = "candidate",
-    ) -> MemoryItem:
-        """提议新记忆（作为 candidate 写入，稍后确认）。"""
-        canonical_key = _make_canonical_key(principal_id, subject, predicate, value)
+    ) -> MemoryItem | None:
+        """提议新记忆（冲突感知写入，D4）。
 
+        冲突处理规则：
+        - 同 canonical_key + 同值 → 不创建，追加 supports 关系
+        - 同 canonical_key + 新明确值 → supersedes
+        - 同 canonical_key + 两个低置信推断冲突 → 两者保留为 candidate + contradicts
+        """
+        canonical_key = _make_canonical_key(
+            principal_id, subject, predicate,
+            scope_type=scope_type, scope_id=scope_id, value=value,
+        )
+
+        existing = self._repo.find_by_canonical_key(
+            principal_id=principal_id,
+            canonical_key=canonical_key,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            include_candidates=True,
+        )
+
+        # 同值强化 → 不创建新记忆，直接返回已有
+        if existing and _normalize_text(existing.value) == _normalize_text(value):
+            self._repo.insert_relation(
+                from_memory_id=existing.memory_id,
+                to_memory_id=existing.memory_id,
+                relation_type="supports",
+                source_type=source_type,
+                source_id=source_id,
+            )
+            return existing
+
+        now = datetime.now(UTC)
         memory = MemoryItem(
             kind=MemoryKind(kind) if kind else MemoryKind.fact,
             subject=subject,
@@ -170,8 +238,37 @@ class SqliteMemoryService:
             confidence=confidence,
             importance=importance,
             status=MemoryStatus(status) if status else MemoryStatus.candidate,
+            created_at=now,
+            updated_at=now,
         )
-        return self._repo.insert(memory)
+
+        created = self._repo.insert(memory)
+
+        # 冲突关系：与已有记忆建立 contradicts（仅低置信推断之间）
+        if existing and existing.status == MemoryStatus.candidate:
+            self._repo.insert_relation(
+                from_memory_id=created.memory_id,
+                to_memory_id=existing.memory_id,
+                relation_type="contradicts",
+                source_type=source_type,
+                source_id=source_id,
+            )
+        elif existing and explicitness == "explicit_user_statement":
+            # 用户明确陈述覆盖旧推断
+            self._repo.supersede(existing.memory_id, created.memory_id)
+            self._repo.insert_relation(
+                from_memory_id=created.memory_id,
+                to_memory_id=existing.memory_id,
+                relation_type="supersedes",
+                source_type=source_type,
+                source_id=source_id,
+            )
+            created.status = MemoryStatus.confirmed
+            created.confirmed_by = principal_id
+            created.confirmation_method = explicitness
+            created.confirmed_at = now
+
+        return created
 
     def remember(
         self,
@@ -197,7 +294,10 @@ class SqliteMemoryService:
         3. 不同值 → 覆盖旧（supersede）
         4. 不存在 → 新建
         """
-        canonical_key = _make_canonical_key(principal_id, subject, predicate, value)
+        canonical_key = _make_canonical_key(
+            principal_id, subject, predicate,
+            scope_type=scope_type, scope_id=scope_id, value=value,
+        )
 
         # 查找已有有效记忆
         existing = self._repo.find_by_canonical_key(
@@ -207,8 +307,8 @@ class SqliteMemoryService:
             scope_id=scope_id,
         )
 
-        # 同值 → 直接返回已有
-        if existing and existing.value == value:
+        # 同值（规范化比较）→ 直接返回已有
+        if existing and _normalize_text(existing.value) == _normalize_text(value):
             return existing
 
         now = datetime.now(UTC)
@@ -238,27 +338,41 @@ class SqliteMemoryService:
         # 新建
         created = self._repo.insert(memory)
 
-        # 覆盖旧记忆
+        # 覆盖旧记忆 + 插入关系链
         if existing:
             self._repo.supersede(existing.memory_id, created.memory_id)
+            self._repo.insert_relation(
+                from_memory_id=created.memory_id,
+                to_memory_id=existing.memory_id,
+                relation_type="supersedes",
+                source_type=source_type,
+                source_id=source_id,
+            )
 
         return created
 
-    def forget(self, memory_id: str) -> bool:
-        """忘记一条记忆（软删除）。"""
-        return self._repo.soft_delete(memory_id)
+    def forget(self, memory_id: str, principal_id: str = "") -> bool:
+        """忘记一条记忆（软删除，可选所有权验证）。"""
+        return self._repo.soft_delete(memory_id, principal_id=principal_id)
 
     def forget_by_canonical_key(
         self,
         principal_id: str,
         subject: str,
         predicate: str,
+        scope_type: str = "",
+        scope_id: str = "",
     ) -> bool:
         """按 canonical_key 忘记。"""
-        canonical_key = _make_canonical_key(principal_id, subject, predicate)
+        canonical_key = _make_canonical_key(
+            principal_id, subject, predicate,
+            scope_type=scope_type, scope_id=scope_id,
+        )
         existing = self._repo.find_by_canonical_key(
             principal_id=principal_id,
             canonical_key=canonical_key,
+            scope_type=scope_type,
+            scope_id=scope_id,
         )
         if not existing:
             return False
@@ -306,6 +420,6 @@ class SqliteMemoryService:
             memory_id, confirmed_by=confirmed_by, confirmation_method="manual",
         )
 
-    def reject(self, memory_id: str) -> bool:
+    def reject(self, memory_id: str, principal_id: str = "") -> bool:
         """拒绝候选记忆。"""
-        return self._repo.reject(memory_id)
+        return self._repo.reject(memory_id, principal_id=principal_id)

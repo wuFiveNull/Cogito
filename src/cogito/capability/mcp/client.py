@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from cogito.capability.mcp import MCPServerConfig

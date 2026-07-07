@@ -12,15 +12,13 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime
 
 import pytest
 
-from cogito.domain.memory import MemoryKind, MemoryStatus
+from cogito.domain.memory import MemoryStatus
 from cogito.service.memory_extractor import MemoryExtractor
 from cogito.service.memory_service import SqliteMemoryService
 from cogito.store.migration import migrate
-from cogito.store.time_utils import epoch_ms
 
 
 @pytest.fixture
@@ -51,7 +49,7 @@ class TestMemoryExtractor:
     def test_few_messages_skips_extraction(self, db, service):
         """少于阈值时不提取。"""
         from cogito.model.router import ModelRouter
-        from cogito.model.stub_provider import StubModelProvider, StubScenario
+        from cogito.model.stub_provider import StubModelProvider
 
         provider = StubModelProvider()
         router = ModelRouter(

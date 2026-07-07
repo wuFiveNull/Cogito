@@ -363,8 +363,8 @@ class TestScoring:
     """加权评分函数测试。"""
 
     def test_compute_score_baseline(self):
-        from cogito.store.memory_repo import _compute_score
         from cogito.domain.memory import MemoryItem
+        from cogito.store.memory_repo import _compute_score
 
         m = MemoryItem(
             memory_id="s1",
@@ -377,8 +377,8 @@ class TestScoring:
         assert 0.0 < score <= 1.0
 
     def test_keyword_hit_increases_score(self):
-        from cogito.store.memory_repo import _compute_score
         from cogito.domain.memory import MemoryItem
+        from cogito.store.memory_repo import _compute_score
 
         m = MemoryItem(
             memory_id="s2",
@@ -390,8 +390,8 @@ class TestScoring:
         assert with_hit > without_hit
 
     def test_explicitness_mapping(self):
+        from cogito.domain.memory import MemoryItem
         from cogito.store.memory_repo import _compute_score
-        from cogito.domain.memory import MemoryItem, Explicitness
 
         explicit = MemoryItem(memory_id="e1", explicitness="explicit_user_statement")
         inferred = MemoryItem(memory_id="e2", explicitness="model_inference")

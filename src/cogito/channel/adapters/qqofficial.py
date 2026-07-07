@@ -319,7 +319,6 @@ class QQOfficialAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter
 
             # 构造 Cogito Inbound 并转发
             from cogito.channel.bridge import langbot_event_to_inbound
-            from cogito.channel.vendor.langbot.compatibility.events import FriendMessage, GroupMessage
 
             # 转换为 LangBot Event 以复用 bridge
             try:

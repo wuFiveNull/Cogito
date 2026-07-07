@@ -12,8 +12,8 @@ from __future__ import annotations
 import pytest
 
 from cogito.capability.models import ToolContext
-from cogito.tools.registry import discover_builtin_tools
 from cogito.tools.recall_memory import create_tool_def
+from cogito.tools.registry import discover_builtin_tools
 
 
 @pytest.fixture

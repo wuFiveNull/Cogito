@@ -12,11 +12,10 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime
 
 import pytest
 
-from cogito.domain.memory import MemoryItem, MemoryKind, MemoryStatus
+from cogito.domain.memory import MemoryStatus
 from cogito.service.memory_service import SqliteMemoryService, _make_canonical_key
 from cogito.store.migration import migrate
 

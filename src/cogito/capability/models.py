@@ -13,7 +13,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-
 # ── Tool 定义（注册后不可变）──
 
 
@@ -101,3 +100,6 @@ class ToolContext:
     tool_call_id: str
     principal_id: str = ""
     session_id: str = ""
+    turn_id: str = ""
+    input_message_id: str = ""
+    conversation_id: str = ""

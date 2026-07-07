@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from cogito.capability.models import ToolDef
-from cogito.capability.policy import ToolPolicy, PolicyDecision
+from cogito.capability.policy import PolicyDecision, ToolPolicy
 
 
 class TestToolPolicy:

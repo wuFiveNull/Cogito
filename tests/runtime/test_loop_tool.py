@@ -18,7 +18,6 @@ from cogito.capability.executor import ToolExecutor
 from cogito.capability.models import ToolContext, ToolDef
 from cogito.model.contracts import (
     FinishReason,
-    Usage,
 )
 from cogito.model.router import ModelRouter
 from cogito.model.stub_provider import StubModelProvider, StubScenario

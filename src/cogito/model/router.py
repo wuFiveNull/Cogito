@@ -13,6 +13,7 @@ MODEL-ADAPTER / 8. 重试与 Fallback：有限重试与切换条件。
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 
@@ -25,6 +26,8 @@ from cogito.model.contracts import (
 from cogito.model.errors import ModelProviderError
 from cogito.model.provider import ModelProvider
 from cogito.store.time_utils import epoch_ms
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class RouterError(Exception):
@@ -56,10 +59,17 @@ class ModelRouter:
         self._allow_fallback_after_tool_delivery = allow_fallback_after_tool_delivery
 
     def get_provider(self, model_role: str = "main") -> ModelProvider:
-        """按 model_role 获取 Provider。"""
+        """按 model_role 获取 Provider，角色未配置时回落到 main。"""
         provider_id = self._role_map.get(model_role)
         if provider_id is None:
-            raise RouterError(f"No provider configured for role: {model_role}")
+            if model_role != "main":
+                _LOGGER.warning(
+                    "No provider configured for role '%s', falling back to 'main'",
+                    model_role,
+                )
+                provider_id = self._role_map.get("main")
+            if provider_id is None:
+                raise RouterError(f"No provider configured for role: {model_role}")
         provider = self._providers.get(provider_id)
         if provider is None:
             raise RouterError(f"Provider not found: {provider_id}")
@@ -189,7 +199,14 @@ class ModelRouter:
         """解析 Provider 调用链（主 + fallback）。"""
         provider_id = self._role_map.get(model_role)
         if provider_id is None:
-            raise RouterError(f"No provider configured for role: {model_role}")
+            if model_role != "main":
+                _LOGGER.warning(
+                    "No provider chain for role '%s', falling back to 'main'",
+                    model_role,
+                )
+                provider_id = self._role_map.get("main")
+            if provider_id is None:
+                raise RouterError(f"No provider configured for role: {model_role}")
 
         chain = [provider_id]
         chain.extend(self._fallbacks.get(provider_id, []))

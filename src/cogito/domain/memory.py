@@ -82,6 +82,18 @@ class MemoryItem:
         explicitness: str = "",
         confidence: float = 1.0,
         importance: float = 0.5,
+        # 生命周期治理（G1）
+        reinforcement: int = 0,
+        exposure_count: int = 0,
+        emotional_weight: float = 0.5,
+        last_retrieved_at: datetime | None = None,
+        retrieval_count: int = 0,
+        retrieval_weight: float = 1.0,
+        decay_rate: float = 1.0,
+        embedding_model: str = "",
+        embedding_version: str = "",
+        half_life_days: float = 365.0,
+        last_weight_update: datetime | None = None,
         # 确认信息
         confirmation_method: str = "",
         confirmed_by: str = "",
@@ -119,6 +131,18 @@ class MemoryItem:
         self.explicitness = explicitness
         self.confidence = self._validate_confidence(confidence)
         self.importance = self._validate_importance(importance)
+        # G1: 生命周期治理字段
+        self.reinforcement = reinforcement
+        self.exposure_count = exposure_count
+        self.emotional_weight = emotional_weight
+        self.last_retrieved_at = last_retrieved_at
+        self.retrieval_count = retrieval_count
+        self.retrieval_weight = retrieval_weight
+        self.decay_rate = decay_rate
+        self.embedding_model = embedding_model
+        self.embedding_version = embedding_version
+        self.half_life_days = half_life_days
+        self.last_weight_update = last_weight_update
         self.confirmation_method = confirmation_method
         self.confirmed_by = confirmed_by
         self.confirmed_at = confirmed_at

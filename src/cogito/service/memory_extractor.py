@@ -15,19 +15,14 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import UTC, datetime
 from typing import Any
 
 from cogito.model.contracts import (
-    ContentPart,
     FinishReason,
     ModelRequest,
-    ModelResponse,
-    Usage,
 )
 from cogito.model.router import ModelRouter
 from cogito.service.memory_service import SqliteMemoryService
-from cogito.store.time_utils import epoch_ms
 
 _LOGGER = logging.getLogger("cogito.memory_extractor")
 
@@ -128,7 +123,7 @@ class MemoryExtractor:
     async def _call_extractor(
         self, conversation_text: str,
     ) -> list[dict[str, Any]]:
-        """调用模型提取候选。"""
+        """调用模型提取候选（D1: 使用 response_schema 结构化输出）。"""
         try:
             request = ModelRequest(
                 messages=[
@@ -136,6 +131,43 @@ class MemoryExtractor:
                     {"role": "user", "content": conversation_text},
                 ],
                 stream=False,
+                response_schema={
+                    "type": "object",
+                    "properties": {
+                        "candidates": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {
+                                        "type": "string",
+                                        "enum": ["fact", "preference", "constraint", "goal", "episode"],
+                                    },
+                                    "subject": {"type": "string"},
+                                    "predicate": {"type": "string"},
+                                    "value": {"type": "string"},
+                                    "explicitness": {
+                                        "type": "string",
+                                        "enum": ["explicit_user_statement", "model_inference"],
+                                    },
+                                    "confidence": {"type": "number"},
+                                    "importance": {"type": "number"},
+                                    "reason": {"type": "string"},
+                                    "scope_type": {
+                                        "type": "string",
+                                        "enum": [
+                                            "", "global", "user",
+                                            "conversation", "session", "task",
+                                        ],
+                                    },
+                                    "scope_id": {"type": "string"},
+                                },
+                                "required": ["kind", "subject", "predicate", "value"],
+                            },
+                        },
+                    },
+                    "required": ["candidates"],
+                },
             )
             response = await self._router.generate(request, model_role=self._model_role)
         except Exception as e:
@@ -180,10 +212,11 @@ class MemoryExtractor:
     def _write_candidate(
         self, c: dict[str, Any], principal_id: str,
     ) -> bool:
-        """将一条候选写入 memory_items。
+        """将一条候选写入 memory_items（D4: 冲突感知写入）。
 
-        explicit_user_statement → confirmed（直接可用）
-        model_inference → candidate（需后续确认）
+        - explicit_user_statement → confirmed，覆盖旧推断
+        - model_inference → candidate，与已有冲突建立 contradicts 关系
+        - scope_type/scope_id 从候选中读取（如有）
         """
         kind = c.get("kind", "fact")
         subject = c.get("subject", "")
@@ -192,36 +225,27 @@ class MemoryExtractor:
         explicitness = c.get("explicitness", "model_inference")
         confidence = float(c.get("confidence", 0.5))
         importance = float(c.get("importance", 0.5))
+        scope_type = c.get("scope_type", "")
+        scope_id = c.get("scope_id", "")
 
-        if explicitness == "explicit_user_statement":
-            # 用户明确陈述 → 直接 confirmed
-            self._service.remember(
-                kind=kind,
-                subject=subject,
-                predicate=predicate,
-                value=value,
-                principal_id=principal_id,
-                source_type="extractor",
-                source_id="auto_extract",
-                explicitness=explicitness,
-                confidence=min(confidence, 1.0),
-                importance=min(importance, 1.0),
-            )
-        else:
-            # 模型推断 → 写入 candidate
-            self._service.propose(
-                kind=kind,
-                subject=subject,
-                predicate=predicate,
-                value=value,
-                principal_id=principal_id,
-                source_type="extractor",
-                source_id="auto_extract",
-                explicitness=explicitness,
-                confidence=min(confidence, 1.0),
-                importance=min(importance, 1.0),
-            )
-        return True
+        status = "confirmed" if explicitness == "explicit_user_statement" else "candidate"
+
+        result = self._service.propose(
+            kind=kind,
+            subject=subject,
+            predicate=predicate,
+            value=value,
+            principal_id=principal_id,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            source_type="extractor",
+            source_id="auto_extract",
+            explicitness=explicitness,
+            confidence=min(confidence, 1.0),
+            importance=min(importance, 1.0),
+            status=status,
+        )
+        return result is not None
 
     @staticmethod
     def _format_messages(messages: list[dict[str, Any]]) -> str:

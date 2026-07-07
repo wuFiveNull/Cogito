@@ -18,11 +18,13 @@ import websocket
 
 from cogito.channel.clients.wechatpad_api.client import WeChatPadClient
 from cogito.channel.vendor.langbot.compatibility import adapter as abstract_platform_adapter
-from cogito.channel.vendor.langbot.compatibility.logger import EventLogger as abstract_platform_logger
 from cogito.channel.vendor.langbot.compatibility import entities as platform_entities
 from cogito.channel.vendor.langbot.compatibility import events as platform_events
 from cogito.channel.vendor.langbot.compatibility import message as platform_message
 from cogito.channel.vendor.langbot.compatibility.logger import EventLogger
+from cogito.channel.vendor.langbot.compatibility.logger import (
+    EventLogger as abstract_platform_logger,
+)
 
 
 class WeChatPadMessageConverter(abstract_platform_adapter.AbstractMessageConverter):

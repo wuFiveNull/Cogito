@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from cogito.capability.models import ToolDef, ToolContext
+from cogito.capability.models import ToolContext, ToolDef
 
 TOOL_NAME = "echo"
 

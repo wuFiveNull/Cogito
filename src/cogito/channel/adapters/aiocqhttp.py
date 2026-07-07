@@ -12,10 +12,12 @@ import pydantic
 
 from cogito.channel.utils import image
 from cogito.channel.vendor.langbot.compatibility import adapter as abstract_platform_adapter
-from cogito.channel.vendor.langbot.compatibility.logger import EventLogger as abstract_platform_logger
 from cogito.channel.vendor.langbot.compatibility import entities as platform_entities
 from cogito.channel.vendor.langbot.compatibility import events as platform_events
 from cogito.channel.vendor.langbot.compatibility import message as platform_message
+from cogito.channel.vendor.langbot.compatibility.logger import (
+    EventLogger as abstract_platform_logger,
+)
 
 _GROUP_NAME_CACHE_TTL_SECONDS = 3600
 _GROUP_NAME_NEGATIVE_CACHE_TTL_SECONDS = 60

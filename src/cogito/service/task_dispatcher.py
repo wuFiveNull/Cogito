@@ -12,7 +12,7 @@ GLOBAL-INVARIANTS / 2.5：旧 Lease/旧版本 Attempt 的结果不得提交业�
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import NamedTuple
 
 from cogito.domain.task import (
@@ -23,7 +23,7 @@ from cogito.domain.task import (
 )
 from cogito.runtime.clock import Clock, ProductionClock
 from cogito.service.unit_of_work import UnitOfWork
-from cogito.store.task_repo import TaskRepository, TaskAttemptRepository
+from cogito.store.task_repo import TaskAttemptRepository, TaskRepository
 from cogito.store.time_utils import epoch_ms, from_epoch_ms
 
 TASK_LEASE_TTL_S = 120

@@ -7,11 +7,9 @@ CAPABILITY-PLUGINS / 4. Capability Registry：
 
 from __future__ import annotations
 
-import uuid
 from typing import Any
 
 from cogito.capability.models import ToolDef
-
 
 MAX_DESCRIPTION_LENGTH = 512
 

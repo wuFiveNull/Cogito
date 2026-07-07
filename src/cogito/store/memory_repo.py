@@ -40,6 +40,18 @@ def _row_to_memory(row: sqlite3.Row) -> MemoryItem:
         explicitness=d.get("explicitness", ""),
         confidence=d.get("confidence", 1.0),
         importance=d.get("importance", 0.5),
+        # G1: 生命周期治理字段
+        reinforcement=d.get("reinforcement", 0) or 0,
+        exposure_count=d.get("exposure_count", 0) or 0,
+        emotional_weight=d.get("emotional_weight", 0.5) or 0.5,
+        last_retrieved_at=dt_from_str(d.get("last_retrieved_at")),
+        retrieval_count=d.get("retrieval_count", 0) or 0,
+        retrieval_weight=d.get("retrieval_weight", 1.0) or 1.0,
+        decay_rate=d.get("decay_rate", 1.0) or 1.0,
+        embedding_model=d.get("embedding_model", ""),
+        embedding_version=d.get("embedding_version", ""),
+        half_life_days=d.get("half_life_days", 365.0) or 365.0,
+        last_weight_update=dt_from_str(d.get("last_weight_update")),
         confirmation_method=d.get("confirmation_method", ""),
         confirmed_by=d.get("confirmed_by", ""),
         confirmed_at=dt_from_str(d.get("confirmed_at")),
@@ -226,14 +238,52 @@ class MemoryRepository:
         except sqlite3.OperationalError:
             pass
 
-    # ── Embedding 同步（阶段 8）──
+    # ── Embedding 同步（F3: 写入预计算向量）──
+
+    def write_embedding(
+        self,
+        memory_id: str,
+        vector: list[float],
+        model: str = "",
+        version: str = "",
+        dimensions: int = 0,
+    ) -> None:
+        """写入预计算的 Embedding 向量（由后台 Task 调用，不在事务内）。"""
+        if not vector:
+            return
+        import json as _json
+        from datetime import UTC, datetime
+        try:
+            blob = _json.dumps(vector).encode("utf-8")
+            self._conn.execute(
+                "INSERT OR REPLACE INTO memory_embeddings "
+                "(memory_id, embedding_model, embedding_version, vector, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (memory_id, model, version, blob, datetime.now(UTC).isoformat()),
+            )
+        except sqlite3.OperationalError:
+            pass
+
+    def get_embedding(self, memory_id: str) -> list[float] | None:
+        """读取 Embedding 向量。"""
+        try:
+            row = self._conn.execute(
+                "SELECT vector FROM memory_embeddings WHERE memory_id=?",
+                (memory_id,),
+            ).fetchone()
+            if row and row["vector"]:
+                import json as _json
+                return _json.loads(row["vector"])
+        except (sqlite3.OperationalError, Exception):
+            pass
+        return None
 
     def _sync_embedding_insert(self, memory_id: str, value: str) -> None:
-        """插入一笔 Embedding（占位：需要真实 provider 时扩展）。"""
+        """占位：不在此处调用网络；由后台 embedding.index Task 处理。"""
         pass
 
     def _sync_embedding_update(self, memory_id: str, value: str) -> None:
-        """更新一笔 Embedding（先删后插）。"""
+        """更新一笔 Embedding（意图：由后台 Task 处理）。"""
         self._sync_embedding_delete(memory_id)
         self._sync_embedding_insert(memory_id, value)
 
@@ -246,10 +296,44 @@ class MemoryRepository:
         except sqlite3.OperationalError:
             pass
 
-    # ── 检索追踪（阶段 9）──
+    def list_unembedded(self, model: str = "", limit: int = 100) -> list[str]:
+        """列出尚未为当前模型生成 Embedding 的记忆 ID。"""
+        try:
+            if model:
+                rows = self._conn.execute(
+                    "SELECT mi.memory_id FROM memory_items mi "
+                    "LEFT JOIN memory_embeddings me ON me.memory_id = mi.memory_id "
+                    "WHERE mi.deleted_at IS NULL "
+                    "AND mi.status IN ('confirmed','candidate') "
+                    "AND (me.memory_id IS NULL OR me.embedding_model != ?) "
+                    "LIMIT ?",
+                    (model, limit),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT mi.memory_id FROM memory_items mi "
+                    "LEFT JOIN memory_embeddings me ON me.memory_id = mi.memory_id "
+                    "WHERE mi.deleted_at IS NULL "
+                    "AND mi.status IN ('confirmed','candidate') "
+                    "AND me.memory_id IS NULL "
+                    "LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [r["memory_id"] for r in rows]
+        except sqlite3.OperationalError:
+            return []
+
+    # ── 检索追踪（G2: 被动召回不增加 retrieval_weight）──
 
     def _track_retrieval(self, memory_ids: list[str]) -> None:
-        """更新被检索到的记忆的 exposure 计数和时间。"""
+        """更新被检索到的记忆（G2: passive recall 不强化 retrieval_weight）。
+
+        被动召回：
+        - retrieval_count += 1
+        - exposure_count += 1
+        - last_retrieved_at = now
+        - retrieval_weight 不变（由维护任务按公式重算）
+        """
         if not memory_ids:
             return
         from datetime import UTC, datetime
@@ -260,7 +344,7 @@ class MemoryRepository:
             self._conn.execute(
                 f"UPDATE memory_items SET "
                 f"  retrieval_count=retrieval_count+1, "
-                f"  retrieval_weight=MIN(2.0, retrieval_weight+0.05), "
+                f"  exposure_count=exposure_count+1, "
                 f"  last_retrieved_at=? "
                 f"WHERE memory_id IN ({placeholders})",
                 [now] + memory_ids,
@@ -472,17 +556,26 @@ class MemoryRepository:
         canonical_key: str,
         scope_type: str = "",
         scope_id: str = "",
+        include_candidates: bool = False,
     ) -> MemoryItem | None:
-        """按规范键查找有效记忆。"""
+        """按规范键查找有效记忆。
+
+        Args:
+            include_candidates: 为 True 时同时查找 candidate 状态的记忆
+        """
         now = datetime.now(UTC).isoformat()
         conditions = [
             "principal_id=?",
             "canonical_key=?",
-            "status='confirmed'",
             "deleted_at IS NULL",
             "(valid_to IS NULL OR valid_to > ?)",
         ]
         params: list[Any] = [principal_id, canonical_key, now]
+
+        if include_candidates:
+            conditions.append("status IN ('confirmed', 'candidate')")
+        else:
+            conditions.append("status='confirmed'")
 
         if scope_type:
             conditions.append("scope_type=?")
@@ -619,22 +712,32 @@ class MemoryRepository:
     ) -> bool:
         """确认记忆（candidate → confirmed）。"""
         now = datetime.now(UTC).isoformat()
+        conditions = ["memory_id=?", "status='candidate'", "deleted_at IS NULL"]
+        params: list[Any] = [memory_id]
+        if confirmed_by:
+            conditions.append("principal_id=?")
+            params.append(confirmed_by)
         cursor = self._conn.execute(
-            "UPDATE memory_items SET "
-            "  status='confirmed', confirmed_by=?, confirmation_method=?, "
-            "  confirmed_at=?, updated_at=?, version=version+1 "
-            "WHERE memory_id=? AND status='candidate' AND deleted_at IS NULL",
-            (confirmed_by, confirmation_method, now, now, memory_id),
+            f"UPDATE memory_items SET "
+            f"  status='confirmed', confirmed_by=?, confirmation_method=?, "
+            f"  confirmed_at=?, updated_at=?, version=version+1 "
+            f"WHERE {' AND '.join(conditions)}",
+            [confirmed_by, confirmation_method, now, now] + params,
         )
         return cursor.rowcount > 0
 
-    def reject(self, memory_id: str) -> bool:
+    def reject(self, memory_id: str, principal_id: str = "") -> bool:
         """拒绝记忆（candidate → rejected）。"""
         now = datetime.now(UTC).isoformat()
+        conditions = ["memory_id=?", "status='candidate'"]
+        params: list[Any] = [memory_id]
+        if principal_id:
+            conditions.append("principal_id=?")
+            params.append(principal_id)
         cursor = self._conn.execute(
-            "UPDATE memory_items SET status='rejected', updated_at=?, version=version+1 "
-            "WHERE memory_id=? AND status='candidate'",
-            (now, memory_id),
+            f"UPDATE memory_items SET status='rejected', updated_at=?, version=version+1 "
+            f"WHERE {' AND '.join(conditions)}",
+            [now] + params,
         )
         return cursor.rowcount > 0
 
@@ -659,15 +762,96 @@ class MemoryRepository:
         )
         return cursor.rowcount > 0
 
+    # ── 关系管理（0016 迁移后可用）──
+
+    def _ensure_relations_table(self) -> bool:
+        """检查 memory_relations 表是否存在。"""
+        try:
+            self._conn.execute(
+                "SELECT 1 FROM memory_relations LIMIT 1"
+            ).fetchone()
+            return True
+        except sqlite3.OperationalError:
+            return False
+
+    def insert_relation(
+        self,
+        from_memory_id: str,
+        to_memory_id: str,
+        relation_type: str,
+        source_type: str = "system",
+        source_id: str = "",
+    ) -> bool:
+        """插入记忆关系。"""
+        if not self._ensure_relations_table():
+            return False
+        import uuid
+        now = datetime.now(UTC).isoformat()
+        try:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO memory_relations "
+                "(relation_id, from_memory_id, to_memory_id, relation_type, "
+                " source_type, source_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    uuid.uuid4().hex,
+                    from_memory_id, to_memory_id, relation_type,
+                    source_type, source_id, now,
+                ),
+            )
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def get_relations(
+        self,
+        memory_id: str,
+        direction: str = "both",
+    ) -> list[dict]:
+        """获取记忆的关系。
+
+        Args:
+            memory_id: 记忆 ID
+            direction: "from" | "to" | "both"
+        """
+        if not self._ensure_relations_table():
+            return []
+        rows = []
+        if direction in ("from", "both"):
+            rows.extend(
+                self._conn.execute(
+                    "SELECT * FROM memory_relations WHERE from_memory_id=?",
+                    (memory_id,),
+                ).fetchall()
+            )
+        if direction in ("to", "both"):
+            rows.extend(
+                self._conn.execute(
+                    "SELECT * FROM memory_relations WHERE to_memory_id=?",
+                    (memory_id,),
+                ).fetchall()
+            )
+        return [dict(r) for r in rows]
+
     # ── 删除 ──
 
-    def soft_delete(self, memory_id: str) -> bool:
-        """软删除记忆。"""
+    def soft_delete(self, memory_id: str, principal_id: str = "") -> bool:
+        """软删除记忆。
+
+        Args:
+            memory_id: 记忆 ID
+            principal_id: 所有权验证（非空时校验）
+        """
         now = datetime.now(UTC).isoformat()
+        conditions = ["memory_id=?", "deleted_at IS NULL"]
+        params: list[Any] = [memory_id]
+        if principal_id:
+            conditions.append("principal_id=?")
+            params.append(principal_id)
         cursor = self._conn.execute(
-            "UPDATE memory_items SET deleted_at=?, updated_at=?, version=version+1 "
-            "WHERE memory_id=? AND deleted_at IS NULL",
-            (now, now, memory_id),
+            f"UPDATE memory_items SET deleted_at=?, updated_at=?, version=version+1 "
+            f"WHERE {' AND '.join(conditions)}",
+            [now, now] + params,
         )
         if cursor.rowcount > 0:
             self._sync_fts_delete(memory_id)

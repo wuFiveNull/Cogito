@@ -7,9 +7,7 @@
 - version, deleted_at, updated_at
 """
 
-from datetime import UTC, datetime, timedelta
-
-import pytest
+from datetime import UTC, datetime
 
 from cogito.domain.memory import (
     Explicitness,

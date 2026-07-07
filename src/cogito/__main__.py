@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import logging
 import signal
+import sqlite3
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +24,24 @@ def main() -> None:
 
     sub.add_parser("init", help="Initialize workspace and database")
     sub.add_parser("info", help="Show system info")
+
+    # ── Memory CLI (H1) ──
+    memory_parser = sub.add_parser("memory", help="Memory management CLI")
+    memory_sub = memory_parser.add_subparsers(dest="memory_command")
+
+    memory_sub.add_parser("list", help="List memories")
+    memory_sub.add_parser("search", help="Search memories").add_argument(
+        "query", nargs="?", default="")
+    memory_sub.add_parser("show", help="Show a memory by ID").add_argument("memory_id")
+    memory_sub.add_parser("pending", help="List pending candidates")
+    memory_sub.add_parser("confirm", help="Confirm a candidate").add_argument("memory_id")
+    memory_sub.add_parser("reject", help="Reject a candidate").add_argument("memory_id")
+    memory_sub.add_parser("forget", help="Forget a memory").add_argument("memory_id")
+    memory_sub.add_parser("export", help="Export memories as JSON")
+    memory_sub.add_parser("rebuild-index", help="Rebuild FTS and embedding index")
+    memory_sub.add_parser("stats", help="Show memory statistics")
+    memory_sub.add_parser("views", help="Regenerate Markdown views")
+
     run_parser = sub.add_parser("run", help="Start the agent runtime loop")
     run_parser.add_argument(
         "--worker-id", default="worker1",
@@ -48,9 +67,143 @@ def main() -> None:
         _cmd_info()
     elif args.command == "run":
         _cmd_run(args)
+    elif args.command == "memory":
+        _cmd_memory(args)
     else:
         parser.print_help()
         sys.exit(1)
+
+
+def _cmd_memory(args: argparse.Namespace) -> None:
+    """H1: Memory management CLI."""
+    import json
+
+    config = Config.load()
+    db_path = config.resolve_db_path()
+    if not Path(db_path).exists():
+        print("[!] Database not found. Run 'cogito init' first.")
+        sys.exit(1)
+
+    cmd = args.memory_command
+    if cmd is None:
+        print("Usage: cogito memory <command> [args]")
+        print("Commands: list, search, show, pending, confirm, reject, ")
+        print("          forget, export, rebuild-index, stats, views")
+        return
+
+    conn = get_connection(db_path)
+    try:
+        conn.row_factory = sqlite3.Row
+
+        if cmd == "list":
+            rows = conn.execute(
+                "SELECT memory_id, kind, subject, predicate, value, status, importance "
+                "FROM memory_items WHERE deleted_at IS NULL "
+                "ORDER BY importance DESC, created_at DESC LIMIT 200"
+            ).fetchall()
+            for r in rows:
+                print(f"[{r['status']}] {r['memory_id'][:12]} "
+                      f"[{r['kind']}] {r['subject']}/{r['predicate']} = {r['value']}")
+
+        elif cmd == "search":
+            from cogito.service.retrieval_service import RetrievalService
+            retriever = RetrievalService(conn)
+            results = retriever.retrieve(
+                principal_id="owner", query=args.query, limit=20,
+            )
+            for sm in results:
+                d = sm.to_dict()
+                print(f"[{d['retrieval_path']}] score={d['score']:.3f} "
+                      f"{d['memory_id'][:12]} [{d['kind']}] "
+                      f"{d['subject']}/{d['predicate']} = {d['value']}")
+
+        elif cmd == "show":
+            row = conn.execute(
+                "SELECT * FROM memory_items WHERE memory_id=?", (args.memory_id,)
+            ).fetchone()
+            if not row:
+                print(f"[!] Memory '{args.memory_id}' not found.")
+                return
+            d = dict(row)
+            print(json.dumps(d, indent=2, default=str, ensure_ascii=False))
+
+        elif cmd == "pending":
+            rows = conn.execute(
+                "SELECT memory_id, kind, subject, predicate, value, confidence "
+                "FROM memory_items WHERE status='candidate' AND deleted_at IS NULL "
+                "ORDER BY created_at DESC LIMIT 200"
+            ).fetchall()
+            for r in rows:
+                print(f"[candidate] {r['memory_id'][:12]} "
+                      f"[{r['kind']}] {r['subject']}/{r['predicate']} = {r['value']} "
+                      f"(confidence={r['confidence']:.2f})")
+
+        elif cmd == "confirm":
+            from cogito.service.memory_service import SqliteMemoryService
+            svc = SqliteMemoryService(conn)
+            ok = svc.confirm(args.memory_id)
+            print(f"[{'ok' if ok else 'FAIL'}] confirm {args.memory_id[:12]}")
+            conn.commit()
+
+        elif cmd == "reject":
+            from cogito.service.memory_service import SqliteMemoryService
+            svc = SqliteMemoryService(conn)
+            ok = svc.reject(args.memory_id)
+            print(f"[{'ok' if ok else 'FAIL'}] reject {args.memory_id[:12]}")
+            conn.commit()
+
+        elif cmd == "forget":
+            from cogito.service.memory_service import SqliteMemoryService
+            svc = SqliteMemoryService(conn)
+            ok = svc.forget(args.memory_id)
+            print(f"[{'ok' if ok else 'FAIL'}] forget {args.memory_id[:12]}")
+            conn.commit()
+
+        elif cmd == "export":
+            rows = conn.execute(
+                "SELECT * FROM memory_items "
+                "ORDER BY created_at"
+            ).fetchall()
+            data = [dict(r) for r in rows]
+            print(json.dumps(data, indent=2, default=str, ensure_ascii=False))
+
+        elif cmd == "rebuild-index":
+            from cogito.service.retrieval_service import RetrievalService
+            # 重建 FTS
+            retriever = RetrievalService(conn)
+            retriever._fts_rebuild()
+            # 清理 orphan embeddings
+            conn.execute(
+                "DELETE FROM memory_embeddings "
+                "WHERE memory_id NOT IN (SELECT memory_id FROM memory_items)"
+            )
+            conn.commit()
+            print("[ok] Index rebuilt.")
+
+        elif cmd == "stats":
+            stats = {}
+            for status in ("confirmed", "candidate", "rejected", "expired"):
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM memory_items WHERE status=? AND deleted_at IS NULL",
+                    (status,),
+                ).fetchone()
+                stats[status] = row[0] if row else 0
+            deleted_row = conn.execute(
+                "SELECT COUNT(*) FROM memory_items WHERE deleted_at IS NOT NULL"
+            ).fetchone()
+            stats["deleted"] = deleted_row[0] if deleted_row else 0
+            print(json.dumps(stats, indent=2))
+
+        elif cmd == "views":
+            from cogito.service.memory_views import MemoryViewsGenerator
+            gen = MemoryViewsGenerator(conn, workspace_path=config.workspace_path)
+            gen.generate_all()
+            print(f"[ok] Views regenerated in {gen._views_dir}")
+
+        else:
+            print(f"Unknown memory subcommand: {cmd}")
+    finally:
+        conn.close()
 
 
 def _cmd_init() -> None:
@@ -191,8 +344,7 @@ async def _async_run(
     args: argparse.Namespace,
 ) -> None:
     """异步运行主体。"""
-    from cogito.model.router import ModelRouter
-    from cogito.service.agent_runner import build_agent_runner, MODE_TOOLSETS, RunOutcome
+    from cogito.service.agent_runner import RunOutcome, build_agent_runner
 
     # ── 1. 创建 ModelProvider ──
     if config.model.main.is_configured():
@@ -211,25 +363,17 @@ async def _async_run(
         provider = StubModelProvider()
         logger.warning("No model configured — using stub provider (echo mode)")
 
-    # ── 2. 创建 Router ──
-    router = ModelRouter(
-        providers={"main": provider},
-        role_map={"main": "main"},
-    )
-
-    # ── 3. 构建 AgentRunner（含 Registry + Executor + Toolset）──
+    # ── 2. 构建 AgentRunner（含 Registry + Executor + Toolset）──
     runner = build_agent_runner(
         config=config,
         connection=conn,
         provider=provider,
     )
 
-    # ── 4. 创建 InboundService 和 Dispatcher ──
+    # ── 4. 创建 InboundService ──
     from cogito.service.inbound_service import InboundService
-    from cogito.service.dispatcher import Dispatcher
 
     inbound_service = InboundService(conn)
-    dispatcher = Dispatcher(conn)
 
     # ── 5. 读取 Channel 配置并启动适配器 ──
     import tomllib
@@ -249,7 +393,6 @@ async def _async_run(
         from cogito.channel.manager import ChannelManager
         from cogito.inbound.dispatcher import InboundDispatcher
         from cogito.service.channel_gateway import ChannelGateway
-        from cogito.service.delivery_worker import DeliveryWorker
         from cogito.service.delivery_worker import DeliveryWorker
 
         inbound_dispatcher = InboundDispatcher(inbound_service)
@@ -273,6 +416,25 @@ async def _async_run(
         channel_manager = None
         channel_gateway = None
         delivery_worker = None
+
+    # ── 5b. 创建 TaskWorker ──
+    from cogito.service.task_dispatcher import TaskDispatcher
+    from cogito.service.task_handlers import TaskHandlerContext, _build_registry
+    from cogito.service.task_worker import TASK_WORKER_ID_PREFIX, TaskWorker
+
+    task_handler_ctx = TaskHandlerContext(
+        connection_factory=lambda p=config.resolve_db_path(): get_connection(p),
+        workspace_path=config.workspace_path,
+    )
+    task_registry = _build_registry(task_handler_ctx)
+    task_dispatcher = TaskDispatcher(conn)
+    task_worker = TaskWorker(
+        conn=conn,
+        dispatcher=task_dispatcher,
+        registry=task_registry,
+        handler_context=task_handler_ctx,
+        heartbeat_interval_s=config.worker.heartbeat_interval_seconds,
+    )
 
     # ── 5. 设置信号处理 ──
     shutdown_event = asyncio.Event()
@@ -298,22 +460,34 @@ async def _async_run(
             outcome = await runner.run_once(args.worker_id)
 
             if outcome == RunOutcome.idle:
-                # 无可用 Turn，顺带处理 Delivery
+                # 无可用 Turn，顺带处理 Delivery + Task
                 if delivery_worker:
                     await _process_one_delivery(delivery_worker, args.worker_id)
+                if task_worker:
+                    task_outcome = await task_worker.run_once(
+                        f"{TASK_WORKER_ID_PREFIX}{args.worker_id}"
+                    )
+                    if task_outcome != "idle":
+                        logger.info("Task processed: %s", task_outcome)
                 # 等待后重试
                 try:
                     await asyncio.wait_for(
                         shutdown_event.wait(),
                         timeout=args.poll_interval,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
             elif outcome == RunOutcome.completed:
                 logger.info("Turn completed successfully")
-                # 完成 Turn 后立即处理一次 Delivery
+                # 完成 Turn 后立即处理一次 Delivery + Task
                 if delivery_worker:
                     await _process_one_delivery(delivery_worker, args.worker_id)
+                if task_worker:
+                    task_outcome = await task_worker.run_once(
+                        f"{TASK_WORKER_ID_PREFIX}{args.worker_id}"
+                    )
+                    if task_outcome != "idle":
+                        logger.info("Task processed: %s", task_outcome)
             elif outcome == RunOutcome.failed:
                 logger.warning("Turn execution failed")
             elif outcome == RunOutcome.lost:
@@ -354,13 +528,8 @@ async def _interactive_run(
         provider = StubModelProvider()
         print("[stub] 未配置模型，使用 Stub Provider（固定回复）")
 
-    from cogito.model.router import ModelRouter
-    from cogito.service.agent_runner import build_agent_runner
+    from cogito.service.agent_runner import RunOutcome, build_agent_runner
 
-    router = ModelRouter(
-        providers={"main": provider},
-        role_map={"main": "main"},
-    )
     runner = build_agent_runner(config, conn, provider=provider)
 
     # ── 2. 创建 InboundService ──
@@ -369,7 +538,6 @@ async def _interactive_run(
 
     inbound = InboundService(conn)
 
-    import asyncio
 
     print()
     print("  输入消息按回车发送，输入 /quit 退出")
@@ -425,7 +593,7 @@ async def _interactive_run(
 
 
 async def _process_one_delivery(
-    delivery_worker: "DeliveryWorker",  # noqa: F821
+    delivery_worker: DeliveryWorker,  # noqa: F821
     worker_id: str,
 ) -> None:
     """领取并发送一条待投递消息（不阻塞事件循环）。"""

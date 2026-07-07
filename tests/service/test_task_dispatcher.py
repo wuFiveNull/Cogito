@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from cogito.domain.task import Task, TaskAttempt, TaskStatus
+from cogito.domain.task import TaskStatus
 from cogito.service.task_dispatcher import TaskDispatcher
 from cogito.store.migration import migrate
 from cogito.store.time_utils import epoch_ms

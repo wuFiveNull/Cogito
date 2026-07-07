@@ -46,6 +46,7 @@ class ContextSnapshot:
 
     - snapshot_id: 稳定标识
     - turn_id: 关联的 Turn
+    - input_message_id: 当前输入消息 ID
     - session_id: 来源 Session
     - principal_id: 来源 Principal
     - message_upper_bound: 创建时的消息上界
@@ -58,7 +59,9 @@ class ContextSnapshot:
     """
     snapshot_id: str = ""
     turn_id: str = ""
+    input_message_id: str = ""
     session_id: str = ""
+    conversation_id: str = ""
     principal_id: str = ""
     message_upper_bound: int = 0
     selection_policy_version: str = "1"
@@ -160,7 +163,6 @@ class ContextBuilder:
         total_estimate = base_tokens + history_tokens + input_tokens
         token_ratio = total_estimate / self._max_input_tokens if self._max_input_tokens > 0 else 0
 
-        compressed = False
         if token_ratio >= self.BACKGROUND_THRESHOLD:
             summary = self._load_active_summary(session_id)
             if summary:
@@ -187,9 +189,8 @@ class ContextBuilder:
                         role="system",
                     ))
                     history = recent
-                    compressed = True
 
-        # 4. 历史消息（时间正序）
+                    # 4. 历史消息（时间正序）
         for msg in history:
             items.append(self._message_to_item(msg))
 
@@ -210,7 +211,9 @@ class ContextBuilder:
         snapshot = ContextSnapshot(
             snapshot_id=uuid.uuid4().hex,
             turn_id=turn_id,
+            input_message_id=input_message_id,
             session_id=session_id,
+            conversation_id=self._get_session_conversation(session_id),
             principal_id=principal_id,
             memory_ids=tuple(memory_ids),
             message_upper_bound=message_upper_bound,

@@ -341,7 +341,12 @@ def build_agent_runner(
     # 创建 Router
     router = ModelRouter(
         providers={"main": provider},
-        role_map={"main": "main"},
+        role_map={
+            "main": "main",
+            "memory_extractor": "main",
+            "summary": "main",
+            "query_rewriter": "main",
+        },
     )
 
     # 创建 Registry 并发现内置工具
@@ -354,7 +359,11 @@ def build_agent_runner(
         from cogito.tools.registry import discover_builtin_tools
 
         resolved_registry = CapabilityRegistry()
-        discover_builtin_tools(resolved_registry, memory_service=memory_service)
+        discover_builtin_tools(
+            resolved_registry,
+            memory_service=memory_service,
+            get_db_path=lambda: config.resolve_db_path(),
+        )
 
     # 创建 Executor
     executor = ToolExecutor(resolved_registry)
@@ -486,7 +495,7 @@ async def start_mcp_servers(
         )
         try:
             await manager.start_server(mcp_cfg)
-        except Exception as e:
+        except Exception:
             # MCP Server 启动失败不影响整体启动
             pass
 

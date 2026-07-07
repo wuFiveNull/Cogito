@@ -1,33 +1,17 @@
-"""Query Plan — 构建检索查询计划。
+"""Query Plan — 轻量检索查询构建。
 
-根据用户输入和会话上下文，生成优化后的检索参数：
-- query_text: 检索文本
-- kinds: 限定记忆种类
-- scope: 目标 scope
-- time_range_days: 时间范围
-
-MVP 第一版使用规则推导，后续可集成轻量模型语义改写。
+E1: 移除规则化语义判断。
+第一版直接回退（fail-open），不做任何关键词→kinds 的推断。
+可选择接入 LLM 改写器（E2），失败时直接回退到原始 query。
 """
 
 from __future__ import annotations
 
-import re
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-# 关键词 → 记忆种类映射
-_KIND_KEYWORDS: dict[str, list[str]] = {
-    "preference": ["喜欢", "偏好", "prefer", "like", "喜欢", "习惯", "风格", "style"],
-    "constraint": ["不要", "禁止", "不能", "never", "don't", "禁止", "不允许"],
-    "goal": ["目标", "打算", "计划", "goal", "plan", "想要", "要完成"],
-    "episode": ["之前", "上次", "以前", "那时", "曾经", "过去", "before", "previous"],
-}
-
-# 时间范围关键词
-_TIME_KEYWORDS: dict[str, int] = {
-    "最近": 7, "昨天": 1, "今天": 1, "本周": 7, "本月": 30,
-    "recent": 7, "yesterday": 1, "today": 1, "this week": 7, "this month": 30,
-}
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -38,46 +22,84 @@ class QueryPlan:
     scope_type: str = ""
     scope_id: str = ""
     time_range_days: int = 0  # 0 = 不限
+    needs_episodic: bool = False
+    needs_procedure: bool = False
+    original_query: str = ""
 
 
 def build_query_plan(
     query: str,
     session_messages: list[dict[str, Any]] | None = None,
 ) -> QueryPlan:
-    """根据用户输入和会话上下文构建查询计划。
+    """构建查询计划（E1: 不做规则化语义猜测，直接保留原始 query）。
 
     Args:
         query: 用户输入的检索文本。
-        session_messages: 可选的最近会话消息用于上下文增强。
+        session_messages: 可选的最近会话消息（当前未使用，保留接口）。
 
     Returns:
-        优化后的查询计划。
+        查询计划（query_text = 原始输入）。
     """
     if not query:
         return QueryPlan()
+    return QueryPlan(query_text=query.strip(), original_query=query)
 
-    plan = QueryPlan(query_text=query)
 
-    # 1. 按关键词推测记忆种类
-    matched_kinds: set[str] = set()
-    for kind, keywords in _KIND_KEYWORDS.items():
-        for kw in keywords:
-            if kw.lower() in query.lower():
-                matched_kinds.add(kind)
-                break
-    if matched_kinds:
-        plan.kinds = list(matched_kinds)
+async def build_query_plan_with_llm(
+    query: str,
+    model_router: Any = None,
+    session_messages: list[dict[str, Any]] | None = None,
+    timeout_ms: int = 800,
+) -> QueryPlan:
+    """E2: 可选 LLM 改写，超时 fail-open 回退到 build_query_plan。"""
+    if not model_router:
+        return build_query_plan(query, session_messages)
 
-    # 2. 按关键词推测时间范围
-    for kw, days in _TIME_KEYWORDS.items():
-        if kw in query:
-            plan.time_range_days = days
-            break
+    try:
+        import asyncio
 
-    # 3. 提取引号内容作为精确匹配信号（保留 query_text 不变）
-    quoted = re.findall(r'"([^"]+)"', query)
-    if quoted:
-        # 引号内容是精确短语，query_text 保持原样（FTS5 自行处理短语）
-        pass
+        return await asyncio.wait_for(
+            _call_rewriter(query, model_router, session_messages),
+            timeout=timeout_ms / 1000.0,
+        )
+    except (Exception, asyncio.TimeoutError):
+        return build_query_plan(query, session_messages)
 
-    return plan
+
+async def _call_rewriter(
+    query: str,
+    model_router: Any,
+    session_messages: list[dict[str, Any]] | None = None,
+) -> QueryPlan:
+    """调用轻量模型改写 query（E2, 可选）。"""
+    try:
+        from cogito.model.contracts import ModelRequest
+
+        messages = [
+            {"role": "system", "content": (
+                "Rewrite the user's query for memory retrieval. "
+                "Return JSON: {\"query\": \"rewritten query\", "
+                "\"kinds\": [\"preference\"|\"fact\"|\"goal\"|\"constraint\"|\"episode\"], "
+                "\"needs_episodic\": bool, \"needs_procedure\": bool}"
+            )},
+            {"role": "user", "content": query},
+        ]
+        request = ModelRequest(messages=messages, response_format="json")
+        response = await model_router.generate(request, model_role="query_rewriter")
+
+        import json
+        text = response.text.strip()
+        json_match = __import__("re").search(r"\{.*\}", text, __import__("re").DOTALL)
+        if json_match:
+            data = json.loads(json_match.group(0))
+            return QueryPlan(
+                query_text=data.get("query", query),
+                kinds=data.get("kinds", []),
+                original_query=query,
+                needs_episodic=bool(data.get("needs_episodic")),
+                needs_procedure=bool(data.get("needs_procedure")),
+            )
+    except Exception as e:
+        _LOGGER.debug("LLM query rewrite failed: %s", e)
+
+    return build_query_plan(query, session_messages)

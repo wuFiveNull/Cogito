@@ -6,8 +6,8 @@ TOOL-SANDBOX / 1. 执行链：从 Registry resolve 到 ToolResult。
 
 from __future__ import annotations
 
-from cogito.capability.models import ToolDef, ToolCallState, ToolResult, ToolContext
-from cogito.capability.policy import ToolPolicy, PolicyDecision, PolicyResult
+from cogito.capability.models import ToolCallState, ToolContext, ToolDef, ToolResult
+from cogito.capability.policy import PolicyDecision, PolicyResult, ToolPolicy
 from cogito.capability.registry import CapabilityRegistry
 
 __all__ = [

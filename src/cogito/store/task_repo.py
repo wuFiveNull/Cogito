@@ -8,9 +8,8 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import UTC, datetime
-from typing import Any
 
-from cogito.domain.task import Task, TaskAttempt, TaskStatus, TaskAttemptStatus
+from cogito.domain.task import Task, TaskAttempt, TaskStatus
 from cogito.store.time_utils import epoch_ms, from_epoch_ms
 
 

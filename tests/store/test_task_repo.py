@@ -10,13 +10,13 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 
-from cogito.domain.task import Task, TaskAttempt, TaskStatus, TaskAttemptStatus
-from cogito.store.task_repo import TaskRepository, TaskAttemptRepository
+from cogito.domain.task import Task, TaskAttempt, TaskStatus
 from cogito.store.migration import migrate
+from cogito.store.task_repo import TaskAttemptRepository, TaskRepository
 from cogito.store.time_utils import epoch_ms
 
 

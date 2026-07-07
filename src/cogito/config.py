@@ -28,7 +28,7 @@ KNOWN_SECTIONS = frozenset({
     "capability", "sandbox", "worker", "scheduler",
     "connector", "proactive", "security",
     "observability", "retention", "backup", "plugins",
-    "capability",
+    "embedding",
 })
 
 # 兼容别名映射：旧名 → 新名
@@ -52,9 +52,22 @@ MODEL_FIELDS = frozenset({
 })
 
 AGENT_FIELDS = frozenset({
-    "system_prompt", "max_output_tokens", "context_memory_window", "tools",
+    "system_prompt", "system_prompt_mode", "max_output_tokens",
+    "context_memory_window", "tools",
     "enabled_toolsets", "disabled_toolsets", "mode",
 })
+
+# ── 默认 System Prompt ──
+DEFAULT_SYSTEM_PROMPT = (
+    "You are Cogito, a helpful AI assistant.\n\n"
+    "## Memory Rules\n"
+    "- 用户明确要求记住偏好、事实、约束或目标时，调用 remember_memory\n"
+    "- 用户修改已有事实时，写入新记忆覆盖旧记忆\n"
+    "- 用户要求忘记时，调用 forget_memory\n"
+    "- 日常寒暄、一次性请求和模型推测不得写入长期记忆\n"
+    "- 上下文中的 <relevant_memories> 块是自动注入的长期记忆，可直接使用\n"
+    "- 需要更多信息时可调用 recall_memory 搜索记忆"
+)
 
 # ── 已声明但尚未定型节（内容暂不校验，仅允许存在）──
 _TOLERATED_SECTIONS = frozenset({
@@ -306,17 +319,11 @@ class AgentConfig:
     - agent.context.memory_window → context_memory_window
     - agent.tools 保留但不启用
     - agent.enabled_toolsets / agent.disabled_toolsets 控制 Toolset
+    - system_prompt_mode: "replace" 完全替换默认提示词
+                          "append"  在默认提示词后追加用户内容
     """
-    system_prompt: str = (
-        "You are Cogito, a helpful AI assistant.\n\n"
-        "## Memory Rules\n"
-        "- 用户明确要求记住偏好、事实、约束或目标时，调用 remember_memory\n"
-        "- 用户修改已有事实时，写入新记忆覆盖旧记忆\n"
-        "- 用户要求忘记时，调用 forget_memory\n"
-        "- 日常寒暄、一次性请求和模型推测不得写入长期记忆\n"
-        "- 上下文中的 <relevant_memories> 块是自动注入的长期记忆，可直接使用\n"
-        "- 需要更多信息时可调用 recall_memory 搜索记忆"
-    )
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    system_prompt_mode: str = "append"
     max_output_tokens: int = 4096
     context_memory_window: int = 50
     tools: list[str] = field(default_factory=list)
@@ -331,6 +338,19 @@ class AgentConfig:
             f"memory_window={self.context_memory_window})"
         )
 
+    def get_effective_system_prompt(self) -> str:
+        """返回最终生效的 System Prompt。
+
+        replace：完全替换默认提示词
+        append：在默认提示词后追加用户内容（默认）
+        """
+        if self.system_prompt_mode == "replace":
+            return self.system_prompt
+        # append 模式：默认提示词 + 用户追加内容
+        if self.system_prompt == DEFAULT_SYSTEM_PROMPT:
+            return self.system_prompt
+        return DEFAULT_SYSTEM_PROMPT + "\n\n" + self.system_prompt
+
     @classmethod
     def _from_raw(cls, raw: dict[str, Any]) -> AgentConfig:
         # 兼容：agent.max_tokens → max_output_tokens
@@ -342,8 +362,20 @@ class AgentConfig:
             else None
         ) or raw.get("context_memory_window", 50)
 
+        user_prompt = raw.get("system_prompt")
+        prompt_mode = str(raw.get("system_prompt_mode", "append"))
+
+        # 使用常量默认值，确保 Memory Rules 不丢失
+        if not user_prompt:
+            effective_prompt = DEFAULT_SYSTEM_PROMPT
+        elif prompt_mode == "replace":
+            effective_prompt = user_prompt
+        else:
+            effective_prompt = DEFAULT_SYSTEM_PROMPT + "\n\n" + user_prompt
+
         return cls(
-            system_prompt=str(raw.get("system_prompt", "You are Cogito, a helpful AI assistant.")),
+            system_prompt=effective_prompt,
+            system_prompt_mode=prompt_mode,
             max_output_tokens=int(max_tokens) if max_tokens is not None else 4096,
             context_memory_window=int(memory_window),
             tools=list(raw.get("tools", [])),
@@ -351,6 +383,53 @@ class AgentConfig:
             disabled_toolsets=list(raw.get("disabled_toolsets", [])),
             mode=str(raw.get("mode", "reactive")),
         )
+
+
+# ── F1: Embedding 配置 ──
+
+EMBEDDING_FIELDS = frozenset({
+    "enabled", "provider", "model", "api_key", "base_url",
+    "dimensions", "version", "timeout", "max_batch_size",
+})
+
+
+@dataclass
+class EmbeddingConfig:
+    """Embedding 配置（F1：默认关闭）。"""
+    enabled: bool = False
+    provider: str = "openai_compat"
+    model: str = ""
+    api_key: str = ""
+    base_url: str = ""
+    dimensions: int = 0
+    version: str = "1"
+    timeout: int = 30
+    max_batch_size: int = 32
+
+    def __repr__(self) -> str:
+        masked_key = _mask_sensitive("api_key", self.api_key)
+        return (
+            f"EmbeddingConfig(enabled={self.enabled}, model={self.model!r}, "
+            f"api_key={masked_key}, base_url={self.base_url!r})"
+        )
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> EmbeddingConfig:
+        _check_unknown(raw, EMBEDDING_FIELDS, "embedding")
+        return cls(
+            enabled=bool(raw.get("enabled", False)),
+            provider=str(raw.get("provider", "openai_compat")),
+            model=str(raw.get("model", "")),
+            api_key=str(raw.get("api_key", "")),
+            base_url=str(raw.get("base_url", "")),
+            dimensions=int(raw.get("dimensions", 0)),
+            version=str(raw.get("version", "1")),
+            timeout=int(raw.get("timeout", 30)),
+            max_batch_size=int(raw.get("max_batch_size", 32)),
+        )
+
+    def is_configured(self) -> bool:
+        return self.enabled and bool(self.model and self.api_key and self.base_url)
 
 
 @dataclass
@@ -404,6 +483,7 @@ class Config:
     model: ModelConfig = field(default_factory=ModelConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     capability: CapabilityConfig = field(default_factory=CapabilityConfig)
+    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
 
     def __repr__(self) -> str:
         return (
@@ -537,6 +617,9 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
         capability_raw = resolved.get("capability", {})
         capability = CapabilityConfig._from_raw(capability_raw)
 
+        embedding_raw = resolved.get("embedding", {})
+        embedding = EmbeddingConfig._from_raw(embedding_raw) if embedding_raw else EmbeddingConfig()
+
         return cls(
             workspace_path=str(resolved.get("workspace_path", ".workspace")),
             storage=storage,
@@ -546,4 +629,5 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
             model=model,
             agent=agent,
             capability=capability,
+            embedding=embedding,
         )
