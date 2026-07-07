@@ -200,19 +200,17 @@ async def _async_run(
         from cogito.channel.manager import ChannelManager
         from cogito.inbound.dispatcher import InboundDispatcher
         from cogito.service.channel_gateway import ChannelGateway
+        from cogito.service.delivery_worker import DeliveryWorker
+        from cogito.service.delivery_worker import DeliveryWorker
 
         inbound_dispatcher = InboundDispatcher(inbound_service)
         channel_manager = ChannelManager(inbound_dispatcher)
-
-        # 启动 Delivery Worker（将回复发回平台）
-        from cogito.service.delivery_worker import DeliveryWorker
-
+        channel_gateway = ChannelGateway(conn, channel_manager)
         delivery_worker = DeliveryWorker(
             conn=conn,
-            gateway=ChannelGateway(conn, channel_manager),
+            gateway=channel_gateway,
             lease_ttl_s=config.worker.delivery_lease_ttl_seconds,
         )
-        delivery_worker.start_polling(interval_s=config.worker.heartbeat_interval_seconds)
 
         for adapter_name, adapter_cfg in channel_configs.items():
             if not isinstance(adapter_cfg, dict):
@@ -224,6 +222,8 @@ async def _async_run(
                 logger.error("Failed to start channel %s: %s", adapter_name, e)
     else:
         channel_manager = None
+        channel_gateway = None
+        delivery_worker = None
 
     # ── 5. 设置信号处理 ──
     shutdown_event = asyncio.Event()
@@ -249,7 +249,10 @@ async def _async_run(
             outcome = await runner.run_once(args.worker_id)
 
             if outcome == RunOutcome.idle:
-                # 无可用 Turn，等待后重试
+                # 无可用 Turn，顺带处理 Delivery
+                if delivery_worker:
+                    _process_one_delivery(delivery_worker, args.worker_id)
+                # 等待后重试
                 try:
                     await asyncio.wait_for(
                         shutdown_event.wait(),
@@ -259,6 +262,9 @@ async def _async_run(
                     pass
             elif outcome == RunOutcome.completed:
                 logger.info("Turn completed successfully")
+                # 完成 Turn 后立即处理一次 Delivery
+                if delivery_worker:
+                    _process_one_delivery(delivery_worker, args.worker_id)
             elif outcome == RunOutcome.failed:
                 logger.warning("Turn execution failed")
             elif outcome == RunOutcome.lost:
@@ -274,6 +280,21 @@ async def _async_run(
     if channel_manager:
         logger.info("Stopping channel adapters...")
         await channel_manager.stop_all()
+
+
+def _process_one_delivery(
+    delivery_worker: "DeliveryWorker",  # noqa: F821
+    worker_id: str,
+) -> None:
+    """领取并发送一条待投递消息。"""
+    try:
+        lease = delivery_worker.lease_next(worker_id)
+        if lease is None:
+            return
+        delivery_worker.deliver(lease, worker_id)
+        logger.debug("Delivery sent: %s", lease.delivery_id)
+    except Exception:
+        logger.debug("No pending delivery")
 
 
 if __name__ == "__main__":
