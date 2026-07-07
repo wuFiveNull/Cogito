@@ -41,6 +41,7 @@ class RuntimeCycleResult:
     outbox: int = 0
     delivery: int = 0
     task: int = 0
+    scheduler: int = 0
     idle: bool = True
 
 
@@ -73,6 +74,9 @@ class RuntimeApplication:
         self.task_worker: Any = None
         self.channel_manager: Any = None
         self.channel_gateway: Any = None
+
+        # Scheduler —— 周期触发到期 schedule
+        self.scheduler: Any = None
 
         # PR 2: 关闭/drain 状态
         self._shutdown_event: asyncio.Event | None = None
@@ -315,6 +319,16 @@ class RuntimeApplication:
             result.task += 1
             result.idle = False
 
+        # Scheduler tick —— 周期触发到期 schedule，生成 connector.poll Task
+        if self.scheduler is not None:
+            try:
+                scheduled = await asyncio.to_thread(self.scheduler.tick)
+                if scheduled:
+                    result.scheduler = len(scheduled)
+                    result.idle = False
+            except Exception:
+                logger.warning("Scheduler tick failed", exc_info=True)
+
         return result
 
     # ── worker entrypoint ──────────────────────────────────────────────────
@@ -336,6 +350,11 @@ class RuntimeApplication:
 
         # 创建 workers（Outbox / Delivery / Task）
         self.build_workers()
+
+        # 创建 Scheduler
+        from cogito.service.scheduler import Scheduler
+
+        self.scheduler = Scheduler(self.conn)
 
         # 启动启用的 Channel Adapter（如 QQ）
         await self._start_enabled_channels()
