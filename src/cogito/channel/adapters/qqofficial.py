@@ -243,21 +243,96 @@ class QQOfficialAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter
                 await asyncio.sleep(1)
 
     async def _run_websocket(self):
+        import logging
+        _log = logging.getLogger("cogito.channel.qqofficial")
+
+        # 注册 LangBot 回调（确保原有功能正常）
+        self._ensure_listeners()
+
         async def on_ready():
-            pass
+            _log.info("QQ WebSocket connected, listening for messages...")
+
         async def on_event(event_type: str, event_data: dict):
             message_types = {"C2C_MESSAGE_CREATE", "DIRECT_MESSAGE_CREATE", "GROUP_AT_MESSAGE_CREATE", "AT_MESSAGE_CREATE"}
             if event_type not in message_types:
                 return
             if not isinstance(event_data, dict):
                 return
+
+            _log.info(">>> QQ收到消息: type=%s", event_type)
+            _log.info(">>> QQ原始数据: %s", str(event_data)[:500])
+
             payload = {"t": event_type, "d": event_data}
             message_data = await self.bot.get_message(payload)
             if message_data:
+                _log.info(">>> QQ消息解析结果: %s", str(message_data)[:500])
                 event = QQOfficialEvent.from_payload(message_data)
                 await self.bot._handle_message(event)
+
         async def on_error(error: Exception):
-            pass
+            _log.error("QQ WebSocket error: %s", error)
+
+    def _ensure_listeners(self):
+        """注册 LangBot 事件监听器，确保 Cogito _inbound_handler 被调用。"""
+        import logging
+        _log = logging.getLogger("cogito.channel.qqofficial")
+
+        if not self._inbound_handler:
+            _log.warning("QQ适配器: _inbound_handler 未设置，消息不会转发到 Cogito")
+
+        # 好友消息
+        self.bot.on_message("C2C_MESSAGE_CREATE")(self._make_qq_handler("C2C_MESSAGE_CREATE", _log))
+        self.bot.on_message("DIRECT_MESSAGE_CREATE")(self._make_qq_handler("DIRECT_MESSAGE_CREATE", _log))
+
+        # 群@消息
+        self.bot.on_message("GROUP_AT_MESSAGE_CREATE")(self._make_qq_handler("GROUP_AT_MESSAGE_CREATE", _log))
+        self.bot.on_message("AT_MESSAGE_CREATE")(self._make_qq_handler("AT_MESSAGE_CREATE", _log))
+
+        _log.info("QQ适配器: 事件监听器注册完成")
+
+    def _make_qq_handler(self, event_type: str, _log):
+        """创建 QQ 消息处理器。"""
+        async def handle(event: QQOfficialEvent):
+            _log.info(">>> QQ消息进入处理器: type=%s, event=%s", event_type, str(vars(event))[:300])
+
+            if not self._inbound_handler:
+                _log.warning("QQ消息已收到但 _inbound_handler 未设置，丢弃")
+                return
+
+            # 提取消息信息
+            content = event.content or ""
+            sender_id = event.user_openid or event.group_openid or ""
+            group_id = event.group_openid or ""
+            channel_id = event.channel_id or ""
+
+            _log.info(">>> QQ消息内容: content=%s, sender=%s, group=%s",
+                      content[:200], sender_id, group_id)
+
+            if not content and not sender_id:
+                _log.warning("QQ消息缺少必要字段，跳过")
+                return
+
+            # 构造 Cogito Inbound 并转发
+            from cogito.channel.bridge import langbot_event_to_inbound
+            from cogito.channel.vendor.langbot.compatibility.events import FriendMessage, GroupMessage
+
+            # 转换为 LangBot Event 以复用 bridge
+            try:
+                lb_event = await self.event_converter.target2yiri(event)
+                _log.info(">>> QQ事件转换成功: type=%s", type(lb_event).__name__)
+
+                inbound = await langbot_event_to_inbound(
+                    lb_event, "qqofficial", self.adapter_id,
+                )
+                _log.info(">>> Cogito Inbound 创建成功: conv=%s, sender=%s",
+                          inbound.conversation_id, inbound.sender_id)
+
+                await self._inbound_handler(inbound)
+                _log.info(">>> 消息已提交给 Cogito Core")
+            except Exception as e:
+                _log.exception("QQ消息处理失败: %s", e)
+
+        return handle
         self._ws_task = asyncio.create_task(self.bot.connect_gateway_loop(on_event, on_ready, on_error))
         try:
             await self._ws_task
