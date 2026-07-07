@@ -42,3 +42,16 @@ def sample_principal() -> dict:
         "created_at": "2026-01-01T00:00:00+00:00",
         "metadata": '{"name": "test-owner"}',
     }
+
+
+@pytest.fixture
+def fake_rss_server():
+    """提供一个已启动的 FakeRssServer，测试结束后自动停止。"""
+    from tests.connector.fake_rss_server import FakeRssServer
+
+    server = FakeRssServer()
+    server.start()
+    try:
+        yield server
+    finally:
+        server.stop()
