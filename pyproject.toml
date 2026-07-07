@@ -51,11 +51,15 @@ select = ["E", "F", "I", "N", "W", "UP"]
 "src/cogito/store/memory_repo.py" = ["E501"]
 "src/cogito/store/tool_call_repo.py" = ["E501"]
 "src/cogito/capability/executor.py" = ["E501"]
-# 历史遗留 (E402/F841/F821 等) — 后续 PR 清理；本切片不动。
+# 历史遗留 (E402/F841/F821/F401/I001/UP041 等) — 后续 PR 清理；本切片不动。
 "src/cogito/service/agent_runner.py" = ["E402", "F821"]
 "src/cogito/service/task_worker.py" = ["E402"]
 "src/cogito/runtime/loop.py" = ["E402", "E501"]
 "src/cogito/store/task_repo.py" = ["F841"]
+"src/cogito/service/embedding.py" = ["F401"]
+"src/cogito/service/memory_views.py" = ["F401"]
+"src/cogito/service/retrieval_service.py" = ["F401", "I001"]
+"src/cogito/store/query_plan.py" = ["UP041"]
 "tests/**/*.py" = ["E501", "E402", "F841", "F401", "I001", "F541"]
 
 [tool.pytest.ini_options]
