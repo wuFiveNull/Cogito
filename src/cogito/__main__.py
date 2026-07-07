@@ -430,6 +430,15 @@ async def _interactive_run(application: RuntimeApplication) -> None:
         if text in ("/quit", "/exit", "/q"):
             break
 
+        # ── /digest 命令 ──
+        if text == "/digest" or text.startswith("/digest "):
+            reply = _format_digest(application, text[len("/digest"):].strip())
+            try:
+                print(f"\n  [digest] {reply}\n")
+            except UnicodeEncodeError:
+                print(f"\n  [digest] {reply.encode('ascii', errors='replace').decode()}\n")
+            continue
+
         reply = await application.process_terminal_message(text)
         try:
             print(f"\n  [bot] {reply}\n")
@@ -442,6 +451,60 @@ async def _interactive_run(application: RuntimeApplication) -> None:
                 except UnicodeEncodeError:
                     print(f"  [bot] {line.encode('ascii', errors='replace').decode()}")
             print()
+
+
+def _format_digest(application: RuntimeApplication, arg: str) -> str:
+    """格式化摘要视图。arg: '', 'today', 'latest', 或 'date:YYYY-MM-DD'。"""
+    from cogito.service.digest_service import DigestService
+    from cogito.store.digest_repo import DigestRepository
+
+    svc = DigestService(application.conn)
+
+    if arg.startswith("date:"):
+        date_str = arg[5:]
+        digest = svc.assemble_digest("owner", date_str)
+        if digest is None:
+            return f"尚无 {date_str} 的摘要条目。"
+        view = svc.get_digest_view(digest.digest_id)
+    elif arg == "latest":
+        view = None
+        listing = svc.list_digests("owner", limit=1)
+        if listing:
+            digest = DigestRepository(application.conn).find_by_date(
+                "owner", listing[0]["digest_date"],
+            )
+            if digest:
+                view = svc.get_digest_view(digest.digest_id)
+        if view is None:
+            return "尚无摘要条目。"
+    else:
+        # 默认 today
+        view = svc.get_today_digest("owner")
+        if view is None:
+            return "今日尚无摘要条目。"
+
+    return _render_digest_view(view)
+
+
+def _render_digest_view(view: dict) -> str:
+    """渲染摘要视图为可读文本。"""
+    lines = [
+        f"📰 {view['digest_date']} 摘要 ({view['item_count']} 条) [{view['status']}]",
+        "",
+    ]
+    for i, item in enumerate(view["items"], 1):
+        relevance = item.get("relevance")
+        rel_str = f"[相关度 {relevance:.2f}]" if relevance is not None else ""
+        title = (item.get("title") or "(无标题)")[:60]
+        lines.append(f"  {i}. {title} {rel_str}")
+        summary = item.get("summary_text", "")
+        if summary:
+            lines.append(f"     {summary[:100]}")
+        link = item.get("link", "")
+        if link:
+            lines.append(f"     🔗 {link}")
+        lines.append("")
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":
