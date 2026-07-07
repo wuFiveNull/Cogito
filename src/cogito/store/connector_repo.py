@@ -31,8 +31,8 @@ class ConnectorRepository:
         self._conn.execute(
             "INSERT INTO connectors (connector_id, connector_type, name, url, "
             "  site_link, poll_schedule_id, fetch_timeout_s, status, "
-            "  consecutive_failures, created_at) "
-            "VALUES (?,?,?,?,?, ?,?,?,?)",
+            "  consecutive_failures, last_success_at, last_attempt_at, created_at) "
+            "VALUES (?,?,?,?,?, ?,?,?,?, ?,?,?)",
             (
                 connector.connector_id,
                 connector.connector_type.value,
@@ -43,6 +43,8 @@ class ConnectorRepository:
                 connector.fetch_timeout_s,
                 connector.status.value,
                 connector.consecutive_failures,
+                epoch_ms(connector.last_success_at),
+                epoch_ms(connector.last_attempt_at),
                 epoch_ms(connector.created_at),
             ),
         )
@@ -87,6 +89,8 @@ class ConnectorRepository:
             fetch_timeout_s=row["fetch_timeout_s"],
             status=row["status"],
             consecutive_failures=row["consecutive_failures"],
+            last_success_at=from_epoch_ms(row["last_success_at"]),
+            last_attempt_at=from_epoch_ms(row["last_attempt_at"]),
             created_at=from_epoch_ms(row["created_at"]),
         )
 
