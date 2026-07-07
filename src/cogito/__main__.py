@@ -4,14 +4,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import signal
 import sqlite3
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 
 from cogito import __version__
-from cogito.config import DEFAULT_CONFIG_PATH, Config, ConfigError
+from cogito.config import Config, ConfigError
 from cogito.store.connection import get_connection
 from cogito.store.migration import migrate
 
@@ -300,7 +298,7 @@ def _cmd_info(args: argparse.Namespace) -> None:
     print("Python 3.12+ personal agent framework")
     print()
     config = Config.load(_resolve_config_path(args))
-    print(f"Config file:   {DEFAULT_CONFIG_PATH.resolve()}")
+    print(f"Config file:   {_resolve_config_path(args).resolve()}")
     print(f"Workspace:     {config.workspace_path}")
     print(f"Database path: {config.resolve_db_path()}")
     print(f"Payload dir:   {config.resolve_payload_dir()}")
@@ -312,288 +310,99 @@ def _cmd_info(args: argparse.Namespace) -> None:
 
 
 def _cmd_run(args: argparse.Namespace) -> None:
-    """Start the agent runtime loop."""
+    """Start the agent runtime loop.
+
+    通过 RuntimeApplication 统一装配（RB-07）。
+    启动失败按退出码编码（LOCAL-OPERATIONS / 3）：
+        2 — 配置错误（ConfigError 已被 main() 拦截，此处仅为防御）
+        3 — Migration/FK 校验失败
+        4 — Recovery 失败
+    """
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
     config = Config.load(_resolve_config_path(args))
-    db_path = config.resolve_db_path()
 
-    # 确保数据库已初始化
-    if not Path(db_path).exists():
-        print("[!] Database not found. Run 'cogito init' first.")
-        sys.exit(1)
+    from cogito.application import RuntimeApplication
 
-    conn = get_connection(db_path)
+    application: RuntimeApplication | None = None
+    try:
+        try:
+            # build() opens SQLite + migrate() + recover_all() (Plan 02 / 5.1).
+            application = RuntimeApplication.build(config)
+        except (RuntimeError, ValueError) as e:
+            # Migration 失败、FK 校验失败等
+            logger.error("Startup error: %s", e)
+            sys.exit(3)
 
-    # 显示启动信息
-    _print_startup_banner(config)
+        _print_startup_banner(application)
 
-    # 启动模式选择
-    if args.interactive:
-        _start_interactive(config, conn, args)
-    else:
-        _start_worker(config, conn, args)
+        if args.interactive:
+            _start_interactive(application, args)
+        else:
+            _start_worker(application, args)
+    finally:
+        if application is not None:
+            application.close()
 
 
 def _start_worker(
-    config: Config,
-    conn: sqlite3.Connection,
+    application: RuntimeApplication,
     args: argparse.Namespace,
 ) -> None:
     """启动 Worker 循环（后台运行模式）。"""
     try:
-        asyncio.run(_async_run(config, conn, args))
+        asyncio.run(application.run_worker(
+            worker_id=args.worker_id,
+            poll_interval=args.poll_interval,
+        ))
     except KeyboardInterrupt:
         print("\n[ok] Shutdown complete.")
     except Exception as e:
         logger.exception("Fatal error: %s", e)
         sys.exit(1)
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
 
 
 def _start_interactive(
-    config: Config,
-    conn: sqlite3.Connection,
+    application: RuntimeApplication,
     args: argparse.Namespace,
 ) -> None:
     """启动交互式 REPL（命令行对话模式）。
 
-    RB-02 修复：REPL 返回后不再调用 _async_run，仅关闭连接。
+    RB-02 修复：REPL 返回后仅关闭连接，不再运行 worker 循环。
     """
     try:
-        asyncio.run(_interactive_run(config, conn, args))
+        asyncio.run(_interactive_run(application))
     except KeyboardInterrupt:
         print("\n[ok] Bye!")
     except Exception as e:
         logger.exception("Fatal error: %s", e)
         sys.exit(1)
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
 
 
-def _print_startup_banner(config: Config) -> None:
+def _print_startup_banner(application: RuntimeApplication) -> None:
     """打印启动信息。"""
+    config = application.config
     print("=" * 50)
     print("  Cogito — 主动式个人 Agent")
     print(f"  v{__version__}")
     print(f"  Worker:     {config.worker.concurrency}x 并发")
     print(f"  Model:      {config.model.main.model or '(stub)'}")
+    recovery = application.recovery_counts()
+    if any(recovery.values()):
+        print(f"  Recovery:   {recovery}")
     if config.agent.enabled_toolsets:
         print(f"  Toolsets:   {', '.join(config.agent.enabled_toolsets)}")
     print("=" * 50)
 
 
-async def _async_run(
-    config: Config,
-    conn: sqlite3.Connection,
-    args: argparse.Namespace,
-) -> None:
-    """异步运行主体。"""
-    from cogito.service.agent_runner import RunOutcome, build_agent_runner
-
-    # ── 1. 创建 ModelProvider ──
-    if config.model.main.is_configured():
-        from cogito.model.openai_compat import OpenAICompatProvider
-
-        provider = OpenAICompatProvider(
-            model=config.model.main.model,
-            api_key=config.model.main.api_key,
-            base_url=config.model.main.base_url,
-            timeout_seconds=config.model.main.timeout_seconds,
-        )
-        logger.info("Using model: %s (%s)", config.model.main.model, config.model.main.base_url)
-    else:
-        from cogito.model.stub_provider import StubModelProvider
-
-        provider = StubModelProvider()
-        logger.warning("No model configured — using stub provider (echo mode)")
-
-    # ── 2. 构建 AgentRunner（含 Registry + Executor + Toolset）──
-    runner = build_agent_runner(
-        config=config,
-        connection=conn,
-        provider=provider,
-    )
-
-    # ── 4. 创建 InboundService ──
-    from cogito.service.inbound_service import InboundService
-
-    inbound_service = InboundService(conn)
-
-    # ── 5. 读取 Channel 配置并启动适配器 ──
-    import tomllib
-
-    raw_config = {}
-    cfg_path = Path("config.toml")
-    if cfg_path.exists():
-        with cfg_path.open("rb") as f:
-            raw_config = tomllib.load(f)
-
-    channel_configs = raw_config.get("channel", {})
-    # 兼容旧名 channels
-    if not channel_configs:
-        channel_configs = raw_config.get("channels", {})
-
-    if channel_configs:
-        from cogito.channel.manager import ChannelManager
-        from cogito.inbound.dispatcher import InboundDispatcher
-        from cogito.service.channel_gateway import ChannelGateway
-        from cogito.service.delivery_worker import DeliveryWorker
-
-        inbound_dispatcher = InboundDispatcher(inbound_service)
-        channel_manager = ChannelManager(inbound_dispatcher)
-        channel_gateway = ChannelGateway(conn, channel_manager)
-        delivery_worker = DeliveryWorker(
-            conn=conn,
-            gateway=channel_gateway,
-            lease_ttl_s=config.worker.delivery_lease_ttl_seconds,
-        )
-
-        for adapter_name, adapter_cfg in channel_configs.items():
-            if not isinstance(adapter_cfg, dict):
-                continue
-            logger.info("Starting channel adapter: %s", adapter_name)
-            try:
-                await channel_manager.start_channel(adapter_name, adapter_cfg)
-            except Exception as e:
-                logger.error("Failed to start channel %s: %s", adapter_name, e)
-    else:
-        channel_manager = None
-        channel_gateway = None
-        delivery_worker = None
-
-    # ── 5b. 创建 TaskWorker ──
-    from cogito.service.task_dispatcher import TaskDispatcher
-    from cogito.service.task_handlers import TaskHandlerContext, _build_registry
-    from cogito.service.task_worker import TASK_WORKER_ID_PREFIX, TaskWorker
-
-    task_handler_ctx = TaskHandlerContext(
-        connection_factory=lambda p=config.resolve_db_path(): get_connection(p),
-        workspace_path=config.workspace_path,
-    )
-    task_registry = _build_registry(task_handler_ctx)
-    task_dispatcher = TaskDispatcher(conn)
-    task_worker = TaskWorker(
-        conn=conn,
-        dispatcher=task_dispatcher,
-        registry=task_registry,
-        handler_context=task_handler_ctx,
-        heartbeat_interval_s=config.worker.heartbeat_interval_seconds,
-    )
-
-    # ── 5. 设置信号处理 ──
-    shutdown_event = asyncio.Event()
-
-    def _handle_signal() -> None:
-        logger.info("Shutdown signal received, stopping...")
-        shutdown_event.set()
-
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, _handle_signal)
-        except (ValueError, NotImplementedError):
-            pass  # Windows 不支持 add_signal_handler
-
-    # ── 6. 启动 Worker 循环 ──
-    logger.info("Starting worker loop (poll interval: %.1fs)...", args.poll_interval)
-    print("[ok] Agent is running. Press Ctrl+C to stop.")
-
-    try:
-        while not shutdown_event.is_set():
-            # 领取代执行 Turn
-            outcome = await runner.run_once(args.worker_id)
-
-            if outcome == RunOutcome.idle:
-                # 无可用 Turn，顺带处理 Delivery + Task
-                if delivery_worker:
-                    await _process_one_delivery(delivery_worker, args.worker_id)
-                if task_worker:
-                    task_outcome = await task_worker.run_once(
-                        f"{TASK_WORKER_ID_PREFIX}{args.worker_id}"
-                    )
-                    if task_outcome != "idle":
-                        logger.info("Task processed: %s", task_outcome)
-                # 等待后重试
-                try:
-                    await asyncio.wait_for(
-                        shutdown_event.wait(),
-                        timeout=args.poll_interval,
-                    )
-                except TimeoutError:
-                    pass
-            elif outcome == RunOutcome.completed:
-                logger.info("Turn completed successfully")
-                # 完成 Turn 后立即处理一次 Delivery + Task
-                if delivery_worker:
-                    await _process_one_delivery(delivery_worker, args.worker_id)
-                if task_worker:
-                    task_outcome = await task_worker.run_once(
-                        f"{TASK_WORKER_ID_PREFIX}{args.worker_id}"
-                    )
-                    if task_outcome != "idle":
-                        logger.info("Task processed: %s", task_outcome)
-            elif outcome == RunOutcome.failed:
-                logger.warning("Turn execution failed")
-            elif outcome == RunOutcome.lost:
-                logger.warning("Turn lease lost")
-            elif outcome == RunOutcome.cancelled:
-                logger.info("Turn was cancelled")
-    except asyncio.CancelledError:
-        pass
-
-    logger.info("Worker loop stopped.")
-
-    # ── 8. 清理 ──
-    if channel_manager:
-        logger.info("Stopping channel adapters...")
-        await channel_manager.stop_all()
-
-
-async def _interactive_run(
-    config: Config,
-    conn: sqlite3.Connection,
-    args: argparse.Namespace,
-) -> None:
+async def _interactive_run(application: RuntimeApplication) -> None:
     """交互式 REPL —— 命令行输入消息，看到回复。
 
-    不依赖任何 Channel 适配器，直接通过 InboundService 注入消息。
+    不依赖 Channel 适配器；通过 RuntimeApplication 统一装配。
     """
-    # ── 1. 创建 Provider/Router/Runner ──
-    if config.model.main.is_configured():
-        from cogito.model.openai_compat import OpenAICompatProvider
-        provider = OpenAICompatProvider(
-            model=config.model.main.model,
-            api_key=config.model.main.api_key,
-            base_url=config.model.main.base_url,
-            timeout_seconds=config.model.main.timeout_seconds,
-        )
-    else:
-        from cogito.model.stub_provider import StubModelProvider
-        provider = StubModelProvider()
-        print("[stub] 未配置模型，使用 Stub Provider（固定回复）")
-
-    from cogito.service.agent_runner import RunOutcome, build_agent_runner
-
-    runner = build_agent_runner(config, conn, provider=provider)
-
-    # ── 2. 创建 InboundService ──
-    from cogito.contracts.envelope import ChannelEnvelope
-    from cogito.service.inbound_service import InboundService
-
-    inbound = InboundService(conn)
-
-
     print()
     print("  输入消息按回车发送，输入 /quit 退出")
     print("=" * 50)
@@ -611,55 +420,15 @@ async def _interactive_run(
         if text in ("/quit", "/exit", "/q"):
             break
 
-        # 通过 InboundService 注入消息（会创建 queued turn）
-        result = inbound.accept(ChannelEnvelope(
-            channel_type="terminal",
-            channel_instance_id="terminal",
-            platform_sender_id="user",
-            platform_conversation_id="terminal_conv",
-            platform_message_id="",
-            content_parts=[{"content_type": "text", "inline_data": text}],
-            received_at=datetime.now(UTC).isoformat(),
-        ))
-        logger.debug("Injected message: %s -> turn %s", result.message_id, result.turn_id)
-
-        # 执行一次 Turn 处理
-        outcome = await runner.run_once(args.worker_id)
-        if outcome == RunOutcome.completed:
-            # 读取回复文本
-            row = conn.execute(
-                "SELECT m.message_id, cp.inline_data "
-                "FROM messages m "
-                "JOIN content_parts cp ON cp.message_id = m.message_id "
-                "WHERE m.conversation_id='terminal_conv' "
-                "AND m.role='assistant' "
-                "AND cp.content_type='text' "
-                "ORDER BY m.receive_sequence DESC LIMIT 1",
-            ).fetchone()
-            reply = row["inline_data"] if row else "(no reply)"
+        reply = await application.process_terminal_message(text)
+        try:
             print(f"\n  🤖 {reply}\n")
-        elif outcome == RunOutcome.failed:
-            print("  ❌ Turn failed")
-        elif outcome == RunOutcome.cancelled:
-            print("  ⏹  Cancelled")
-        else:
-            # idle / lost — 可能是 context builder 出问题
-            print(f"  ⚠️  Unexpected outcome: {outcome}")
-
-
-async def _process_one_delivery(
-    delivery_worker: DeliveryWorker,  # noqa: F821
-    worker_id: str,
-) -> None:
-    """领取并发送一条待投递消息（不阻塞事件循环）。"""
-    try:
-        lease = delivery_worker.lease_next(worker_id)
-        if lease is None:
-            return
-        result = await asyncio.to_thread(delivery_worker.deliver, lease, worker_id)
-        logger.info("Delivery %s: %s -> %s", lease.delivery_id[:12], lease.content_ref[:40], result)
-    except Exception:
-        logger.warning("Delivery processing failed", exc_info=True)
+        except UnicodeEncodeError:
+            # 在 GBK/ASCII 终端降级 (Windows 控制台常见)
+            print("")
+            for line in reply.splitlines():
+                print(f"  [bot] {line}")
+            print()
 
 
 if __name__ == "__main__":
