@@ -82,3 +82,6 @@ select = ["E", "F", "I", "N", "W", "UP"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
+markers = [
+    "recovery: crash / restart / forced-termination recovery scenarios (CI stage 4).",
+]

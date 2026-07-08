@@ -1,0 +1,74 @@
+# CI order is fixed by design (Plan 01 M6):
+#   dependency rules -> contract -> unit -> integration -> recovery
+# Architecture tests must NOT be masked by xfail — new violations fail CI.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  architecture:
+    name: "1. Architecture (dependency + boundaries)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      # Forbidden-import + cycle + facade tests run FIRST, before any unit test.
+      # These must pass before later jobs run. No xfail allowed.
+      - name: Dependency + boundary + facade + contract tests
+        run: >
+          python -m pytest tests/architecture/ -v
+          --strict-markers
+          -p no:xfail
+
+  quality:
+    name: "2. Quality gates (Ruff + compileall)"
+    runs-on: ubuntu-latest
+    needs: architecture
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: python -m ruff check src/ tests/
+      - run: python -m compileall -q src/
+
+  test:
+    name: "3. Test suite (unit + integration)"
+    runs-on: ${{ matrix.os }}
+    needs: quality
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: python -m pytest tests/ -q --strict-markers
+
+  recovery:
+    name: "4. Recovery + forced-termination smoke"
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      # Recovery tests are identified via marker: @pytest.mark.recovery
+      - run: python -m pytest tests/ -q -m recovery --strict-markers
