@@ -20,6 +20,7 @@ class MCPClient:
         self._server_name = server_name
         self._config = config
         self._session = None
+        self._stdio_ctx = None
         self._process = None
         self._tools: list[dict[str, Any]] = []
         self._connected = False
@@ -37,7 +38,11 @@ class MCPClient:
             raise ValueError(f"Unknown transport: {self._config.transport}")
 
     async def _start_stdio(self) -> None:
-        """通过 stdio 启动 MCP Server。"""
+        """通过 stdio 启动 MCP Server。
+
+        兼容新版 mcp SDK：stdio_client 已经是 @asynccontextmanager，
+        必须用 async with 获取 (read, write)，不能用旧式 await。
+        """
         import mcp.types as types
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
@@ -47,10 +52,13 @@ class MCPClient:
             args=list(self._config.args),
         )
 
-        stdio_transport = await stdio_client(params)
-        read, write = stdio_transport
+        self._stdio_ctx = stdio_client(params)
+        read, write = await self._stdio_ctx.__aenter__()
 
-        self._session = await ClientSession(read, write, types.ClientCapabilities())
+        # mcp >= 1.x：ClientSession(read, write, read_timeout_seconds?, ...)
+        # 不再接受 ClientCapabilities 作为第三位参数
+        self._session = ClientSession(read, write)
+        await self._session.__aenter__()
         await self._session.initialize()
         self._connected = True
 
@@ -105,8 +113,7 @@ class MCPClient:
         if not self._session or not self._connected:
             return False
         try:
-            from mcp import PingRequest
-            await self._session.send_request(PingRequest())
+            await self._session.send_ping()
             return True
         except Exception:
             return False
@@ -120,6 +127,12 @@ class MCPClient:
             except Exception:
                 pass
             self._session = None
+        if self._stdio_ctx is not None:
+            try:
+                await self._stdio_ctx.__aexit__(None, None, None)
+            except Exception:
+                pass
+            self._stdio_ctx = None
 
     @property
     def connected(self) -> bool:
