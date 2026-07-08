@@ -54,15 +54,6 @@ export default function ChatPage() {
     () => api.conversations() as unknown as Promise<{ items: ConvItem[] }>,
     [],
   );
-
-  // 页面从隐藏切回可见时，刷新会话列表（确保 Trace 页删除的同步过来）
-  useEffect(() => {
-    const onVis = () => {
-      if (document.visibilityState === "visible") convs.reload();
-    };
-    document.addEventListener("visibilitychange", onVis);
-    return () => document.removeEventListener("visibilitychange", onVis);
-  }, [convs]);
   const history = useAsync<{ conversation_id: string; items: ChatMessage[] }>(
     () => api.conversationMessages(conversationId),
     [conversationId],
