@@ -28,6 +28,29 @@ python -m cogito run --interactive
 
 退出 REPL：输入 `/quit`、`/exit` 或 `/q`。
 
+## interaction-web 仪表盘（API + 前端）
+
+新增 `interaction-web` 进程：FastAPI 服务器，提供 Query/Command API（对齐架构文档
+`ACCESS-DELIVERY §2.2/2.3`）并托管 React 仪表盘的静态产物。**所有数据库读写均经服务层
+（`query_service` / `command_service` / 现有 repo），handler 不直接操作 SQLite。**
+
+```powershell
+python -m cogito serve            # 启动 API + 托管前端，默认 http://127.0.0.1:8081/
+python -m cogito serve --no-worker # 仅 API + 仪表盘（不启动后台 worker）
+python -m pytest tests/interaction_web/ -q
+```
+
+端口通过 `config.toml` 的 `[interaction] port` 配置。
+
+### 前端开发（Vite + React + TS）
+
+```powershell
+cd web
+npm install
+npm run dev                        # 开发模式，5173 端口，/api 代理到 8081
+npm run build                      # 构建产物输出到 .workspace/web/dist（由 serve 托管）
+```
+
 ## 质量门禁
 
 ```powershell

@@ -27,8 +27,8 @@ from cogito.domain.principal import (
     PrincipalStatus,
     PrincipalType,
 )
-from cogito.domain.turn import Turn, TurnStatus
-from cogito.store.time_utils import epoch_ms
+from cogito.domain.turn import RunAttempt, RunAttemptStatus, Turn, TurnStatus
+from cogito.store.time_utils import epoch_ms, from_epoch_ms
 
 # =============================================================================
 # InboxRepository
@@ -448,6 +448,80 @@ class TurnRepository:
             (new_status.value, turn_id, expected_version),
         )
         return cursor.rowcount > 0
+
+    def list_(
+        self,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Turn]:
+        """按状态过滤列出 Turn（None 表示全部）。"""
+        if status is None:
+            rows = self._conn.execute(
+                "SELECT * FROM turns ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM turns WHERE status=? "
+                "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (status, limit, offset),
+            ).fetchall()
+        return [self._row_to_turn(r) for r in rows]
+
+    def get(self, turn_id: str) -> Turn | None:
+        row = self._conn.execute(
+            "SELECT * FROM turns WHERE turn_id=?", (turn_id,),
+        ).fetchone()
+        return self._row_to_turn(row) if row else None
+
+    def list_attempts(self, turn_id: str) -> list[RunAttempt]:
+        """列出某个 Turn 的全部 RunAttempt。"""
+        rows = self._conn.execute(
+            "SELECT * FROM run_attempts WHERE turn_id=? ORDER BY attempt_no ASC",
+            (turn_id,),
+        ).fetchall()
+        return [self._row_to_attempt(r) for r in rows]
+
+    def count(self, status: str | None = None) -> int:
+        """统计 Turn 数量（按状态或全部）。"""
+        if status is None:
+            row = self._conn.execute("SELECT COUNT(*) FROM turns").fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM turns WHERE status=?", (status,),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    @staticmethod
+    def _row_to_turn(row: sqlite3.Row) -> Turn:
+        return Turn(
+            turn_id=row["turn_id"],
+            session_id=row["session_id"],
+            input_message_id=row["input_message_id"],
+            status=TurnStatus(row["status"]),
+            priority=row["priority"],
+            version=row["version"],
+            cancel_requested_at=from_epoch_ms(row["cancel_requested_at"]),
+            active_attempt_id=row["active_attempt_id"],
+            final_message_id=row["final_message_id"],
+            created_at=from_epoch_ms(row["created_at"]),
+        )
+
+    @staticmethod
+    def _row_to_attempt(row: sqlite3.Row) -> RunAttempt:
+        return RunAttempt(
+            attempt_id=row["attempt_id"],
+            turn_id=row["turn_id"],
+            attempt_no=row["attempt_no"],
+            status=RunAttemptStatus(row["status"]),
+            checkpoint_ref=row["checkpoint_ref"],
+            started_at=from_epoch_ms(row["started_at"]),
+            finished_at=from_epoch_ms(row["finished_at"]),
+            worker_id=row["worker_id"] or "",
+            lease_version=row["lease_version"],
+            lease_expires_at=from_epoch_ms(row["lease_expires_at"]),
+        )
 
 
 # =============================================================================

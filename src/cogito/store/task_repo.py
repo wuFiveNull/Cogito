@@ -55,6 +55,37 @@ class TaskRepository:
         ).fetchall()
         return [self._row_to_task(r) for r in rows]
 
+    def list_filtered(
+        self,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Task]:
+        """按状态过滤列出 Task（None 表示全部）。"""
+        if status is None:
+            rows = self._conn.execute(
+                "SELECT * FROM tasks "
+                "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM tasks WHERE status=? "
+                "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (status, limit, offset),
+            ).fetchall()
+        return [self._row_to_task(r) for r in rows]
+
+    def count(self, status: str | None = None) -> int:
+        """统计 Task 数量（按状态或全部）。"""
+        if status is None:
+            row = self._conn.execute("SELECT COUNT(*) FROM tasks").fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE status=?", (status,),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
     # ── 写入 ──
 
     def insert(self, task: Task) -> Task:
@@ -160,6 +191,15 @@ class TaskRepository:
         )
         return cursor.rowcount > 0
 
+    def reset_to_queued(self, task_id: str) -> bool:
+        """把 failed/cancelled 的 Task 重新排队（retry）。"""
+        cursor = self._conn.execute(
+            "UPDATE tasks SET status='queued', lease_owner=NULL, lease_expires_at=NULL "
+            "WHERE task_id=? AND status IN ('failed', 'cancelled')",
+            (task_id,),
+        )
+        return cursor.rowcount > 0
+
     def heartbeat(
         self, task_id: str, worker_id: str, lease_version: int,
         lease_ttl_ms: int, now_ms: int | None = None,
@@ -242,3 +282,32 @@ class TaskAttemptRepository:
             (finished_at, attempt_id),
         )
         return cursor.rowcount > 0
+
+    def list_for_task(self, task_id: str) -> list[TaskAttempt]:
+        """列出某个 Task 的全部 Attempt。"""
+        rows = self._conn.execute(
+            "SELECT * FROM task_attempts WHERE task_id=? "
+            "ORDER BY attempt_no ASC",
+            (task_id,),
+        ).fetchall()
+        return [self._row_to_attempt(r) for r in rows]
+
+    def get_attempt(self, attempt_id: str) -> TaskAttempt | None:
+        row = self._conn.execute(
+            "SELECT * FROM task_attempts WHERE task_attempt_id=?", (attempt_id,),
+        ).fetchone()
+        return self._row_to_attempt(row) if row else None
+
+    @staticmethod
+    def _row_to_attempt(row: sqlite3.Row) -> TaskAttempt:
+        return TaskAttempt(
+            task_attempt_id=row["task_attempt_id"],
+            task_id=row["task_id"],
+            attempt_no=row["attempt_no"],
+            status=row["status"],
+            lease_owner=row["lease_owner"],
+            lease_version=row["lease_version"],
+            lease_expires_at=from_epoch_ms(row["lease_expires_at"]),
+            checkpoint_ref=row["checkpoint_ref"],
+            started_at=from_epoch_ms(row["started_at"]),
+        )

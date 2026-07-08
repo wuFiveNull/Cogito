@@ -63,6 +63,26 @@ class ModelCallRecord:
         self.completed_at = completed_at
         self.trace_id = trace_id
 
+    def to_dict(self) -> dict:
+        return {
+            "model_call_id": self.model_call_id,
+            "attempt_id": self.attempt_id,
+            "request_id": self.request_id,
+            "provider_id": self.provider_id,
+            "model_id": self.model_id,
+            "status": self.status,
+            "finish_reason": self.finish_reason,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cached_tokens": self.cached_tokens,
+            "latency_ms": self.latency_ms,
+            "error_category": self.error_category,
+            "retry_count": self.retry_count,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "trace_id": self.trace_id,
+        }
+
 
 class ModelCallRepository:
     """ModelCall 持久化仓库。"""
@@ -100,6 +120,42 @@ class ModelCallRepository:
         rows = self._conn.execute(
             "SELECT * FROM model_calls WHERE trace_id=? ORDER BY started_at ASC",
             (trace_id,),
+        ).fetchall()
+        return [self._row_to_record(r) for r in rows]
+
+    def usage_summary(self, since_ms: int | None = None) -> dict:
+        """返回模型调用汇总：次数、token、平均延迟。since_ms 为 None 则全量。"""
+        if since_ms is None:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS calls, "
+                "COALESCE(SUM(input_tokens),0) AS input_tokens, "
+                "COALESCE(SUM(output_tokens),0) AS output_tokens, "
+                "COALESCE(SUM(cached_tokens),0) AS cached_tokens, "
+                "COALESCE(AVG(latency_ms),0) AS avg_latency_ms "
+                "FROM model_calls WHERE status='success'"
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS calls, "
+                "COALESCE(SUM(input_tokens),0) AS input_tokens, "
+                "COALESCE(SUM(output_tokens),0) AS output_tokens, "
+                "COALESCE(SUM(cached_tokens),0) AS cached_tokens, "
+                "COALESCE(AVG(latency_ms),0) AS avg_latency_ms "
+                "FROM model_calls WHERE status='success' AND started_at >= ?",
+                (since_ms,),
+            ).fetchone()
+        return {
+            "calls": int(row["calls"]),
+            "input_tokens": int(row["input_tokens"]),
+            "output_tokens": int(row["output_tokens"]),
+            "cached_tokens": int(row["cached_tokens"]),
+            "avg_latency_ms": round(float(row["avg_latency_ms"])),
+        }
+
+    def list_recent(self, limit: int = 50) -> list[ModelCallRecord]:
+        rows = self._conn.execute(
+            "SELECT * FROM model_calls ORDER BY started_at DESC LIMIT ?",
+            (limit,),
         ).fetchall()
         return [self._row_to_record(r) for r in rows]
 

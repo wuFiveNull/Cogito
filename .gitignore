@@ -37,4 +37,9 @@ Thumbs.db
 # Environment
 condaenv.*
 
+# Frontend (Vite + React + TS)
+web/node_modules/
+web/dist/
+web/.vite/
+
 

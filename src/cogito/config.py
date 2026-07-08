@@ -48,7 +48,7 @@ COMPAT_ALIASES: dict[str, str] = {
 # ── 已定型节内的已知字段（校验未知字段）──
 STORAGE_FIELDS = frozenset({"db_path", "enable_wal", "busy_timeout", "payload_dir", "profile_name"})
 RUNTIME_FIELDS = frozenset({"profile", "timezone", "instance_id"})
-INTERACTION_FIELDS = frozenset({"bind_host", "allow_remote", "validate_origin"})
+INTERACTION_FIELDS = frozenset({"bind_host", "allow_remote", "validate_origin", "port"})
 WORKER_FIELDS = frozenset({
     "concurrency", "lease_duration_seconds", "heartbeat_interval_seconds",
     "outbox_lease_ttl_seconds", "delivery_lease_ttl_seconds",
@@ -221,11 +221,12 @@ class InteractionConfig:
     bind_host: str = "127.0.0.1"
     allow_remote: bool = False
     validate_origin: bool = True
+    port: int = 8081
 
     def __repr__(self) -> str:
         return (
             f"InteractionConfig(bind_host={self.bind_host!r}, "
-            f"allow_remote={self.allow_remote})"
+            f"allow_remote={self.allow_remote}, port={self.port})"
         )
 
     @classmethod
@@ -235,6 +236,7 @@ class InteractionConfig:
             bind_host=str(raw.get("bind_host", "127.0.0.1")),
             allow_remote=bool(raw.get("allow_remote", False)),
             validate_origin=bool(raw.get("validate_origin", True)),
+            port=int(raw.get("port", 8081)),
         )
 
 
@@ -699,6 +701,7 @@ timezone = "{self.runtime.timezone}"
 [interaction]
 bind_host = "{self.interaction.bind_host}"
 allow_remote = {"true" if self.interaction.allow_remote else "false"}
+port = {self.interaction.port}
 
 [worker]
 concurrency = {self.worker.concurrency}

@@ -1,0 +1,74 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #0b0f1a;
+  color: #e6e9f2;
+  font-family: "Inter", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #232c45;
+  border-radius: 8px;
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl border border-[#232c45] bg-[#121829] p-5;
+  }
+  .btn {
+    @apply inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition;
+  }
+  .btn-ghost {
+    @apply btn text-[#8b93ad] hover:bg-[#1b2236] hover:text-[#e6e9f2];
+  }
+  .btn-primary {
+    @apply btn bg-[#7c5cff] text-white hover:opacity-90;
+  }
+  .pill {
+    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
+  }
+  .table-row {
+    @apply border-b border-[#232c45] hover:bg-[#1b2236]/40;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-fade-in {
+  animation: fade-in 0.2s ease-out;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+.animate-pulse-dot {
+  animation: pulse-dot 1.6s ease-in-out infinite;
+}

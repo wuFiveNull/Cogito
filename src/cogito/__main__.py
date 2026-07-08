@@ -75,6 +75,21 @@ def main() -> None:
 
     run_parser = sub.add_parser("run", help="Start the agent runtime loop")
     _add_config_arg(run_parser)
+    serve_parser = sub.add_parser("serve", help="Start the interaction-web server (API + dashboard)")
+    _add_config_arg(serve_parser)
+    serve_parser.add_argument(
+        "--port", type=int, default=None,
+        help="Override [interaction] port (default: from config)",
+    )
+    serve_parser.add_argument(
+        "--no-worker", action="store_true",
+        help="Don't run the background agent worker (API/dashboard only)",
+    )
+    serve_parser.add_argument(
+        "--host", default=None,
+        help="Override [interaction] bind_host (default: from config)",
+    )
+
     run_parser.add_argument(
         "--worker-id", default="worker1",
         help="Worker ID (default: worker1)",
@@ -100,6 +115,8 @@ def main() -> None:
             _cmd_info(args)
         elif args.command == "config":
             _cmd_config(args)
+        elif args.command == "serve":
+            _cmd_serve(args)
         elif args.command == "run":
             _cmd_run(args)
         elif args.command == "memory":
@@ -373,6 +390,72 @@ def _start_worker(
     except Exception as e:
         logger.exception("Fatal error: %s", e)
         sys.exit(1)
+
+
+def _cmd_serve(args: argparse.Namespace) -> None:
+    """启动 interaction-web 服务器 (Query/Command API + 静态前端托管)。
+
+    可选在后台线程同时运行 agent worker loop，让仪表盘反映实时数据。
+    FastAPI 使用每请求独立 SQLite 连接读；worker 用各自独立连接写。
+    """
+    import threading
+    from pathlib import Path
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    config = Config.load(_resolve_config_path(args))
+
+    if args.port is not None:
+        config.interaction.port = args.port
+    if args.host is not None:
+        config.interaction.bind_host = args.host
+
+    # 迁移数据库 (幂等)
+    db_path = config.resolve_db_path()
+    conn = get_connection(db_path)
+    try:
+        migrate(conn)
+    finally:
+        conn.close()
+
+    # 静态前端目录
+    static_dir = None
+    candidate = Path(config.workspace_path) / "web" / "dist"
+    if candidate.is_dir():
+        static_dir = candidate
+
+    from cogito.interaction_web.server import create_app
+
+    app = create_app(config, recovery_counts={}, static_dir=static_dir)
+
+    # 可选后台 worker
+    if not args.no_worker:
+        from cogito.application import RuntimeApplication
+
+        def _worker_main() -> None:
+            try:
+                rt = RuntimeApplication.build(config)
+                asyncio.run(rt.run_worker(
+                    worker_id="web-worker",
+                    poll_interval=config.worker.heartbeat_interval_seconds,
+                ))
+            except Exception as e:
+                logger.error("web-worker error: %s", e)
+
+        t = threading.Thread(target=_worker_main, daemon=True, name="cogito-web-worker")
+        t.start()
+        print("[ok] background agent worker started (web-worker)")
+
+    host = config.interaction.bind_host
+    port = config.interaction.port
+    print(f"[ok] interaction-web: http://{host}:{port}/")
+    if static_dir is None:
+        print("[!] no frontend found (run build, or place dist under .workspace/web/dist)")
+    import uvicorn
+    uvicorn.run(app, host=host, port=port)
 
 
 def _start_interactive(

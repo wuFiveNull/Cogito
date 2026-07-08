@@ -66,6 +66,22 @@ class Connector:
         self.last_attempt_at = last_attempt_at
         self.created_at = created_at or datetime.now(UTC)
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "connector_id": self.connector_id,
+            "connector_type": self.connector_type.value,
+            "name": self.name,
+            "url": self.url,
+            "site_link": self.site_link,
+            "poll_schedule_id": self.poll_schedule_id,
+            "fetch_timeout_s": self.fetch_timeout_s,
+            "status": self.status.value,
+            "consecutive_failures": self.consecutive_failures,
+            "last_success_at": self.last_success_at.isoformat() if self.last_success_at else None,
+            "last_attempt_at": self.last_attempt_at.isoformat() if self.last_attempt_at else None,
+            "created_at": self.created_at.isoformat(),
+        }
+
     def __repr__(self) -> str:
         return f"Connector({self.connector_id}, {self.connector_type.value}, {self.name})"
 
