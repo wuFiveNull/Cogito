@@ -6,8 +6,8 @@ Avoids third-party tools so the test suite stays hermetic.
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Dict, Set, Tuple
 
 PKG_ROOT = Path(__file__).resolve().parents[2] / "src" / "cogito"
 
@@ -23,14 +23,14 @@ def _top_module(rel: Path) -> str:
 
 def scan_imports(
     root: Path = PKG_ROOT,
-) -> Tuple[Dict[str, Set[str]], Set[str]]:
+) -> tuple[dict[str, set[str]], set[str]]:
     """Return ({top_module -> {imported_top_module}}, all_modules).
 
     Only counts imports whose target starts with `cogito.`, so external
     libraries don't appear in the dependency graph.
     """
-    graph: Dict[str, Set[str]] = {}
-    all_modules: Set[str] = set()
+    graph: dict[str, set[str]] = {}
+    all_modules: set[str] = set()
     for py in root.rglob("*.py"):
         if "__pycache__" in str(py):
             continue
@@ -59,8 +59,8 @@ def scan_imports(
 
 
 def forbidden_edges(
-    graph: Dict[str, Set[str]],
-) -> Dict[str, Set[str]]:
+    graph: dict[str, set[str]],
+) -> dict[str, set[str]]:
     """Apply SYSTEM-BOUNDARIES / 2 rules and return the remaining violations.
 
     Declaration site (called by tests): enumerate every (src, dst) that
@@ -85,9 +85,9 @@ def forbidden_edges(
     # Dashboard 不得直接执行写 SQL
     web_forbidden = {"cogito.store"}
 
-    violations: Dict[str, Set[str]] = {}
+    violations: dict[str, set[str]] = {}
     for src, dests in graph.items():
-        blocked: Set[str] = set()
+        blocked: set[str] = set()
         if src in pure_layers:
             blocked |= dests & infra_layers
         if src == "cogito.runtime":
@@ -99,31 +99,37 @@ def forbidden_edges(
     return violations
 
 
-def cycles(graph: Dict[str, Set[str]]) -> list[list[str]]:
+class _State:
+    """DFS node visitation state (avoids N806 uppercase local constants)."""
+    UNVISITED = 0
+    IN_PROGRESS = 1
+    DONE = 2
+
+
+def cycles(graph: dict[str, set[str]]) -> list[list[str]]:
     """Detect import cycles via iterative DFS; returns list of cycles found."""
-    WHITE, GRAY, BLACK = 0, 1, 2
-    color = {m: WHITE for m in graph}
+    color = {m: _State.UNVISITED for m in graph}
     path: list[str] = []
     found: list[list[str]] = []
 
     def dfs(u: str) -> None:
-        color[u] = GRAY
+        color[u] = _State.IN_PROGRESS
         path.append(u)
         for v in sorted(graph.get(u, set())):
             if v == u:
                 continue  # intra-package import, not a cycle
             if v not in color:
                 continue
-            if color[v] == GRAY:
+            if color[v] == _State.IN_PROGRESS:
                 idx = path.index(v)
                 found.append(path[idx:] + [v])
-            elif color[v] == WHITE:
+            elif color[v] == _State.UNVISITED:
                 dfs(v)
         path.pop()
-        color[u] = BLACK
+        color[u] = _State.DONE
 
     for m in sorted(graph):
-        if color[m] == WHITE:
+        if color[m] == _State.UNVISITED:
             dfs(m)
     return found
 
