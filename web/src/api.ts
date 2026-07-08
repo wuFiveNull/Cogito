@@ -82,6 +82,8 @@ export const api = {
   connectors: () => request<{ items: Record<string, unknown>[] }>("/connectors"),
   channels: () => request<{ items: Record<string, unknown>[] }>("/channels"),
   conversations: () => request<{ items: Record<string, unknown>[] }>("/conversations"),
+  conversationMessages: (conversationId: string, limit = 200) =>
+    request<{ conversation_id: string; items: ChatMessage[] }>(`/conversations/${conversationId}/messages?limit=${limit}`),
   deliveries: (status?: string) => request<PaginationResp>(`/deliveries${status ? `?status=${status}` : ""}`),
   trace: (id: string) => request<Record<string, unknown>>(`/traces/${id}`),
   plugins: () => request<{ items: Record<string, unknown>[] }>("/plugins"),
@@ -90,5 +92,32 @@ export const api = {
     request<CommandResponse>(`/commands/${path}`, {
       method: "POST",
       body: JSON.stringify(body),
+    }),
+};
+
+// ── 聊天 Channel（接入 Core 主链路） ─────────────────────────────────────
+
+export interface ChatMessage {
+  message_id?: string;
+  role: "user" | "assistant" | "tool" | "system";
+  text: string;
+  created_at?: string;
+  receive_sequence?: number;
+  delivery_id?: string;
+  reply_to_message_id?: string;
+}
+
+export interface ChatSendResponse {
+  message_id: string;
+  turn_id: string;
+  conversation_id: string;
+  is_new: boolean;
+}
+
+export const chatApi = {
+  send: (text: string, conversationId: string | null, sender = "web-user") =>
+    request<ChatSendResponse>("/chat/send", {
+      method: "POST",
+      body: JSON.stringify({ text, conversation_id: conversationId, sender }),
     }),
 };

@@ -17,6 +17,7 @@ Plan 01 / 十、AgentRunner：
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sqlite3
 from enum import StrEnum
@@ -35,6 +36,11 @@ from cogito.service.completion import TurnCompletionService
 from cogito.service.dispatcher import Dispatcher
 from cogito.service.memory_extractor import MemoryExtractor
 from cogito.service.memory_service import SqliteMemoryService
+from cogito.service.streaming_delivery import (
+    StreamingDeliveryController,
+    StreamInputMeta,
+    StreamPolicy,
+)
 from cogito.store.time_utils import epoch_ms
 
 # ── 默认模式-Toolset 映射 (AGENT-COGNITION / 2.2) ──
@@ -45,6 +51,19 @@ MODE_TOOLSETS: dict[str, set[str]] = {
     "scheduled": {"core", "memory", "schedule"},
     "maintenance": {"core", "memory", "disk"},
 }
+
+
+def _parse_json(value: Any) -> dict:
+    """把 DB 的 JSON 列（可能为 None / dict / str）解析为 dict。"""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 class RunOutcome(StrEnum):
@@ -73,6 +92,10 @@ class AgentRunner:
         executor: ToolExecutor | None = None,
         toolsets: set[str] | None = None,
         memory_service: SqliteMemoryService | None = None,
+        channel_gateway: Any | None = None,
+        channel_manager: Any | None = None,
+        streaming_enabled: bool = True,
+        stream_policy: StreamPolicy | None = None,
     ) -> None:
         self._conn = conn
         self._router = router
@@ -100,6 +123,12 @@ class AgentRunner:
         self._memory_extractor = MemoryExtractor(
             conn, memory_service, router,
         ) if memory_service and router else None
+
+        # ── Plan 05 M4：流式投递依赖（由组合根注入）──
+        self.channel_gateway = channel_gateway
+        self.channel_manager = channel_manager
+        self._streaming_enabled = streaming_enabled
+        self._stream_policy = stream_policy
 
     async def run_once(self, worker_id: str, cancel_flag: callable | None = None) -> RunOutcome:
         """领取一个 Turn 并执行完成。
@@ -130,6 +159,10 @@ class AgentRunner:
             input_message_id=turn.input_message_id,
             system_policy=self._system_prompt,
         )
+
+        # ── 2b. 流式投递分支（按渠道能力 / 配置决定是否走占位→编辑→定稿）──
+        if self._should_stream(turn):
+            return await self._run_streaming_turn(turn, attempt, worker_id, context)
 
         # ── 3. 执行 Agent Loop（事务外，网络调用）──
         try:
@@ -233,6 +266,112 @@ class AgentRunner:
             except Exception:
                 return
 
+    # ── Plan 05 M4：流式投递分支 ───────────────────────────────────────────
+
+    def _should_stream(self, turn: Any) -> bool:
+        """判断是否走流式投递：配置开启 + 渠道支持 edit / streaming。"""
+        if not self._streaming_enabled:
+            return False
+        if self.channel_gateway is None or self.channel_manager is None:
+            return False
+        meta = self._read_stream_input_meta(turn)
+        if meta is None:
+            return False
+        adapter_id = (
+            meta.reply_route.get("channel_instance_id")
+            or meta.reply_route.get("adapter_id")
+            or ""
+        )
+        adapter = self.channel_manager.get_adapter(adapter_id)
+        if adapter is None:
+            return False
+        caps = adapter.capabilities()
+        return bool(caps.supports_edit and caps.supports_streaming)
+
+    def _read_stream_input_meta(self, turn: Any) -> StreamInputMeta | None:
+        """读取输入消息元数据，构造 StreamInputMeta。"""
+        row = self._conn.execute(
+            "SELECT conversation_id, session_id, sender_principal_id, "
+            "sender_endpoint_id, reply_route_json, capability_snapshot_json "
+            "FROM messages WHERE message_id=?",
+            (turn.input_message_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return StreamInputMeta(
+            conversation_id=row["conversation_id"] or "",
+            session_id=row["session_id"] or turn.session_id or "",
+            endpoint_id=row["sender_endpoint_id"] or "",
+            principal_id=row["sender_principal_id"] or "",
+            reply_route=_parse_json(row["reply_route_json"]),
+            capability_snapshot=_parse_json(row["capability_snapshot_json"]),
+            input_message_id=turn.input_message_id,
+        )
+
+    async def _run_streaming_turn(
+        self, turn: Any, attempt: Any, worker_id: str, context: Any,
+    ) -> RunOutcome:
+        """流式投递回合：占位 → 增量编辑 → 定稿（单事务完成 Turn）。"""
+        meta = self._read_stream_input_meta(turn)
+        if meta is None:
+            self._fail_safe(turn, attempt)
+            return RunOutcome.failed
+
+        adapter_id = (
+            meta.reply_route.get("channel_instance_id")
+            or meta.reply_route.get("adapter_id")
+            or ""
+        )
+        adapter = self.channel_manager.get_adapter(adapter_id)
+        if adapter is None:
+            # _should_stream 已保证 adapter 存在；防御性兜底走非流式
+            self._fail_safe(turn, attempt)
+            return RunOutcome.failed
+        caps = adapter.capabilities()
+
+        controller = StreamingDeliveryController(
+            conn=self._conn,
+            gateway=self.channel_gateway,
+            loop=self._loop,
+            capabilities=caps,
+            clock=self._clock,
+            policy=self._stream_policy or StreamPolicy(),
+            dispatcher=self._dispatcher,
+        )
+
+        cancel_check = self._make_cancel_check(turn.turn_id)
+        hb = asyncio.create_task(
+            self._heartbeat_loop(
+                turn.turn_id, attempt.attempt_id,
+                worker_id, attempt.lease_version,
+            )
+        )
+        try:
+            final_message_id = await controller.run_streaming_turn(
+                turn=turn,
+                attempt=attempt,
+                context=context,
+                input_meta=meta,
+                cancel_flag=cancel_check,
+            )
+        except Exception:
+            hb.cancel()
+            _LOGGER.exception("Streaming turn failed: %s", turn.turn_id)
+            self._fail_safe(turn, attempt)
+            return RunOutcome.failed
+        finally:
+            hb.cancel()
+
+        if final_message_id:
+            # 流式成功后异步触发记忆提取（与非流式路径一致）
+            if self._memory_extractor and context.principal_id:
+                asyncio.ensure_future(self._run_extraction(context, turn))
+            return RunOutcome.completed
+        if self._is_cancelled(turn.turn_id):
+            return RunOutcome.cancelled
+        self._fail_safe(turn, attempt)
+        return RunOutcome.failed
+
     def _make_cancel_check(self, turn_id: str):
         """创建取消检查闭包。"""
         cancelled = False
@@ -319,6 +458,10 @@ def build_agent_runner(
     clock: Clock | None = None,
     registry: CapabilityRegistry | None = None,
     toolsets: set[str] | None = None,
+    channel_gateway: Any | None = None,
+    channel_manager: Any | None = None,
+    streaming_enabled: bool = True,
+    stream_policy: StreamPolicy | None = None,
 ) -> AgentRunner:
     """构建 AgentRunner。
 
@@ -393,6 +536,10 @@ def build_agent_runner(
         executor=executor,
         toolsets=resolved_toolsets,
         memory_service=memory_service,
+        channel_gateway=channel_gateway,
+        channel_manager=channel_manager,
+        streaming_enabled=streaming_enabled,
+        stream_policy=stream_policy,
     )
 
 

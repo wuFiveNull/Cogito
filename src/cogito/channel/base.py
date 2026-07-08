@@ -46,6 +46,36 @@ class ChannelSendResult:
 
 
 @dataclass(frozen=True)
+class ChannelEditRequest:
+    """流式投递的编辑请求 —— 替换某条已发送平台消息的全量内容。
+
+    STREAMING-DELIVERY: edit 语义为 replace 全量文本（平台不可增量时由上层合并 delta）。
+    每个 edit 对应 Delivery Attempt 内的一个 operation_seq。
+    """
+    delivery_id: str
+    attempt_id: str
+    idempotency_key: str
+    channel_instance_id: str
+    target_endpoint_ref: str
+    platform_conversation_id: str
+    platform_message_id: str  # 要编辑的已有平台消息
+    text: str  # 完整新内容（replace 语义）
+    operation_seq: int = 1
+    is_final: bool = False  # 该 edit 是否为本流式轮次的最后定稿
+
+
+@dataclass(frozen=True)
+class ChannelDeleteRequest:
+    """流式投递的撤回请求 —— 删除某条已发送平台消息（取消/失败时使用）。"""
+    delivery_id: str
+    attempt_id: str
+    channel_instance_id: str
+    platform_conversation_id: str
+    platform_message_id: str
+    reason: str = "withdrawn"
+
+
+@dataclass(frozen=True)
 class ChannelCapabilities:
     """渠道能力声明。"""
     supports_streaming: bool = False
@@ -100,5 +130,20 @@ class ChannelAdapter(Protocol):
         """发送消息到平台（遗留签名 —— 返回 dict 保持向后兼容）。
 
         新代码应使用 send_request() 获取结构化结果。
+        """
+        ...
+
+    def edit_request_sync(self, request: ChannelEditRequest) -> ChannelSendResult:
+        """同步编辑已发送的平台消息（流式投递的 placeholder/edit/finish 使用）。
+
+        默认不实现 → 该适配器不支持编辑降级（controller 将走 final_only）。
+        返回的 ChannelSendResult.status 语义与 send_request_sync 一致。
+        """
+        ...
+
+    def delete_request_sync(self, request: ChannelDeleteRequest) -> None:
+        """同步撤回已发送的平台消息（流式投递取消/失败时使用）。
+
+        默认不实现 → 不支持撤回；controller 将仅标记 interrupted 而不真正撤回。
         """
         ...

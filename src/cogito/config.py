@@ -64,6 +64,7 @@ AGENT_FIELDS = frozenset({
     "system_prompt", "system_prompt_mode", "max_output_tokens",
     "context_memory_window", "tools",
     "enabled_toolsets", "disabled_toolsets", "mode",
+    "streaming_enabled",
 })
 
 # ── 默认 System Prompt ──
@@ -393,6 +394,7 @@ class AgentConfig:
     enabled_toolsets: list[str] = field(default_factory=list)
     disabled_toolsets: list[str] = field(default_factory=list)
     mode: str = "reactive"
+    streaming_enabled: bool = True
 
     def __repr__(self) -> str:
         return (
@@ -445,6 +447,7 @@ class AgentConfig:
             enabled_toolsets=list(raw.get("enabled_toolsets", [])),
             disabled_toolsets=list(raw.get("disabled_toolsets", [])),
             mode=str(raw.get("mode", "reactive")),
+            streaming_enabled=bool(raw.get("streaming_enabled", True)),
         )
 
 

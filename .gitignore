@@ -23,6 +23,9 @@ config.toml
 # Runtime workspace
 .workspace/
 
+# WorkBuddy project memory/data (not source)
+.workbuddy/
+
 # IDE
 .vscode/
 .idea/

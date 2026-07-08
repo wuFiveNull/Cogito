@@ -8,6 +8,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Any
 
 from fastapi import Request
 
@@ -34,6 +35,19 @@ class CommandDeps:
 
 def get_conn_provider(request: Request) -> ConnProvider:
     return request.app.state._provider  # type: ignore[attr-defined]
+
+
+def get_runtime(request: Request) -> Any:
+    """返回 serve 模式注入的 RuntimeApplication（聊天路由接入主链路用）。"""
+    runtime = getattr(request.app.state, "runtime", None)
+    if runtime is None:
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=503,
+            detail="Runtime not available (agent worker not running)",
+        )
+    return runtime
 
 
 def get_command_deps(request: Request) -> Iterator[CommandDeps]:

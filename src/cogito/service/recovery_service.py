@@ -18,6 +18,7 @@ recover_stale_turns 原子保证：
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import datetime
 
@@ -25,6 +26,8 @@ from cogito.domain.turn import RunAttemptStatus, TurnStatus
 from cogito.runtime.clock import Clock, ProductionClock
 from cogito.service.unit_of_work import UnitOfWork
 from cogito.store.time_utils import epoch_ms
+
+_LOG = logging.getLogger("cogito.recovery")
 
 
 class RecoveryService:
@@ -205,10 +208,94 @@ class RecoveryService:
                 uow.commit()
         return count
 
+    def recover_streaming_deliveries(self, clock: datetime | None = None) -> int:
+        """撤回崩溃遗留的流式 Delivery（status='streaming' 且 Turn 已不再 running）。
+
+        流式 Delivery 在 AgentRunner.run_once 内由 Turn 的 RunAttempt lease 拥有。
+        若进程在流式过程中崩溃，delivery 永久卡在 'streaming'（平台已创建占位气泡），
+        而其 Turn/RunAttempt 将由 recover_stale_turns 标记为 abandoned / queued。
+
+        孤儿判定（与 recover_stale_turns 顺序配合，recover_all 先跑 stale_turns）：
+        - Turn 不存在 → 孤儿
+        - Turn 已不在 running（queued/completed/abandoned 等）→ 孤儿
+        - Turn 名义 running 但其 active attempt 已不 running（崩溃但 lease 未过期的
+          中间态）→ 孤儿，并把 Turn 重置为 queued 以便重新尝试
+
+        注意：run_once 创建流式 delivery 前会把 Turn 置为 running，故一个合法的
+        流式 delivery 必然对应 running 的 Turn。重放时旧 delivery 已被本函数撤回，
+        不会出现 "Turn queued 但仍有合法 streaming delivery" 的误杀。
+
+        不变量：本函数只写 status='streaming' 的行（条件 UPDATE），与运行中的
+        AgentRunner 不冲突——后者要么已把 delivery 推进到 sent/interrupted，要么
+        其 Turn 仍 running，不会被选中。
+        """
+        with UnitOfWork(self._conn) as uow:
+            rows = self._conn.execute("""
+                SELECT d.delivery_id, d.turn_id, d.platform_message_id,
+                       t.status AS turn_status, t.version AS turn_version,
+                       t.active_attempt_id
+                FROM deliveries d
+                LEFT JOIN turns t ON t.turn_id = d.turn_id
+                WHERE d.status = 'streaming'
+            """).fetchall()
+
+            count = 0
+            for row in rows:
+                turn_status = row["turn_status"]
+                reset_turn = False
+
+                if turn_status is None:
+                    orphan = True
+                elif turn_status != "running":
+                    orphan = True
+                else:
+                    # Turn 名义 running —— 需确认其 active attempt 是否仍存活
+                    attempt_row = self._conn.execute(
+                        "SELECT status FROM run_attempts WHERE attempt_id=?",
+                        (row["active_attempt_id"],),
+                    ).fetchone()
+                    attempt_status = attempt_row["status"] if attempt_row else None
+                    if attempt_status == "running":
+                        continue  # 仍由存活的 attempt 持有，跳过
+                    orphan = True
+                    reset_turn = True
+
+                if not orphan:
+                    continue
+
+                # 条件撤回：仅当仍 streaming，避免与运行中的 run_once 竞态
+                updated = self._conn.execute(
+                    "UPDATE deliveries SET status='interrupted', stream_status=NULL, "
+                    "lease_version=lease_version+1 "
+                    "WHERE delivery_id=? AND status='streaming'",
+                    (row["delivery_id"],),
+                )
+                if updated.rowcount == 0:
+                    continue
+                count += 1
+                _LOG.info(
+                    "recover_streaming_deliveries: withdrawn orphan delivery=%s (turn=%s)",
+                    row["delivery_id"], row["turn_id"],
+                )
+
+                # Turn 名义 running 但 attempt 已死 → 重置为 queued 以便重放
+                if reset_turn and turn_status == "running":
+                    self._conn.execute(
+                        "UPDATE turns SET status='queued', active_attempt_id=NULL, "
+                        "version=version+1 "
+                        "WHERE turn_id=? AND status='running' AND version=?",
+                        (row["turn_id"], row["turn_version"]),
+                    )
+
+            if count > 0:
+                uow.commit()
+        return count
+
     def recover_all(self, clock: datetime | None = None) -> dict[str, int]:
         return {
             "outbox_leases": self.recover_outbox_leases(clock),
             "delivery_leases": self.recover_delivery_leases(clock),
             "stale_turns": self.recover_stale_turns(clock),
             "stale_tasks": self.recover_stale_tasks(clock),
+            "streaming_deliveries": self.recover_streaming_deliveries(clock),
         }

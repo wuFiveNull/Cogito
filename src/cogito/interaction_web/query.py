@@ -117,6 +117,15 @@ def list_conversations(
     return _svc(deps).list_conversations(limit=limit)
 
 
+@router.get("/conversations/{conversation_id}/messages")
+def get_conversation_messages(
+    conversation_id: str,
+    limit: int = Query(200, ge=1, le=1000),
+    deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    return _svc(deps).get_conversation_messages(conversation_id, limit=limit)
+
+
 # ── deliveries / traces / plugins ─────────────────────────────
 
 

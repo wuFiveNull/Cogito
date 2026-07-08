@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -269,12 +269,120 @@ class AgentLoop:
             return self._make_result(LoopResultType.error, state,
                                      f"Unknown response type: {result}")
 
+    async def run_stream(
+        self,
+        context: ContextSnapshot,
+        model_role: str = "main",
+        cancel_flag: Callable[[], bool] | None = None,
+    ) -> AsyncIterator[tuple[str, bool]]:
+        """流式执行 Agent Loop —— yield (delta_text, is_segment_end)。
+
+        复刻 run() 的迭代/终止/工具调用逻辑：
+        - 工具迭代、修复迭代等非最终段：用 generate（非流式），不 yield 文本；
+        - 最终自然语言段：先用 generate 判定为 _final/_refusal，再用
+          generate_stream 流式产出 token（stream 请求的 history 不含判定
+          响应，避免模型见到自身答案）；yield 每个 delta (文本, False)，
+          末帧后 yield ("", True) 表示本段结束。
+        若 cancel_flag() 在 yield 前为真 → 关闭生成器（控制器负责 withdraw）。
+
+        注：最终段会触发两次模型调用（一次判定、一次流式）。首版为简单
+        正确而接受此开销；后续可在 Provider 层用单次流式 + 累积分类消除。
+        """
+        state = LoopState(
+            turn_id=context.turn_id,
+            context_snapshot_id=context.snapshot_id,
+            started_at=datetime.now(UTC),
+            iteration_no=0,
+        )
+        output_repaired = False
+
+        while True:
+            state.iteration_no += 1
+            state.last_iteration_at = datetime.now(UTC)
+
+            # 取消检查
+            if cancel_flag and cancel_flag():
+                return
+
+            # 终止条件检查
+            if state.iteration_no > self._max_iterations:
+                return
+            if state.tool_call_count >= self._max_tool_calls:
+                return
+            elapsed = state.last_iteration_at - state.started_at
+            if elapsed > self._max_runtime:
+                return
+            if state.usage.total_tokens > self._max_total_tokens:
+                return
+
+            # 构建请求并调用 Provider（判定用，非流式）
+            request = self._build_request(state, context, stream=False)
+            try:
+                iter_start = datetime.now(UTC)
+                response = await self._router.generate(request, model_role=model_role)
+                iter_latency = int(
+                    (datetime.now(UTC) - iter_start).total_seconds() * 1000
+                )
+            except RouterError:
+                return  # 错误由控制器外层 try 捕获
+
+            state.usage = state.usage + response.usage
+            state.total_latency_ms += iter_latency
+
+            result = self._classify_response(response)
+
+            if result in ("_final", "_refusal"):
+                # 最终自然语言段 → 流式产出（注意：stream 请求 history 不含判定响应）
+                stream_request = self._build_request(state, context, stream=True)
+                accumulated: list[str] = []
+                try:
+                    async for chunk in self._router.generate_stream(
+                        stream_request, model_role=model_role,
+                    ):
+                        if cancel_flag and cancel_flag():
+                            return
+                        delta = chunk.text
+                        if delta:
+                            accumulated.append(delta)
+                            yield (delta, False)
+                    final_text = "".join(accumulated)
+                except RouterError:
+                    final_text = response.text  # 流式失败 → 退回判定文本
+
+                state.messages.append({"role": "assistant", "content": final_text})
+                yield ("", True)  # 段结束哨兵
+                return
+
+            elif result == "_tool_call":
+                if not self._executor:
+                    return
+                state.messages.append(self._make_assistant_message(response))
+                tool_start = datetime.now(UTC)
+                loop_detected = await self._execute_tool_calls(state, response, context)
+                _ = int((datetime.now(UTC) - tool_start).total_seconds() * 1000)
+                if loop_detected:
+                    return
+                continue
+
+            elif result == "_invalid":
+                if output_repaired:
+                    return
+                output_repaired = True
+                state.messages.append(self._make_assistant_message(response))
+                state.messages.pop()  # 移除无效回复
+                continue
+
+            else:
+                return
+
     def _build_request(
         self, state: LoopState, context: ContextSnapshot,
+        stream: bool = False,
     ) -> ModelRequest:
         """从 ContextSnapshot、LoopState 和 Registry 构建 ModelRequest。
 
         注入系统提示词、历史消息和可用工具 Schema。
+        stream=True 时启用 SSE 流式（仅最终自然语言段使用）。
         """
         messages = []
         for item in context.items:
@@ -295,7 +403,7 @@ class AgentLoop:
         return ModelRequest(
             messages=messages,
             tools=tools,
-            stream=False,
+            stream=stream,
         )
 
     def _make_assistant_message(

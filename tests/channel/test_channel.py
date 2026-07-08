@@ -347,6 +347,12 @@ class TestChannelManager:
             async def send(self, conversation_id, message, reply_to_message_id=None):
                 return {"platform_message_id": "fake_id"}
 
+            def edit_request_sync(self, request):
+                return {"status": "sent", "platform_message_id": "fake_id"}
+
+            def delete_request_sync(self, request):
+                return None
+
         adapter = FakeAdapter()
         assert isinstance(adapter, ChannelAdapter)
 

@@ -171,6 +171,30 @@ class QueryService:
         ).fetchall()
         return {"items": [dict(r) for r in rows]}
 
+    def get_conversation_messages(
+        self, conversation_id: str, limit: int = 200,
+    ) -> dict[str, Any]:
+        """按会话取消息（含文本），用于聊天历史回放。
+
+        一条消息的文本由 content_parts.inline_data 拼接；按 receive_sequence 升序。
+        """
+        rows = self._conn.execute(
+            "SELECT m.message_id, m.role, m.created_at, m.receive_sequence, "
+            "       cp.inline_data AS text "
+            "FROM messages m "
+            "LEFT JOIN content_parts cp ON cp.message_id = m.message_id "
+            "WHERE m.conversation_id = ? "
+            "ORDER BY m.receive_sequence ASC LIMIT ?",
+            (conversation_id, limit),
+        ).fetchall()
+        items: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            # inline_data 可能为 None（纯元数据消息）
+            d["text"] = d.get("text") or ""
+            items.append(d)
+        return {"conversation_id": conversation_id, "items": items}
+
     # ── deliveries ─────────────────────────────────────────────
 
     def list_deliveries(self, status: str | None = None, limit: int = 100) -> dict[str, Any]:

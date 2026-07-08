@@ -97,15 +97,41 @@ class StubModelProvider(ModelProvider):
         )
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[ModelResponse]:
-        # 当前阶段不实现流式
-        raise NotImplementedError("Streaming not implemented in stub")
+        """流式生成（测试用）—— 把预设文本按词分块 yield delta。
+
+        每个 delta 为一段增量文本；末帧 finish_reason=stop。
+        消费一个 scenario（与 generate 相同的计数逻辑）。
+        """
+        scenario = self._scenarios[self._call_index % len(self._scenarios)]
+        self._call_index += 1
+        self.received_requests.append(request)
+
+        if scenario.error:
+            raise ModelProviderError(scenario.error)
+
+        # 按词分块，保留词间空格，模拟 token 流
+        text = scenario.response_text
+        chunks = text.split(" ") if text else [""]
+        for i, word in enumerate(chunks):
+            piece = word + (" " if i < len(chunks) - 1 else "")
+            if not piece:
+                continue
+            yield ModelResponse(
+                request_id=request.request_id,
+                provider_request_id=uuid.uuid4().hex,
+                model_id="stub-model",
+                content_parts=(ContentPart(part_type="text", text=piece),),
+                tool_calls=(),
+                finish_reason=FinishReason.stop,
+                usage=Usage(input_tokens=0, output_tokens=0),
+            )
 
     def capabilities(self) -> ModelCapabilities:
         return ModelCapabilities(
             context_window=128000,
             max_output_tokens=4096,
             modalities=("text",),
-            supports_streaming=False,
+            supports_streaming=True,
             supports_tools=True,
             supports_parallel_tools=True,
             supports_json_schema=False,

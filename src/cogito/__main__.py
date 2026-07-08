@@ -75,7 +75,7 @@ def main() -> None:
 
     run_parser = sub.add_parser("run", help="Start the agent runtime loop")
     _add_config_arg(run_parser)
-    serve_parser = sub.add_parser("serve", help="Start the interaction-web server (API + dashboard)")
+    serve_parser = sub.add_parser("serve", help="Start the interaction-web server")
     _add_config_arg(serve_parser)
     serve_parser.add_argument(
         "--port", type=int, default=None,
@@ -393,33 +393,36 @@ def _start_worker(
 
 
 def _cmd_serve(args: argparse.Namespace) -> None:
-    """启动 interaction-web 服务器 (Query/Command API + 静态前端托管)。
+    """启动 interaction-web 服务器 (Query/Command API + 静态前端 + 聊天 WebSocket)。
 
-    可选在后台线程同时运行 agent worker loop，让仪表盘反映实时数据。
-    FastAPI 使用每请求独立 SQLite 连接读；worker 用各自独立连接写。
+    采用**单一事件循环**架构：Agent worker 作为后台 task 与 uvicorn 共享同一个
+    asyncio loop，因此 Web 路由可直接访问 RuntimeApplication（InboundService /
+    WebChannelAdapter），让 Web 仪表盘作为真正的 Channel 接入 Core 主链路。
     """
-    import threading
-    from pathlib import Path
-
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    asyncio.run(_serve_async(args))
+
+
+async def _serve_async(args: argparse.Namespace) -> None:
+    from pathlib import Path
+
+    from cogito.application import RuntimeApplication
+    from cogito.interaction_web.server import create_app
 
     config = Config.load(_resolve_config_path(args))
-
     if args.port is not None:
         config.interaction.port = args.port
     if args.host is not None:
         config.interaction.bind_host = args.host
 
-    # 迁移数据库 (幂等)
-    db_path = config.resolve_db_path()
-    conn = get_connection(db_path)
-    try:
-        migrate(conn)
-    finally:
-        conn.close()
+    # 组合根：迁移 + 恢复 + Provider / Runner / Inbound / Channel 组件（同一条主链路）
+    rt = RuntimeApplication.build(config)
+
+    # 启动 Web 内置 Channel（浏览器 WebSocket 渠道）
+    await rt.start_web_channel()
 
     # 静态前端目录
     static_dir = None
@@ -427,35 +430,45 @@ def _cmd_serve(args: argparse.Namespace) -> None:
     if candidate.is_dir():
         static_dir = candidate
 
-    from cogito.interaction_web.server import create_app
+    app = create_app(
+        config,
+        recovery_counts=rt.recovery_counts(),
+        static_dir=static_dir,
+        runtime=rt,
+    )
 
-    app = create_app(config, recovery_counts={}, static_dir=static_dir)
-
-    # 可选后台 worker
+    # 可选后台 worker（与主 loop 共享）
+    worker_task: asyncio.Task | None = None
     if not args.no_worker:
-        from cogito.application import RuntimeApplication
-
-        def _worker_main() -> None:
-            try:
-                rt = RuntimeApplication.build(config)
-                asyncio.run(rt.run_worker(
-                    worker_id="web-worker",
-                    poll_interval=config.worker.heartbeat_interval_seconds,
-                ))
-            except Exception as e:
-                logger.error("web-worker error: %s", e)
-
-        t = threading.Thread(target=_worker_main, daemon=True, name="cogito-web-worker")
-        t.start()
+        worker_task = asyncio.create_task(
+            rt.run_worker(
+                worker_id="web-worker",
+                poll_interval=config.worker.heartbeat_interval_seconds,
+            ),
+            name="cogito-web-worker",
+        )
         print("[ok] background agent worker started (web-worker)")
 
     host = config.interaction.bind_host
     port = config.interaction.port
     print(f"[ok] interaction-web: http://{host}:{port}/")
     if static_dir is None:
-        print("[!] no frontend found (run build, or place dist under .workspace/web/dist)")
+        print("[!] no frontend found (run `npm run build` in web/, or place dist under web/dist)")
+    print("[ok] Web channel enabled — chat via WebSocket at /api/chat/ws")
+
     import uvicorn
-    uvicorn.run(app, host=host, port=port)
+
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="info"))
+    try:
+        await server.serve()
+    finally:
+        if worker_task is not None and not worker_task.done():
+            worker_task.cancel()
+            try:
+                await worker_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        await rt.shutdown()
 
 
 def _start_interactive(

@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from datetime import datetime
+from typing import Any
 
 from cogito.domain.conversation import (
     ContextPartitionPolicy,
@@ -28,6 +30,7 @@ from cogito.domain.principal import (
     PrincipalType,
 )
 from cogito.domain.turn import RunAttempt, RunAttemptStatus, Turn, TurnStatus
+from cogito.runtime.clock import Clock, ProductionClock
 from cogito.store.time_utils import epoch_ms, from_epoch_ms
 
 # =============================================================================
@@ -544,4 +547,125 @@ class OutboxRepository:
              event.payload_ref, event.content_hash, event.schema_version,
              event.correlation_id, event.causation_id, event.origin,
              event.trust_label, epoch_ms(event.occurred_at)),
+        )
+
+
+# =============================================================================
+# DeliveryRepository (流式投递 / Plan 05)
+# =============================================================================
+
+
+class DeliveryRepository:
+    """流式投递的持久化操作。
+
+    每个流式操作对应 Delivery Attempt 内的一个 operation_seq，并写入
+    delivery_receipts 作为可重放证据（与 STREAMING-DELIVERY 一致）。
+    """
+
+    def __init__(self, conn: sqlite3.Connection, clock: Clock | None = None) -> None:
+        self._conn = conn
+        self._clock = clock or ProductionClock()
+
+    def create_streaming_delivery(
+        self,
+        *,
+        delivery_id: str,
+        attempt_id: str,
+        target: dict[str, Any],
+        content_ref: str,
+        degradation_mode: str,
+        idempotency_key: str,
+        policy: dict[str, Any],
+        turn_id: str = "",
+    ) -> None:
+        """创建 provisional 流式 Delivery（status=streaming，避开 DeliveryWorker）。
+
+        turn_id 用于崩溃恢复：流式 Delivery 由 Turn 的 RunAttempt lease 拥有，
+        进程崩溃后可经 turn_id 定位孤儿 Delivery 并撤回（见 RecoveryService）。
+        """
+        now_int = epoch_ms(self._clock.now())
+        self._conn.execute(
+            "INSERT INTO deliveries (delivery_id, target_snapshot, content_ref, status, "
+            "idempotency_key, created_at, content_mode, degradation_mode, policy_json, "
+            "last_confirmed_revision, turn_id) "
+            "VALUES (?, ?, ?, 'streaming', ?, ?, 'provisional', ?, ?, 0, ?)",
+            (delivery_id, json.dumps(target), content_ref, idempotency_key,
+             now_int, degradation_mode, json.dumps(policy), turn_id),
+        )
+        self._conn.execute(
+            "INSERT INTO delivery_attempts (attempt_id, delivery_id, attempt_no, status, "
+            "started_at, lease_version) VALUES (?, ?, 1, 'created', ?, 1)",
+            (attempt_id, delivery_id, now_int),
+        )
+
+    def mark_placeholder(self, delivery_id: str, attempt_id: str, platform_message_id: str) -> None:
+        """占位消息已发送到平台：绑定 platform_message_id，标记 placeholder_created。"""
+        self._conn.execute(
+            "UPDATE deliveries SET stream_status='placeholder_created', "
+            "platform_message_id=? WHERE delivery_id=?",
+            (platform_message_id, delivery_id),
+        )
+        self._conn.execute(
+            "UPDATE delivery_attempts SET status='sending' WHERE attempt_id=?",
+            (attempt_id,),
+        )
+
+    def record_edit(
+        self,
+        delivery_id: str,
+        attempt_id: str,
+        operation_seq: int,
+        platform_message_id: str,
+        receipt_kind: str = "confirmed",
+    ) -> None:
+        """记录一次 edit 操作（增量证据 + 推进 last_confirmed_revision）。"""
+        observed = epoch_ms(self._clock.now())
+        lv_row = self._conn.execute(
+            "SELECT lease_version FROM deliveries WHERE delivery_id=?", (delivery_id,),
+        ).fetchone()
+        lease_version = lv_row["lease_version"] if lv_row else 1
+        self._conn.execute(
+            "INSERT OR IGNORE INTO delivery_receipts "
+            "(receipt_id, delivery_id, delivery_attempt_id, operation_seq, request_hash, "
+            "receipt_kind, platform_message_id, safe_result, observed_at, lease_version) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'ok', ?, ?)",
+            (uuid.uuid4().hex, delivery_id, attempt_id, operation_seq,
+             f"edit:{operation_seq}", receipt_kind, platform_message_id, observed, lease_version),
+        )
+        self._conn.execute(
+            "UPDATE deliveries SET stream_status='streaming', last_confirmed_revision=?, "
+            "platform_message_id=? WHERE delivery_id=?",
+            (operation_seq, platform_message_id, delivery_id),
+        )
+
+    def finish_streaming(
+        self,
+        delivery_id: str,
+        final_message_id: str,
+        platform_message_id: str,
+        text: str,
+    ) -> None:
+        """定稿：绑定最终 Message，标记 content_mode=final / status=sent / done。"""
+        now_int = epoch_ms(self._clock.now())
+        self._conn.execute(
+            "UPDATE deliveries SET content_mode='final', status='sent', stream_status='done', "
+            "final_message_id=?, platform_message_id=? WHERE delivery_id=?",
+            (final_message_id, platform_message_id, delivery_id),
+        )
+        self._conn.execute(
+            "UPDATE delivery_attempts SET status='succeeded', finished_at=? WHERE delivery_id=?",
+            (now_int, delivery_id),
+        )
+
+    def withdraw(self, delivery_id: str, attempt_id: str, reason: str = "cancelled") -> None:
+        """撤回占位（取消/失败）：标记 interrupted，不再发送。"""
+        now_int = epoch_ms(self._clock.now())
+        self._conn.execute(
+            "UPDATE deliveries SET status='interrupted', stream_status=NULL "
+            "WHERE delivery_id=?",
+            (delivery_id,),
+        )
+        self._conn.execute(
+            "UPDATE delivery_attempts SET status='failed', finished_at=? WHERE attempt_id=?",
+            (now_int, attempt_id),
         )

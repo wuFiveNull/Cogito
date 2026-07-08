@@ -14,7 +14,7 @@ MODEL-ADAPTER / 8. 重试与 Fallback：有限重试与切换条件。
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 
 from cogito.model.contracts import (
@@ -194,6 +194,62 @@ class ModelRouter:
                 self._on_call_completed(info)
             except Exception:
                 pass  # 记录失败不阻断主流程
+
+    async def generate_stream(
+        self,
+        request: ModelRequest,
+        model_role: str = "main",
+    ) -> AsyncIterator[ModelResponse]:
+        """流式生成 —— 仅主 Provider，无 fallback（避免中途换模型）。
+
+        STREAMING-DELIVERY: 流式段的生成必须绑定单一 Provider；
+        主 Provider 抛错则整体失败，由上层 controller 降级为 final_only。
+        """
+        provider = self.get_provider(model_role)
+        provider_id = self._role_map.get(model_role, self._role_map.get("main"))
+        started_at = epoch_ms(datetime.now(UTC))
+
+        try:
+            health = await provider.health()
+            if not health.healthy:
+                self._emit_call({
+                    "request_id": request.request_id,
+                    "provider_id": provider_id,
+                    "model_id": "",
+                    "status": "error",
+                    "error_category": "health_check",
+                    "latency_ms": 0,
+                })
+                raise RouterError(f"Provider {provider_id} unhealthy")
+
+            last_chunk: ModelResponse | None = None
+            async for chunk in provider.stream(request):
+                last_chunk = chunk
+                yield chunk
+
+            call_latency = epoch_ms(datetime.now(UTC)) - started_at
+            self._emit_call({
+                "request_id": request.request_id,
+                "provider_id": provider_id,
+                "model_id": (last_chunk.model_id if last_chunk else provider_id),
+                "status": "success",
+                "latency_ms": call_latency,
+            })
+
+        except ModelProviderError as e:
+            call_latency = epoch_ms(datetime.now(UTC)) - started_at
+            self._emit_call({
+                "request_id": request.request_id,
+                "provider_id": provider_id,
+                "model_id": provider_id,
+                "status": "error",
+                "error_category": e.envelope.category.value,
+                "latency_ms": call_latency,
+            })
+            raise RouterError(
+                f"Streaming error on {provider_id}: {e.envelope.category}",
+                envelope=e.envelope,
+            ) from e
 
     def _resolve_provider_chain(self, model_role: str) -> list[str]:
         """解析 Provider 调用链（主 + fallback）。"""

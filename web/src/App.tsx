@@ -7,9 +7,11 @@ import ConnectorsPage from "./pages/Connectors";
 import ChannelsPage from "./pages/Channels";
 import CommandsPage from "./pages/Commands";
 import PluginsPage from "./pages/Plugins";
+import ChatPage from "./pages/Chat";
 
 const NAV = [
   { to: "/", label: "Overview", end: true },
+  { to: "/chat", label: "Chat" },
   { to: "/runs", label: "Runs" },
   { to: "/tasks", label: "Tasks" },
   { to: "/memory", label: "Memory" },
@@ -86,6 +88,7 @@ export default function App() {
       <main className="flex-1 overflow-y-auto p-6">
         <Routes>
           <Route path="/" element={<Overview />} />
+          <Route path="/chat" element={<ChatPage />} />
           <Route path="/runs" element={<ResourceList cfg={turnsCfg} />} />
           <Route path="/runs/:id" element={<ResourceList cfg={turnsCfg} />} />
           <Route path="/tasks" element={<ResourceList cfg={tasksCfg} />} />

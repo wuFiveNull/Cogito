@@ -145,14 +145,84 @@ class OpenAICompatProvider(ModelProvider):
         return self._parse_response(request.request_id, data, request=request)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[ModelResponse]:
-        raise NotImplementedError("Streaming not implemented in openai_compat provider")
+        """流式生成 —— 解析 SSE `data:` 帧，每帧 yield 一个 ModelResponse（增量 text）。
+
+        - 遇 `data: [DONE]` 结束
+        - 每帧 content_parts 为该帧增量文本（控制器负责累积）
+        - 复用 generate() 的错误映射
+        """
+        if not request.stream:
+            raise ModelProviderError(ErrorEnvelope(
+                category=ErrorCategory.invalid_request,
+                message="stream() requires request.stream=True",
+                retryable=False,
+            ))
+
+        payload = self._build_payload(request, stream=True)
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        }
+
+        try:
+            async with self._client.stream(
+                "POST",
+                "/chat/completions",
+                json=payload,
+                headers=headers,
+            ) as response:
+                if response.status_code != 200:
+                    raise self._map_http_error(response)
+
+                request_id = request.request_id
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line[len("data:"):].strip()
+                    if data_str == "[DONE]":
+                        break
+                    if not data_str:
+                        continue
+                    try:
+                        data = json.loads(data_str)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    yield self._parse_stream_chunk(request_id, data, request=request)
+        except httpx.TimeoutException as e:
+            raise ModelProviderError(ErrorEnvelope(
+                category=ErrorCategory.timeout,
+                message="Stream timed out",
+                retryable=True,
+                original_type="timeout",
+                original_message=str(e),
+            )) from e
+        except httpx.ConnectError as e:
+            raise ModelProviderError(ErrorEnvelope(
+                category=ErrorCategory.connection,
+                message="Connection error",
+                retryable=True,
+                original_type="connection",
+                original_message=str(e),
+            )) from e
+        except httpx.RequestError as e:
+            raise ModelProviderError(ErrorEnvelope(
+                category=ErrorCategory.connection,
+                message="Request error",
+                retryable=True,
+                original_type="request_error",
+                original_message=str(e),
+            )) from e
 
     def capabilities(self) -> ModelCapabilities:
         return ModelCapabilities(
             context_window=128000,
             max_output_tokens=4096,
             modalities=("text",),
-            supports_streaming=False,
+            supports_streaming=True,
             supports_tools=True,
             supports_parallel_tools=True,
             supports_json_schema=False,
@@ -195,10 +265,10 @@ class OpenAICompatProvider(ModelProvider):
 
     # ── 内部方法 ──
 
-    def _build_payload(self, request: ModelRequest) -> dict[str, Any]:
+    def _build_payload(self, request: ModelRequest, stream: bool = False) -> dict[str, Any]:
         """构建 OpenAI-compatible 请求体。
 
-        支持 tools（在 Phase 2 启用）。
+        支持 tools（在 Phase 2 启用）。stream=True 时启用 SSE 流式。
         """
         # 重置名称映射并记录 (MODEL-ADAPTER / 6)
         self._tool_name_map = {}
@@ -232,7 +302,7 @@ class OpenAICompatProvider(ModelProvider):
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
-            "stream": False,
+            "stream": stream,
         }
 
         if request.tools:
@@ -316,6 +386,46 @@ class OpenAICompatProvider(ModelProvider):
             tool_calls=tuple(tool_calls),
             finish_reason=finish_reason,
             usage=usage,
+        )
+
+    def _parse_stream_chunk(
+        self, request_id: str, data: dict[str, Any],
+        request: ModelRequest | None = None,
+    ) -> ModelResponse:
+        """解析单个 SSE 流帧（delta）。
+
+        每帧的 content 为该 token 的增量文本；控制器负责累积成完整回复。
+        """
+        try:
+            choice = data["choices"][0]
+            delta = choice.get("delta", {})
+            content = delta.get("content") or ""
+            finish_reason_str = choice.get("finish_reason") or "stop"
+        except (KeyError, IndexError) as e:
+            raise ModelProviderError(ErrorEnvelope(
+                category=ErrorCategory.invalid_request,
+                message="Invalid stream chunk structure",
+                retryable=False,
+                original_type="parse_error",
+                original_message=str(e),
+            )) from e
+
+        finish_reason = self._normalize_finish_reason(finish_reason_str)
+
+        parts = (ContentPart(
+            part_type=ContentPartType.text,
+            text=content,
+            trust_label="internal",
+        ),)
+
+        return ModelResponse(
+            request_id=request_id,
+            provider_request_id=data.get("id", ""),
+            model_id=data.get("model", self._model),
+            content_parts=parts,
+            tool_calls=(),
+            finish_reason=finish_reason,
+            usage=Usage(input_tokens=0, output_tokens=0, cached_tokens=0),
         )
 
     def _revalidate_tool_arguments(

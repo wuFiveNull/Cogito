@@ -75,6 +75,9 @@ class RuntimeApplication:
         self.channel_manager: Any = None
         self.channel_gateway: Any = None
 
+        # Web Dashboard 自带的内置 Channel（浏览器 WebSocket）
+        self.web_channel_adapter: Any = None
+
         # Scheduler —— 周期触发到期 schedule
         self.scheduler: Any = None
 
@@ -109,10 +112,11 @@ class RuntimeApplication:
             recovery = RecoveryService(conn)
             recovery_counts = recovery.recover_all()
             logger.info(
-                "Startup recovery → outbox=%d delivery=%d stale_turns=%d",
+                "Startup recovery → outbox=%d delivery=%d stale_turns=%d streaming=%d",
                 recovery_counts.get("outbox_leases", 0),
                 recovery_counts.get("delivery_leases", 0),
                 recovery_counts.get("stale_turns", 0),
+                recovery_counts.get("streaming_deliveries", 0),
             )
         except Exception:
             conn.close()
@@ -135,6 +139,7 @@ class RuntimeApplication:
             config=config,
             connection=conn,
             provider=provider,
+            streaming_enabled=config.agent.streaming_enabled,
         )
         inbound = InboundService(conn)
 
@@ -149,6 +154,9 @@ class RuntimeApplication:
 
         # 构建 Channel 组件（Manager + Gateway），QQ 等渠道在 run_worker 中启动
         app.build_channel_components()
+        # Plan 05 M4：把 Channel 组件注入 AgentRunner，使其能走流式投递分支
+        app.runner.channel_gateway = app.channel_gateway
+        app.runner.channel_manager = app.channel_manager
 
         return app
 
@@ -184,6 +192,22 @@ class RuntimeApplication:
         except Exception:
             logger.exception("Failed to start QQ channel adapter")
             raise
+
+    async def start_web_channel(self) -> None:
+        """启动 Web Dashboard 内置 Channel（浏览器 WebSocket 渠道）。
+
+        该 adapter 始终随 serve 启动（不依赖外部平台），并注册到 ChannelManager，
+        使 Agent 回复可经 ChannelGateway 路由回来。Web 服务（chat.py）通过
+        ``runtime.web_channel_adapter`` 订阅/取消订阅会话队列。
+        """
+        if self.web_channel_adapter is not None:
+            return
+        from cogito.channel.drivers.web import WebChannelAdapter
+
+        adapter = WebChannelAdapter(adapter_id="web", channel_type="web", conn=self.conn)
+        await self.channel_manager.start_adapter("web", adapter)
+        self.web_channel_adapter = adapter
+        logger.info("Web channel adapter started (conversation-bound WebSocket queue)")
 
     def build_workers(self) -> None:
         """构建 OutboxWorker / DeliveryWorker / TaskWorker。"""

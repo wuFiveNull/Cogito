@@ -20,7 +20,12 @@ import json
 import logging
 import sqlite3
 
-from cogito.channel.base import ChannelSendRequest, ChannelSendResult
+from cogito.channel.base import (
+    ChannelDeleteRequest,
+    ChannelEditRequest,
+    ChannelSendRequest,
+    ChannelSendResult,
+)
 from cogito.channel.manager import ChannelManager
 from cogito.service.delivery_worker import Gateway
 
@@ -57,32 +62,9 @@ class ChannelGateway(Gateway):
 
         如果在 running loop 内被同步调用（如测试），直接使用 asyncio.run。
         """
-        try:
-            target = json.loads(target_snapshot) if isinstance(target_snapshot, str) else target_snapshot
-        except (json.JSONDecodeError, TypeError):
-            return ChannelSendResult(
-                status="permanent",
-                error_code="invalid_target_snapshot",
-            )
-
-        adapter_id = target.get("adapter_id")
-        conversation_id = target.get("conversation_id") or target.get("target")
-        reply_route = target.get("reply_route", {})
-        if not adapter_id and reply_route:
-            adapter_id = reply_route.get("adapter_id") or reply_route.get("channel_instance_id")
-        if not conversation_id and reply_route:
-            conversation_id = reply_route.get("conversation_id") or reply_route.get("platform_conversation_id")
-
-        if not adapter_id:
-            return ChannelSendResult(
-                status="permanent",
-                error_code="missing_adapter_id",
-            )
-        if not conversation_id:
-            return ChannelSendResult(
-                status="permanent",
-                error_code="missing_conversation_id",
-            )
+        target, adapter_id, conversation_id = self._resolve_target(target_snapshot)
+        if adapter_id is None or conversation_id is None:
+            return ChannelSendResult(status="permanent", error_code="missing_target")
 
         # 读取消息内容
         text = self._read_message_text(content_ref)
@@ -92,30 +74,126 @@ class ChannelGateway(Gateway):
                 error_code="content_not_found",
             )
 
-        # 获取 Adapter
         adapter = self._channel_manager.get_adapter(adapter_id)
         if adapter is None:
-            return ChannelSendResult(
-                status="temporary",
-                error_code="adapter_not_running",
-            )
+            return ChannelSendResult(status="temporary", error_code="adapter_not_running")
 
-        # 构建结构化请求
-        delivery_id = target.get("delivery_id", "")
-        attempt_id = target.get("attempt_id", "")
-        request = ChannelSendRequest(
+        request = self._build_send_request(
+            target, text,
+            delivery_id=target.get("delivery_id", ""),
+            attempt_id=target.get("attempt_id", ""),
+        )
+        return self._call_adapter_sync(adapter, request)
+
+    def send_text(self, target_snapshot: str, text: str) -> ChannelSendResult:
+        """直接以字面文本发送（流式占位创建用，不经 content_ref 读库）。"""
+        target, adapter_id, conversation_id = self._resolve_target(target_snapshot)
+        if adapter_id is None or conversation_id is None:
+            return ChannelSendResult(status="permanent", error_code="missing_target")
+        adapter = self._channel_manager.get_adapter(adapter_id)
+        if adapter is None:
+            return ChannelSendResult(status="temporary", error_code="adapter_not_running")
+        request = self._build_send_request(
+            target, text,
+            delivery_id=target.get("delivery_id", ""),
+            attempt_id=target.get("attempt_id", ""),
+        )
+        return self._call_adapter_sync(adapter, request)
+
+    def edit(
+        self,
+        target_snapshot: str,
+        platform_message_id: str,
+        text: str,
+        operation_seq: int,
+        is_final: bool = False,
+    ) -> ChannelSendResult:
+        """流式编辑：替换某条已发送平台消息的全量内容。"""
+        target, adapter_id, conversation_id = self._resolve_target(target_snapshot)
+        if adapter_id is None or conversation_id is None:
+            return ChannelSendResult(status="permanent", error_code="missing_target")
+        adapter = self._channel_manager.get_adapter(adapter_id)
+        if adapter is None:
+            return ChannelSendResult(status="temporary", error_code="adapter_not_running")
+        if not hasattr(adapter, "edit_request_sync"):
+            return ChannelSendResult(status="permanent", error_code="adapter_no_edit_support")
+
+        request = ChannelEditRequest(
+            delivery_id=target.get("delivery_id", ""),
+            attempt_id=target.get("attempt_id", ""),
+            idempotency_key=target.get("idempotency_key", f"delivery_{target.get('delivery_id', '')}"),
+            channel_instance_id=adapter_id,
+            target_endpoint_ref=target.get("target_endpoint_ref", ""),
+            platform_conversation_id=str(conversation_id),
+            platform_message_id=platform_message_id,
+            text=text,
+            operation_seq=operation_seq,
+            is_final=is_final,
+        )
+        return self._call_adapter_edit_sync(adapter, request)
+
+    def delete(
+        self,
+        target_snapshot: str,
+        platform_message_id: str,
+        reason: str = "withdrawn",
+    ) -> None:
+        """流式撤回：删除某条已发送平台消息（取消/失败时使用）。"""
+        target, adapter_id, conversation_id = self._resolve_target(target_snapshot)
+        if adapter_id is None:
+            return
+        adapter = self._channel_manager.get_adapter(adapter_id)
+        if adapter is None or not hasattr(adapter, "delete_request_sync"):
+            return
+        request = ChannelDeleteRequest(
+            delivery_id=target.get("delivery_id", ""),
+            attempt_id=target.get("attempt_id", ""),
+            channel_instance_id=adapter_id,
+            platform_conversation_id=str(conversation_id or ""),
+            platform_message_id=platform_message_id,
+            reason=reason,
+        )
+        try:
+            adapter.delete_request_sync(request)
+        except Exception as e:
+            _LOG.exception("ChannelGateway delete_request_sync failed: %s", e)
+
+    def _resolve_target(self, target_snapshot: str | dict) -> tuple[dict | None, str | None, str | None]:
+        """解析 target_snapshot，返回 (target_dict, adapter_id, conversation_id)。"""
+        try:
+            target = json.loads(target_snapshot) if isinstance(target_snapshot, str) else target_snapshot
+        except (json.JSONDecodeError, TypeError):
+            return None, None, None
+        if not isinstance(target, dict):
+            return None, None, None
+
+        adapter_id = target.get("adapter_id")
+        conversation_id = target.get("conversation_id") or target.get("target")
+        reply_route = target.get("reply_route", {})
+        if not adapter_id and reply_route:
+            adapter_id = reply_route.get("adapter_id") or reply_route.get("channel_instance_id")
+        if not conversation_id and reply_route:
+            conversation_id = reply_route.get("conversation_id") or reply_route.get("platform_conversation_id")
+        return target, adapter_id, conversation_id
+
+    def _build_send_request(
+        self, target: dict, text: str, *, delivery_id: str, attempt_id: str,
+    ) -> ChannelSendRequest:
+        adapter_id = target.get("adapter_id")
+        reply_route = target.get("reply_route", {})
+        conversation_id = target.get("conversation_id") or target.get("target")
+        if not conversation_id and reply_route:
+            conversation_id = reply_route.get("conversation_id") or reply_route.get("platform_conversation_id")
+        return ChannelSendRequest(
             delivery_id=delivery_id,
             attempt_id=attempt_id,
             idempotency_key=target.get("idempotency_key", f"delivery_{delivery_id}"),
-            channel_instance_id=adapter_id,
+            channel_instance_id=adapter_id or "",
             target_endpoint_ref=target.get("target_endpoint_ref", ""),
             platform_conversation_id=str(conversation_id),
             reply_to_platform_message_id=reply_route.get("reply_to_platform_message_id"),
             text=text,
         )
-
-        # 调用 Adapter
-        return self._call_adapter_sync(adapter, request)
 
     def _call_adapter_sync(self, adapter, request: ChannelSendRequest) -> ChannelSendResult:
         """在可能没有 running loop 的情况下同步调用 adapter.send_request()。
@@ -141,6 +219,14 @@ class ChannelGateway(Gateway):
             return ChannelSendResult(status="temporary", error_code="connection_error")
         except Exception as e:
             _LOG.exception("ChannelGateway._call_adapter_sync failed: %s", e)
+            return ChannelSendResult(status="unknown", error_code=type(e).__name__)
+
+    def _call_adapter_edit_sync(self, adapter, request: ChannelEditRequest) -> ChannelSendResult:
+        """同步调用 adapter.edit_request_sync（编辑降级路径）。"""
+        try:
+            return adapter.edit_request_sync(request)
+        except Exception as e:
+            _LOG.exception("ChannelGateway edit_request_sync failed: %s", e)
             return ChannelSendResult(status="unknown", error_code=type(e).__name__)
 
     def _read_message_text(self, content_ref: str) -> str | None:

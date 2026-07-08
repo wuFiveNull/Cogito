@@ -27,6 +27,7 @@ def create_app(
     config: Config,
     recovery_counts: dict[str, int] | None = None,
     static_dir: Path | None = None,
+    runtime: Any | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Cogito · interaction-web", version="0.1.0")
     provider = ConnProvider(config=config, recovery_counts=recovery_counts or {})
@@ -40,10 +41,16 @@ def create_app(
         )
 
     app.state._provider = provider  # type: ignore[attr-defined]
+    # 运行时组合根（含 InboundService / WebChannelAdapter），供聊天路由接入主链路。
+    # 仅 serve 模式注入；纯只读 API 模式下为 None。
+    app.state.runtime = runtime  # type: ignore[attr-defined]
 
     # ── API 路由 ───────────────────────────────────────────────
     app.include_router(query.router)
     app.include_router(commands.router)
+    from cogito.interaction_web import chat
+
+    app.include_router(chat.router)
 
     # ── 静态前端托管 ───────────────────────────────────────────
     if static_dir is not None and static_dir.is_dir():

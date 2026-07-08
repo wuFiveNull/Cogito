@@ -30,6 +30,24 @@ class DeliveryAttemptStatus(StrEnum):
     failed = "failed"
 
 
+class StreamOperation(StrEnum):
+    """流式投递的操作类型（Delivery Attempt 内的一个 operation_seq）。
+
+    STREAMING-DELIVERY / 3. 状态机：
+    - start_placeholder: 创建可编辑占位消息（取 platform_message_id）
+    - append_delta: 在占位基础上追加文本（编辑语义为 replace 全量）
+    - replace_content: 用全量文本替换当前占位
+    - finish: 定稿（最终 replace 或 final_only 新发）
+    - withdraw: 撤回占位（取消/失败）
+    """
+
+    start_placeholder = "start_placeholder"
+    append_delta = "append_delta"
+    replace_content = "replace_content"
+    finish = "finish"
+    withdraw = "withdraw"
+
+
 class ReceiptKind(StrEnum):
     """Delivery Receipt 类型。
 
@@ -57,6 +75,14 @@ class Delivery:
         platform_message_id: str | None = None,
         last_error: str | None = None,
         created_at: datetime | None = None,
+        # ── 流式投递字段 (Plan 05) ─────────────────────────────
+        content_mode: str = "final",  # provisional | final
+        final_message_id: str | None = None,
+        stream_status: str | None = None,  # placeholder_created|streaming|finalizing|done
+        degradation_mode: str | None = None,  # native_stream|edit_placeholder|processing_then_final|final_only
+        last_confirmed_revision: int = 0,
+        policy_json: str | None = None,
+        metrics_json: str | None = None,
     ) -> None:
         self.delivery_id = delivery_id or uuid.uuid4().hex
         self.target_snapshot = target_snapshot or {}
@@ -67,6 +93,14 @@ class Delivery:
         self.platform_message_id = platform_message_id
         self.last_error = last_error
         self.created_at = created_at or datetime.now(UTC)
+        # ── 流式投递字段 (Plan 05) ─────────────────────────────
+        self.content_mode = content_mode
+        self.final_message_id = final_message_id
+        self.stream_status = stream_status
+        self.degradation_mode = degradation_mode
+        self.last_confirmed_revision = last_confirmed_revision
+        self.policy_json = policy_json
+        self.metrics_json = metrics_json
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -79,6 +113,13 @@ class Delivery:
             "platform_message_id": self.platform_message_id,
             "last_error": self.last_error,
             "created_at": self.created_at.isoformat(),
+            "content_mode": self.content_mode,
+            "final_message_id": self.final_message_id,
+            "stream_status": self.stream_status,
+            "degradation_mode": self.degradation_mode,
+            "last_confirmed_revision": self.last_confirmed_revision,
+            "policy_json": self.policy_json,
+            "metrics_json": self.metrics_json,
         }
 
     @classmethod
@@ -93,6 +134,13 @@ class Delivery:
             platform_message_id=data.get("platform_message_id"),
             last_error=data.get("last_error"),
             created_at=datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None,
+            content_mode=data.get("content_mode", "final"),
+            final_message_id=data.get("final_message_id"),
+            stream_status=data.get("stream_status"),
+            degradation_mode=data.get("degradation_mode"),
+            last_confirmed_revision=int(data.get("last_confirmed_revision", 0)),
+            policy_json=data.get("policy_json"),
+            metrics_json=data.get("metrics_json"),
         )
 
     def __eq__(self, other: object) -> bool:
@@ -117,6 +165,7 @@ class DeliveryAttempt:
         finished_at: datetime | None = None,
         platform_receipt: dict[str, Any] | None = None,
         error: str | None = None,
+        last_confirmed_revision: int = 0,
     ) -> None:
         self.attempt_id = attempt_id or uuid.uuid4().hex
         self.delivery_id = delivery_id
@@ -126,6 +175,7 @@ class DeliveryAttempt:
         self.finished_at = finished_at
         self.platform_receipt = platform_receipt or {}
         self.error = error
+        self.last_confirmed_revision = last_confirmed_revision
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -137,6 +187,7 @@ class DeliveryAttempt:
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "platform_receipt": self.platform_receipt,
             "error": self.error,
+            "last_confirmed_revision": self.last_confirmed_revision,
         }
 
     @classmethod
@@ -150,6 +201,7 @@ class DeliveryAttempt:
             finished_at=datetime.fromisoformat(data["finished_at"]) if data.get("finished_at") else None,
             platform_receipt=data.get("platform_receipt", {}),
             error=data.get("error"),
+            last_confirmed_revision=int(data.get("last_confirmed_revision", 0)),
         )
 
     def __repr__(self) -> str:
