@@ -128,7 +128,10 @@ class RuntimeApplication:
         from cogito.service.agent_runner import _create_provider
 
         provider = _create_provider(config.model)
-        if config.model.main.is_configured():
+        if config.model.provider == "echo":
+            logger.info("Using echo provider — user messages will be echoed back")
+            print("[echo] 使用回显 Provider（用户消息原样返回，不调用真实模型）")
+        elif config.model.main.is_configured():
             logger.info(
                 "Using model: %s (%s)",
                 config.model.main.model,

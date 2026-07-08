@@ -58,7 +58,7 @@ recovery_grace_period_seconds = 30
 # disabled_toolsets = []
 # system_prompt                    = "额外的系统提示词（append 模式下拼接到默认提示词后）"
 
-# ── 模型配置（必填，除非使用 Stub Provider）──
+# ── 模型配置（必填，除非使用 Stub/Echo Provider）──
 # 取消注释并填入你的 Provider：
 #
 # [model]
@@ -71,6 +71,13 @@ recovery_grace_period_seconds = 30
 # timeout_seconds = 60
 #
 # 也支持环境变量引用：api_key = "${MY_API_KEY}"
+#
+# ── 离线调试：Echo Provider（零 Token 消耗）──
+# 将用户最后一条消息原样返回，用于调试 Agent Loop / 工具调用链 / Trace 记录。
+# 配置方式：仅设置 provider = "echo"（无需 api_key / base_url）
+#
+# [model]
+# provider = "echo"
 
 # ── 全局 Channel 网关（可选；首个真实 Channel 阶段再启用）──
 # [channel]

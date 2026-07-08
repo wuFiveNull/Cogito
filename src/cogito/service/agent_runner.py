@@ -691,9 +691,14 @@ async def build_and_start_agent_runner(
 def _create_provider(model_cfg: ModelConfig) -> ModelProvider:
     """根据配置创建真实 ModelProvider。
 
-    缺省配置时创建 stub provider 以免意外使用真实模型。
-    仅在完整配置时才创建真实 provider。
+    - provider="echo"：回显 Provider，最后一条用户消息原样返回（离线调试用）
+    - 缺省配置时创建 stub provider 以免意外使用真实模型。
+    - 仅在完整配置时才创建真实 provider。
     """
+    if model_cfg.provider == "echo":
+        from cogito.model.echo_provider import EchoModelProvider
+        return EchoModelProvider()
+
     endpoint = model_cfg.main
     if not endpoint.is_configured():
         from cogito.model.stub_provider import StubModelProvider
