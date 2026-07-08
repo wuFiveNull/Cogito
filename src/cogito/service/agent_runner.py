@@ -41,6 +41,7 @@ from cogito.service.streaming_delivery import (
     StreamInputMeta,
     StreamPolicy,
 )
+from cogito.store.model_call_repo import ModelCallRecord, ModelCallRepository
 from cogito.store.time_utils import epoch_ms
 
 # ── 默认模式-Toolset 映射 (AGENT-COGNITION / 2.2) ──
@@ -113,6 +114,9 @@ class AgentRunner:
             conn, clock=self._clock, max_input_tokens=max_input_tokens,
             memory_service=memory_service,
         )
+        # 记录每次 Provider 调用到 model_calls（可观察性 / 链路追踪）
+        self._model_call_repo = ModelCallRepository(conn)
+        router._on_call_completed = self._record_model_call
         self._loop = AgentLoop(
             router,
             registry=registry,
@@ -437,6 +441,36 @@ class AgentRunner:
             )
         except Exception:
             pass
+
+    def _record_model_call(self, info: dict) -> None:
+        """Router 回调：把每次 Provider 调用写入 model_calls，用于链路追踪。"""
+        usage = info.get("usage")
+        status = info.get("status", "error")
+        if status == "success" and not usage:
+            from cogito.model.contracts import Usage
+            usage = Usage()
+        elif not usage:
+            from cogito.model.contracts import Usage
+            usage = Usage()
+        record = ModelCallRecord(
+            attempt_id=info.get("attempt_id", ""),
+            request_id=info.get("request_id", ""),
+            provider_id=info.get("provider_id", ""),
+            model_id=info.get("model_id", ""),
+            status=status,
+            finish_reason=info.get("finish_reason"),
+            input_tokens=(usage.input_tokens if usage else 0) or 0,
+            output_tokens=(usage.output_tokens if usage else 0) or 0,
+            cached_tokens=(usage.cached_tokens if usage else 0) or 0,
+            latency_ms=info.get("latency_ms", 0),
+            error_category=info.get("error_category"),
+            retry_count=info.get("retry_count", 0),
+            trace_id=info.get("trace_id", ""),
+        )
+        try:
+            self._model_call_repo.insert(record)
+        except Exception:
+            _LOGGER.warning("model_call insert failed", exc_info=True)
 
     # ── 非流式路径：通过网关把回复/错误推入浏览器 WS 队列 ────────────────
 

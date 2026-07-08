@@ -145,6 +145,17 @@ def get_session_trace(session_id: str, deps: CommandDeps = Depends(get_command_d
     return out
 
 
+# ── debug trace ──────────────────────────────────────────────
+
+
+@router.get("/debug/trace/{conversation_id}")
+def debug_trace(conversation_id: str, deps: CommandDeps = Depends(get_command_deps)) -> dict:
+    out = _svc(deps).trace_conversation(conversation_id)
+    if out is None:
+        raise HTTPException(status_code=404, detail=f"conversation {conversation_id} not found")
+    return out
+
+
 # ── deliveries / traces / plugins ─────────────────────────────
 
 

@@ -403,6 +403,203 @@ class QueryService:
                 return None
         return None
 
+    # ── debug trace ────────────────────────────────────────────
+
+    def trace_conversation(self, conversation_id: str) -> dict[str, Any] | None:
+        """全链路追踪：给定 conversation_id，返回从入站到投递完成的完整链路。
+
+        用于定位"用户发消息后无响应"类问题。每条记录含时间戳与耗时，
+        哪一环卡住/失败一目了然。
+        """
+        conv = self._conn.execute(
+            "SELECT * FROM conversations WHERE conversation_id=?", (conversation_id,)
+        ).fetchone()
+        if conv is None:
+            # 也尝试按 platform_conversation_id 查找（web channel 的订阅键）
+            conv = self._conn.execute(
+                "SELECT * FROM conversations WHERE platform_conversation_id=?",
+                (conversation_id,),
+            ).fetchone()
+        if conv is None:
+            return None
+
+        conv_dict = dict(conv)
+        real_id = conv_dict["conversation_id"]
+
+        # ── 会话 ──
+        sessions = [
+            dict(r) for r in self._conn.execute(
+                "SELECT * FROM sessions WHERE conversation_id=? ORDER BY created_at ASC",
+                (real_id,),
+            ).fetchall()
+        ]
+
+        # ── 消息（含文本） ──
+        msg_rows = self._conn.execute(
+            "SELECT m.message_id, m.role, m.direction, m.created_at, m.receive_sequence, "
+            "       m.reply_to_message_id, m.platform_message_id, m.session_id, "
+            "       cp.inline_data AS text "
+            "FROM messages m "
+            "LEFT JOIN content_parts cp ON cp.message_id = m.message_id "
+            "WHERE m.conversation_id=? "
+            "ORDER BY m.receive_sequence ASC",
+            (real_id,),
+        ).fetchall()
+        messages: list[dict[str, Any]] = []
+        for r in msg_rows:
+            d = dict(r)
+            txt = d.get("text") or ""
+            d["text_len"] = len(txt)
+            d["text_preview"] = txt[:120]
+            messages.append(d)
+
+        # ── Turns（每条 user 消息对应一个） ──
+        turns = self._conn.execute(
+            "SELECT * FROM turns WHERE session_id IN "
+            "(SELECT session_id FROM sessions WHERE conversation_id=?) "
+            "ORDER BY created_at ASC",
+            (real_id,),
+        ).fetchall()
+        turns_out: list[dict[str, Any]] = []
+        for t in turns:
+            td = dict(t)
+            # attempts
+            attempts = self._conn.execute(
+                "SELECT * FROM run_attempts WHERE turn_id=? ORDER BY attempt_no ASC",
+                (t["turn_id"],),
+            ).fetchall()
+            attempts_out: list[dict[str, Any]] = []
+            for a in attempts:
+                ad = dict(a)
+                # model calls
+                model_calls = [mc.to_dict() for mc in self._model_call_repo.find_by_attempt(a["attempt_id"])]
+                ad["model_calls"] = model_calls
+                ad["model_call_count"] = len(model_calls)
+                ad["error_calls"] = sum(1 for mc in model_calls if mc.get("status") == "error")
+                attempts_out.append(ad)
+            td["attempts"] = attempts_out
+            td["attempt_count"] = len(attempts_out)
+            # deliveries for this turn
+            deliveries = self._conn.execute(
+                "SELECT * FROM deliveries WHERE "
+                "json_extract(target_snapshot, '$.conversation_id')=? "
+                "AND created_at >= ? "
+                "ORDER BY created_at ASC",
+                (real_id, t["created_at"]),
+            ).fetchall()
+            del_out: list[dict[str, Any]] = []
+            for d in deliveries:
+                dd = dict(d)
+                dd["last_error"] = dd.get("last_error")
+                del_out.append(dd)
+            td["deliveries"] = del_out
+            td["delivery_count"] = len(del_out)
+            turns_out.append(td)
+
+        # ── 链路诊断 ──
+        diagnosis = self._diagnose_chain(messages, turns_out)
+
+        return {
+            "conversation": conv_dict,
+            "sessions": sessions,
+            "messages": messages,
+            "turns": turns_out,
+            "diagnosis": diagnosis,
+        }
+
+    def _diagnose_chain(
+        self,
+        messages: list[dict[str, Any]],
+        turns: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """逐条诊断每个 user 消息的处理链路，返回可读的问题列表。"""
+        issues: list[dict[str, Any]] = []
+        user_msgs = [m for m in messages if m["role"] == "user"]
+
+        for i, um in enumerate(user_msgs):
+            # 找对应的 turn（按 input_message_id 匹配）
+            turn = None
+            for t in turns:
+                # turns 没有直接存 input_message_id 在这里，按时间最近匹配
+                pass
+            # 简化：按序号对应（receive_sequence 单调）
+            if i < len(turns):
+                turn = turns[i]
+
+            msg_diag: dict[str, Any] = {
+                "message_id": um["message_id"],
+                "preview": um["text_preview"][:60],
+                "created_at": um["created_at"],
+            }
+
+            if turn is None:
+                msg_diag["issue"] = "NO_TURN"
+                msg_diag["detail"] = "用户消息未生成 Turn（inbound.accept 可能未调用或失败）"
+                issues.append(msg_diag)
+                continue
+
+            msg_diag["turn_id"] = turn["turn_id"]
+            msg_diag["turn_status"] = turn["status"]
+
+            if turn["status"] == "queued":
+                msg_diag["issue"] = "TURN_STUCK_QUEUED"
+                msg_diag["detail"] = "Turn 始终停留在 queued，worker 未领取（worker 可能未运行）"
+                issues.append(msg_diag)
+                continue
+            if turn["status"] == "running":
+                msg_diag["issue"] = "TURN_STUCK_RUNNING"
+                msg_diag["detail"] = "Turn 卡在 running，agent 执行中或 lease 过期"
+                issues.append(msg_diag)
+                continue
+            if turn["status"] == "cancelled":
+                msg_diag["issue"] = "TURN_CANCELLED"
+                msg_diag["detail"] = "Turn 被外部取消"
+                issues.append(msg_diag)
+                continue
+            if turn["status"] == "failed":
+                msg_diag["issue"] = "TURN_FAILED"
+                # 找失败原因
+                err_calls = []
+                for a in turn.get("attempts", []):
+                    for mc in a.get("model_calls", []):
+                        if mc.get("status") == "error":
+                            err_calls.append(mc.get("error_category") or "unknown")
+                msg_diag["detail"] = f"Turn 执行失败，模型调用错误: {err_calls}" if err_calls else "Turn 执行失败（详见 attempt）"
+                issues.append(msg_diag)
+                continue
+
+            # completed — 检查是否有 assistant 回复
+            if turn["status"] == "completed":
+                has_reply = any(
+                    m["role"] == "assistant" and m.get("created_at", "") >= um.get("created_at", "")
+                    for m in messages
+                )
+                if not has_reply:
+                    msg_diag["issue"] = "NO_REPLY"
+                    msg_diag["detail"] = "Turn 完成但无 assistant 回复消息"
+                    issues.append(msg_diag)
+                    continue
+
+                # 检查投递
+                if turn.get("delivery_count", 0) == 0:
+                    msg_diag["issue"] = "NO_DELIVERY"
+                    msg_diag["detail"] = "有回复但未创建 Delivery（非流式路径未推 WS 或投递未触发）"
+                    issues.append(msg_diag)
+                    continue
+
+                failed_deliveries = [d for d in turn.get("deliveries", []) if d["status"] in ("failed", "cancelled", "interrupted")]
+                if failed_deliveries:
+                    msg_diag["issue"] = "DELIVERY_FAILED"
+                    msg_diag["detail"] = f"Delivery 失败: {failed_deliveries[0].get('last_error') or failed_deliveries[0]['status']}"
+                    issues.append(msg_diag)
+                    continue
+
+            msg_diag["issue"] = "OK"
+            msg_diag["detail"] = "链路正常"
+            issues.append(msg_diag)
+
+        return issues
+
     # ── plugins (capability mcp servers config 快照) ───────────
 
     def list_plugins(self) -> dict[str, Any]:
