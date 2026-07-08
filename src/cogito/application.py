@@ -387,6 +387,17 @@ class RuntimeApplication:
             except Exception:
                 logger.warning("Scheduler tick failed", exc_info=True)
 
+        # Proactive evaluate tick —— 仅当 config.capability.proactive.enabled=true
+        proactive_cfg = getattr(self.config.capability, "proactive", None)
+        if proactive_cfg is not None and proactive_cfg.enabled and self.scheduler is not None:
+            try:
+                eval_tasks = await asyncio.to_thread(self.scheduler.tick_proactive_evaluate)
+                if eval_tasks:
+                    result.scheduler += len(eval_tasks)
+                    result.idle = False
+            except Exception:
+                logger.warning("Proactive evaluate tick failed", exc_info=True)
+
         return result
 
     # ── worker entrypoint ──────────────────────────────────────────────────
@@ -440,6 +451,7 @@ class RuntimeApplication:
             workspace_path=self.config.workspace_path,
             mcp_manager=self.mcp_manager,
             delivery_service=proactive_delivery_svc,
+            proactive_config=self.config.capability.proactive,
         )
         task_registry = _build_registry(task_handler_ctx)
         task_dispatcher = TaskDispatcher(self.conn)

@@ -176,3 +176,29 @@ def test_energy_band():
     assert energy_band(0.9) == "high"
     assert energy_band(0.5) == "medium"
     assert energy_band(0.1) == "low"
+
+
+def test_quiet_hours_overnight_quiet():
+    """跨午夜 quiet hours (23:00-08:00)：00:30 静默。"""
+    from datetime import datetime, UTC
+    p = _policy(quiet_hours={"enabled": True, "start": "23:00", "end": "08:00", "timezone": "UTC"})
+    c = _candidate()
+    action, _ = decide(c, p, now=datetime(2026, 7, 8, 0, 30, tzinfo=UTC))
+    assert action == "send_later"
+
+
+def test_quiet_hours_overnight_not_quiet():
+    """跨午夜 quiet hours：12:00 不静默。"""
+    from datetime import datetime, UTC
+    p = _policy(quiet_hours={"enabled": True, "start": "23:00", "end": "08:00", "timezone": "UTC"})
+    c = _candidate(novelty=0.7, relevance=0.85, urgency=0.8)
+    action, _ = decide(c, p, now=datetime(2026, 7, 8, 12, 0, tzinfo=UTC))
+    assert action == "send_now"
+
+
+def test_model_failure_does_not_crash():
+    """model_router=None 时 decide 不抛异常。"""
+    p = _policy(quiet_hours={"enabled": False}, max_pushes_per_hour=99, max_pushes_per_day=99)
+    c = _candidate(novelty=0.7, relevance=0.85, urgency=0.8)
+    action, trace = decide(c, p)  # 无 model_router 调用
+    assert action in ("send_now", "digest", "silent", "discard")

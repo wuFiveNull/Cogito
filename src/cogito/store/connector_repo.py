@@ -192,8 +192,8 @@ class ConnectorItemRepository:
             "INSERT INTO connector_items "
             "(item_id, connector_id, raw_item_id, source_item_id, title, link, "
             " summary, author, published_at, content_hash, relevance, "
-            " summary_text, status, created_at, source_metadata_json) "
-            "VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?)",
+            " summary_text, status, created_at, source_metadata_json, topic) "
+            "VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?,?)",
             (
                 item.item_id,
                 item.connector_id,
@@ -210,6 +210,7 @@ class ConnectorItemRepository:
                 item.status.value,
                 epoch_ms(item.created_at),
                 source_metadata or "",
+                item.topic,
             ),
         )
 

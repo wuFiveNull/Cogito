@@ -114,8 +114,12 @@ class SourceEventIngestedConsumer(EventConsumer):
                          item["status"])
             return True  # 非 digest 静默跳过，不重试
 
-        payload = _safe_json(lease.payload_ref or "{}")
-        topic = payload.get("topic", payload.get("category", "general"))
+        # 优先用 connector_items 上专用 topic 列（MCP handler 写入）
+        item_row = conn.execute(
+            "SELECT topic FROM connector_items WHERE item_id=?",
+            (lease.payload_ref or "",),
+        ).fetchone()
+        topic = item_row["topic"] if item_row and item_row["topic"] else "general"
 
         candidate_id = uuid.uuid4().hex
         stream_type = "content"  # 默认；未来 enhancement 会看 source type
@@ -188,11 +192,6 @@ class SourceEventIngestedConsumer(EventConsumer):
         return True
 
 
-def _safe_json(raw: str) -> dict:
-    try:
-        return json.loads(raw) if raw else {}
-    except Exception:
-        return {}
 
 
 def _mk_idempotency(principal: str, stream_type: str, event_ids: list[str],

@@ -96,6 +96,8 @@ class TaskHandlerContext:
     mcp_manager: Any = None  # MCPServerManager
     # 主动 Delivery 闭环（send_later → Delivery）
     delivery_service: Any = None  # DeliveryService 实现
+    # 主动推送配置（来自 config.capability.proactive）
+    proactive_config: Any = None  # ProactiveConfig
     # 当前 Task 元信息（IngestionBatch 日志需要）
     _task_id: str = ""
     _attempt_id: str = ""
@@ -135,6 +137,7 @@ def _build_registry(ctx: TaskHandlerContext) -> TaskHandlerRegistry:
     registry.register("mcp_connector.poll", _handle_mcp_connector_poll)
     registry.register("proactive.delivery.ready", _handle_proactive_delivery_ready)
     registry.register("proactive.digest.publish", _handle_proactive_digest_publish)
+    registry.register("proactive.evaluate", _handle_proactive_evaluate)
     return registry
 
 
@@ -621,3 +624,154 @@ def _handle_summary_generate(task: Task, ctx: TaskHandlerContext) -> str:
         f"summary generated (range=[{payload.from_sequence}..{payload.to_sequence}], "
         f"keys={len(result)})"
     )
+
+
+def _handle_proactive_evaluate(task: Task, ctx: TaskHandlerContext) -> str:
+    """proactive.evaluate: 批量评估 evaluating candidates → 决策 + 持久化。
+
+    流程：
+    - 取 proactive_config (默认 dry_run=True)
+    - 取 policy (ProactivePolicyRepository.get_current)
+    - 取 energy (energy_model.compute_energy)
+    - 遍历 evaluating candidates (limit 10)
+    - 每 candidate 调 decide → action
+    - action=send_now → enqueue Delivery (via delivery_service) + 写 decision_v2
+    - action=send_later → enqueue_send_later + 写 decision_v2
+    - action=digest → enqueue_digest_publish + 写 decision_v2
+    - 其它 silent/discard → 写 decision_v2 + 更新 candidate.status
+    """
+    conn = ctx.connection_factory() if ctx.connection_factory else None
+    if conn is None:
+        return "evaluate skipped: no connection"
+    try:
+        result = _evaluate_candidates_sync(conn, ctx)
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return result
+    except Exception:
+        _LOGGER.exception("proactive.evaluate failed")
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise
+
+
+def _evaluate_candidates_sync(conn, ctx) -> str:
+    from cogito.store.proactive_repo import (
+        ProactiveCandidateRepository,
+        ProactiveDecisionRepository,
+        ProactivePolicyRepository,
+    )
+    from cogito.service.proactive_decision import decide, persist_decision
+    from cogito.service.proactive_decision import enqueue_send_later
+    from cogito.service.proactive_digest_service import enqueue_digest_publish
+    from cogito.service.energy_model import compute_energy
+    import time
+
+    config = ctx.proactive_config
+    if config is None:
+        # 默认 dry-run + 默认 policy
+        from cogito.config import ProactiveConfig
+        config = ProactiveConfig()
+
+    # 取 policy
+    policy = ProactivePolicyRepository(conn).get_current(
+        principal_id=config.default_principal_id,
+    )
+
+    # 取 energy (last_user_at=None → E=0)
+    energy_value = compute_energy(None)
+
+    # 取 evaluating candidates
+    candidates = ProactiveCandidateRepository(conn).find_evaluating(
+        principal_id=config.default_principal_id, limit=10,
+    )
+    if not candidates:
+        return "evaluate: no candidates"
+
+    now = int(time.time() * 1000)
+    actions = {"send_now": 0, "send_later": 0, "digest": 0, "silent": 0, "discard": 0, "other": 0}
+    for c in candidates:
+        action, trace = decide(
+            c, policy,
+            energy_value=energy_value,
+            existing_hourly_sent=ProactiveDecisionRepository(conn).count_hourly_sent(
+                config.default_principal_id, now // (3600 * 1000),
+            ),
+            existing_daily_sent=ProactiveDecisionRepository(conn).count_daily_sent(
+                config.default_principal_id, now // (86400 * 1000),
+            ),
+        )
+        # 持久化 decision
+        d = persist_decision(
+            conn, c, policy, action, trace,
+            energy_value=energy_value,
+        )
+        # 根据 action 触发后续
+        if action == "send_now":
+            if config.dry_run or ctx.delivery_service is None:
+                pass  # dry_run: 仅记录
+            else:
+                import asyncio
+                from cogito.service.delivery_service import DeliveryRequest
+                async def _do():
+                    return await ctx.delivery_service.enqueue(DeliveryRequest(
+                        target={"channel": "web", "principal_id": c.principal_id},
+                        content_ref=c.summary,
+                        idempotency_key=f"proactive-now:{c.candidate_id}",
+                    ))
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop and loop.is_running():
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(1) as p:
+                        p.submit(asyncio.run, _do()).result()
+                else:
+                    asyncio.run(_do())
+            ProactiveCandidateRepository(conn).update_status(
+                c.candidate_id, "decided", consumed_at=now,
+            )
+            actions["send_now"] += 1
+
+        elif action == "send_later":
+            enqueue_send_later(
+                conn,
+                candidate_id=c.candidate_id,
+                content_ref=c.summary,
+                suggested_target={"channel": "web", "principal_id": c.principal_id},
+                reason=f"decide={action}",
+                delay_minutes=policy.digest_max_delay_minutes,
+                policy_version=policy.version,
+            )
+            ProactiveCandidateRepository(conn).update_status(
+                c.candidate_id, "decided", consumed_at=now,
+            )
+            actions["send_later"] += 1
+
+        elif action == "digest":
+            enqueue_digest_publish(
+                conn,
+                principal_id=c.principal_id,
+                digest_date=time.strftime("%Y-%m-%d", time.gmtime(now / 1000)),
+                topic=c.topic,
+                delay_minutes=policy.digest_max_delay_minutes,
+            )
+            ProactiveCandidateRepository(conn).update_status(
+                c.candidate_id, "consumed", consumed_at=now,
+            )
+            actions["digest"] += 1
+
+        else:
+            # silent / discard / ask_permission / create_task
+            ProactiveCandidateRepository(conn).update_status(
+                c.candidate_id, "consumed", consumed_at=now,
+            )
+            actions["other"] += 1
+
+    conn.commit()
+    return f"evaluate: {actions}"

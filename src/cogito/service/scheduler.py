@@ -31,6 +31,8 @@ _LOGGER = logging.getLogger(__name__)
 
 POLL_TASK_TYPE = "connector.poll"
 MCP_POLL_TASK_TYPE = "mcp_connector.poll"
+PROACTIVE_EVALUATE_TASK_TYPE = "proactive.evaluate"
+PROACTIVE_DIGEST_PUBLISH_TASK_TYPE = "proactive.digest.publish"
 
 
 class Scheduler:
@@ -55,6 +57,39 @@ class Scheduler:
         if connector_type == "mcp":
             return MCP_POLL_TASK_TYPE
         return POLL_TASK_TYPE
+
+    def tick_proactive_evaluate(self, limit: int = 10) -> list[Task]:
+        """主动评估 tick：创建 proactive.evaluate Task。
+
+        全局由 proactive_worker_enabled 镜像 config.capability.proactive.enabled。
+        每次 process_background_once 调用一次；Scheduler 不自跑 loop。
+        """
+        now = self._now()
+        tasks: list[Task] = []
+        # proactive.evaluate — 单 Task（批量处理 evaluating candidates）
+        idempotency = f"proactive-evaluate:{epoch_ms(now)}"
+        existing = self._conn.execute(
+            "SELECT task_id FROM tasks WHERE idempotency_key=?", (idempotency,),
+        ).fetchone()
+        if existing is None:
+            task = Task(
+                task_id=f"task-pe-{idempotency}",
+                task_type=PROACTIVE_EVALUATE_TASK_TYPE,
+                payload_ref="",
+                status=TaskStatus.queued,
+                priority=15,  # 高于 connector poll 的 10 但低于 memory
+                scheduled_at=epoch_ms(now),
+                idempotency_key=idempotency,
+                origin="proactive-scheduler",
+            )
+            try:
+                self._task_repo.insert(task)
+                self._conn.commit()
+                tasks.append(task)
+            except Exception:
+                self._conn.rollback()
+                _LOGGER.warning("insert proactive.evaluate task failed (likely duplicate)")
+        return tasks
 
     def _now(self) -> datetime:
         return self._clock.now()

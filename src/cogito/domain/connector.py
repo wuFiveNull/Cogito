@@ -165,6 +165,7 @@ class ConnectorItem:
         relevance: float | None = None,
         summary_text: str = "",
         status: ItemStatus = ItemStatus.new,
+        topic: str = "general",
         created_at: datetime | None = None,
     ) -> None:
         self.item_id = item_id or uuid.uuid4().hex
@@ -180,6 +181,7 @@ class ConnectorItem:
         self.relevance = relevance
         self.summary_text = summary_text
         self.status = ItemStatus(status)
+        self.topic = topic[:200] if topic else "general"
         self.created_at = created_at or datetime.now(UTC)
 
     def __repr__(self) -> str:

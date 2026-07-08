@@ -304,6 +304,7 @@ def _poll_mcp_connector(
                 relevance=relevance,
                 summary_text=summary_text[:4000],
                 status=item_status,
+                topic=topic[:200] if topic else "general",
             )
             ConnectorItemRepository(conn).insert(connector_item, source_metadata=_build_source_metadata(item))
 
