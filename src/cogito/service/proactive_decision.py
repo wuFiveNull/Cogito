@@ -143,6 +143,8 @@ def decide(
         return "send_now", traces
 
     record("aggregate", True, "digest")
+    # 异步 send_later/digest defer 处理由 persist_decision 完成 ——
+    # 这里只输出 action，调用方根据 action 决定后续 Task 创建。
     return "digest", traces
 
 
@@ -182,6 +184,52 @@ def _in_quiet_hours(policy: ProactivePolicy, now: datetime) -> bool:
 
 def now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def enqueue_send_later(
+    conn,
+    *,
+    candidate_id: str,
+    content_ref: str,
+    suggested_target: dict[str, Any],
+    reason: str,
+    delay_minutes: int,
+    policy_version: int = 1,
+) -> str:
+    """=send_later 决策持久化 + scheduled_request 创建 + proactive.delivery.ready Task。
+
+    delay_minutes 来自 policy.digest_max_delay_minutes（默认 360 分=6h）。
+    返回 request_id。
+    """
+    from cogito.service.proactive_delivery_service import create_scheduled_request
+    from cogito.store.task_repo import TaskRepository
+    from cogito.domain.task import Task, TaskStatus
+    import uuid
+    scheduled_at_ms = now_ms() + int(delay_minutes) * 60 * 1000
+    request_id = create_scheduled_request(
+        conn,
+        candidate_id=candidate_id,
+        content_ref=content_ref,
+        suggested_target=suggested_target,
+        reason=reason,
+        scheduled_at_ms=scheduled_at_ms,
+        policy_version=policy_version,
+    )
+    # 创建 proactive.delivery.ready Task
+    task_repo = TaskRepository(conn)
+    task = Task(
+        task_id=f"task-pdr-{uuid.uuid4().hex[:16]}",
+        task_type="proactive.delivery.ready",
+        payload_ref=request_id,
+        status=TaskStatus.queued,
+        priority=30,
+        scheduled_at=scheduled_at_ms,
+        idempotency_key=f"pdr:{request_id}",
+        origin="proactive-engine",
+    )
+    task_repo.insert(task)
+    conn.commit()
+    return request_id
 
 
 def persist_decision(

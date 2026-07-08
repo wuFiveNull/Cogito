@@ -94,6 +94,8 @@ class TaskHandlerContext:
     logger: logging.Logger = field(default_factory=lambda: _LOGGER)
     # MCP 生命周期（由 application.run_worker 注入；连接器 poll 用）
     mcp_manager: Any = None  # MCPServerManager
+    # 主动 Delivery 闭环（send_later → Delivery）
+    delivery_service: Any = None  # DeliveryService 实现
     # 当前 Task 元信息（IngestionBatch 日志需要）
     _task_id: str = ""
     _attempt_id: str = ""
@@ -131,6 +133,8 @@ def _build_registry(ctx: TaskHandlerContext) -> TaskHandlerRegistry:
     registry.register("summary.generate", _handle_summary_generate)
     registry.register("connector.poll", _handle_connector_poll)
     registry.register("mcp_connector.poll", _handle_mcp_connector_poll)
+    registry.register("proactive.delivery.ready", _handle_proactive_delivery_ready)
+    registry.register("proactive.digest.publish", _handle_proactive_digest_publish)
     return registry
 
 
@@ -153,6 +157,155 @@ def _handle_mcp_connector_poll(task: Task, ctx: TaskHandlerContext) -> str:
     ctx._attempt_id = getattr(task, "task_id", "")
 
     return handle_mcp_connector_poll(task, ctx)
+
+
+def _handle_proactive_delivery_ready(task: Task, ctx: TaskHandlerContext) -> str:
+    """proactive.delivery.ready: scheduled_delivery_request 到期 → Delivery。
+
+    payload_ref=request_id。取 content_factory 创建 new Delivery 实例，入
+    DeliveryWorker 队列（async enqueue via sync wrapper）。
+    """
+    request_id = task.payload_ref
+    if not request_id:
+        return "delivery.ready skipped: empty request_id"
+
+    conn = ctx.connection_factory() if ctx.connection_factory else None
+    if conn is None:
+        return "delivery.ready skipped: no connection"
+
+    try:
+        result = _deliver_scheduled_request_sync(
+            conn, request_id, ctx.delivery_service,
+        )
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return result
+    except Exception:
+        _LOGGER.exception("proactive.delivery.ready failed: %s", request_id)
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise
+
+
+def _deliver_scheduled_request_sync(conn, request_id, delivery_service) -> str:
+    from cogito.service.proactive_delivery_service import (
+        prepare_delivery_from_request,
+        mark_request_converted,
+        mark_request_expired,
+    )
+    info = prepare_delivery_from_request(conn, request_id)
+    if info is None:
+        return "delivery.ready: request expired/cancelled/not-yet-due"
+
+    content_ref = info["content_ref"]
+    if delivery_service is None:
+        # dry_run 模式：记录但不真实投递
+        _LOGGER.info(
+            "[dry_run] would send scheduled request %s: %s",
+            request_id, (content_ref or "")[:80],
+        )
+        mark_request_converted(conn, request_id, "dry-run-noop")
+        return "converted (dry_run)"
+
+    import asyncio
+    from cogito.service.delivery_service import DeliveryRequest
+
+    async def _do():
+        return await delivery_service.enqueue(DeliveryRequest(
+            target=info["suggested_target"],
+            content_ref=content_ref or "",
+            idempotency_key=f"proactive-scheduled:{request_id}",
+        ))
+
+    # delivery_service 是 async handler，在 sync handler 跑
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(1) as p:
+            delivery_id = p.submit(asyncio.run, _do()).result()
+    else:
+        delivery_id = asyncio.run(_do())
+    mark_request_converted(conn, request_id, delivery_id)
+    return f"converted -> {delivery_id}"
+
+
+def _handle_proactive_digest_publish(task: Task, ctx: TaskHandlerContext) -> str:
+    """proactive.digest.publish: 封桶 → 渲染 → enqueue Delivery。
+
+    payload_ref 格式: "<principal_id>|<digest_date>|<topic>"。
+    """
+    payload = task.payload_ref or ""
+    parts = payload.split("|", 2)
+    if len(parts) != 3:
+        return f"digest.publish skipped: bad payload {payload!r}"
+    principal_id, digest_date, topic = parts
+
+    conn = ctx.connection_factory() if ctx.connection_factory else None
+    if conn is None:
+        return "digest.publish skipped: no connection"
+    try:
+        result = _publish_digest_sync(
+            conn, principal_id, digest_date, topic, ctx.delivery_service,
+        )
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return result
+    except Exception:
+        _LOGGER.exception("proactive.digest.publish failed: %s", payload)
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise
+
+
+def _publish_digest_sync(conn, principal_id, digest_date, topic, delivery_service) -> str:
+    from cogito.service.proactive_digest_service import assemble_and_render, mark_digest_sent
+    rendered = assemble_and_render(
+        conn, principal_id=principal_id, digest_date=digest_date, topic=topic,
+    )
+    if rendered is None:
+        return "digest.publish: nothing to send"
+    digest_id, text = rendered
+    if delivery_service is None:
+        _LOGGER.info(
+            "[dry_run] would send digest %s (topic=%s, chars=%d)",
+            digest_id, topic, len(text),
+        )
+        mark_digest_sent(conn, digest_id)
+        return f"sent (dry_run): {digest_id}"
+
+    import asyncio
+    from cogito.service.delivery_service import DeliveryRequest
+
+    async def _do():
+        return await delivery_service.enqueue(DeliveryRequest(
+            target={"channel": "web", "principal_id": principal_id},
+            content_ref=text,
+            idempotency_key=f"proactive-digest:{digest_id}",
+        ))
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(1) as p:
+            delivery_id = p.submit(asyncio.run, _do()).result()
+    else:
+        delivery_id = asyncio.run(_do())
+    mark_digest_sent(conn, digest_id)
+    return f"sent -> {delivery_id}"
 
 
 # ── memory.extract （B5: 替换 stub 为真实流程）──

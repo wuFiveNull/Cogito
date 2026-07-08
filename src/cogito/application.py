@@ -222,14 +222,16 @@ class RuntimeApplication:
         logger.info("Web channel adapter started (conversation-bound WebSocket queue)")
 
     def build_workers(self) -> None:
-        """构建 OutboxWorker / DeliveryWorker / TaskWorker。"""
+        """构建 OutboxWorker / DeliveryWorker / TaskWorker / EventConsumers。"""
         from cogito.service.delivery_worker import DeliveryWorker
+        from cogito.service.event_consumers import build_default_registry
         from cogito.service.outbox_worker import OutboxWorker
 
         self.outbox_worker = OutboxWorker(
             self.conn,
             lease_ttl_s=self.config.worker.outbox_lease_ttl_seconds,
         )
+        self.event_consumer_registry = build_default_registry()
         if self.channel_gateway is None:
             self.build_channel_components()
         self.delivery_worker = DeliveryWorker(
@@ -329,14 +331,34 @@ class RuntimeApplication:
         elif outcome == RunOutcome.cancelled:
             logger.info("Turn was cancelled")
 
-        # N Outbox
+        # N Outbox —— lease_next → consumer dispatch → publish/retry
         for _ in range(outbox_batch):
             lease = self.outbox_worker.lease_next(worker_id)
             if lease is None:
                 break
-            self.outbox_worker.publish(lease, worker_id)
-            result.outbox += 1
-            result.idle = False
+            consumer = self.event_consumer_registry.find(lease)
+            if consumer is not None:
+                # Consumer 内部负责幂等+事务；失败则 retry/dead_letter，不 publish
+                try:
+                    ok = await asyncio.to_thread(
+                        consumer.handle, self.conn, lease,
+                    )
+                    if ok:
+                        self.outbox_worker.publish(lease, worker_id)
+                        result.outbox += 1
+                        result.idle = False
+                    else:
+                        self.outbox_worker.retry(lease, worker_id)
+                except Exception:
+                    logger.exception(
+                        "outbox consumer failed: event=%s consumer=%s",
+                        lease.event_id, consumer.name,
+                    )
+                    self.outbox_worker.retry(lease, worker_id)
+            else:
+                self.outbox_worker.publish(lease, worker_id)
+                result.outbox += 1
+                result.idle = False
 
         # N Delivery —— 通过 to_thread 调用同步 deliver()，避免阻塞主 loop
         for _ in range(delivery_batch):
@@ -409,10 +431,15 @@ class RuntimeApplication:
         # 启动启用的 Channel Adapter（如 QQ）
         await self._start_enabled_channels()
 
+        # Concrete DeliveryService 实现（主动投递闭环 —— M8）
+        from cogito.service.proactive_delivery_service import SqliteDeliveryService
+        proactive_delivery_svc = SqliteDeliveryService(self.conn)
+
         task_handler_ctx = TaskHandlerContext(
             connection_factory=lambda p=self.config.resolve_db_path(): get_connection(p),
             workspace_path=self.config.workspace_path,
             mcp_manager=self.mcp_manager,
+            delivery_service=proactive_delivery_svc,
         )
         task_registry = _build_registry(task_handler_ctx)
         task_dispatcher = TaskDispatcher(self.conn)

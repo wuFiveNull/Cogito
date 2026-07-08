@@ -564,15 +564,37 @@ class OutboxRepository:
 
 
 class DeliveryRepository:
-    """流式投递的持久化操作。
+    """投递持久化。
 
-    每个流式操作对应 Delivery Attempt 内的一个 operation_seq，并写入
-    delivery_receipts 作为可重放证据（与 STREAMING-DELIVERY 一致）。
+    支持流式（create_streaming_delivery）与普通 pending delivery (insert)。
     """
 
     def __init__(self, conn: sqlite3.Connection, clock: Clock | None = None) -> None:
         self._conn = conn
         self._clock = clock or ProductionClock()
+
+    def insert(self, delivery: Any) -> None:
+        """非流式 pending delivery 写入（主动投递闭环用）。
+
+        target_snapshot 从 DomainDelivery.target_snapshot (dict) 序列化为 JSON。
+        """
+        import json
+        target_json = json.dumps(delivery.target_snapshot, ensure_ascii=False) \
+            if isinstance(delivery.target_snapshot, dict) else str(delivery.target_snapshot)
+        now_int = epoch_ms(self._clock.now())
+        self._conn.execute(
+            "INSERT INTO deliveries "
+            "(delivery_id, target_snapshot, content_ref, status, idempotency_key, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                delivery.delivery_id,
+                target_json,
+                delivery.content_ref,
+                delivery.status.value,
+                delivery.idempotency_key,
+                now_int,
+            ),
+        )
 
     def create_streaming_delivery(
         self,
