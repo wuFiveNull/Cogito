@@ -232,6 +232,7 @@ class ChannelEnvelope:
 @dataclass
 class AgentRequest:
     """Agent 运行时输入。"""
+    schema_version: str = "1.0"
     turn_id: str = ""
     principal: dict[str, Any] = field(default_factory=dict)
     conversation: dict[str, Any] = field(default_factory=dict)
@@ -241,10 +242,41 @@ class AgentRequest:
     resource_budget: dict[str, Any] = field(default_factory=dict)
     trace_context: TraceContext | None = None
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "turn_id": self.turn_id,
+            "principal": self.principal,
+            "conversation": self.conversation,
+            "context_snapshot": self.context_snapshot,
+            "input_message": self.input_message,
+            "capability_policy": self.capability_policy,
+            "resource_budget": self.resource_budget,
+            "trace_context": self.trace_context.to_dict() if self.trace_context else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AgentRequest:
+        return cls(
+            schema_version=data.get("schema_version", "1.0"),
+            turn_id=data.get("turn_id", ""),
+            principal=data.get("principal", {}),
+            conversation=data.get("conversation", {}),
+            context_snapshot=data.get("context_snapshot", {}),
+            input_message=data.get("input_message", {}),
+            capability_policy=data.get("capability_policy", {}),
+            resource_budget=data.get("resource_budget", {}),
+            trace_context=(
+                TraceContext.from_dict(data["trace_context"])
+                if data.get("trace_context") else None
+            ),
+        )
+
 
 @dataclass
 class AgentReply:
     """Agent 运行时输出。"""
+    schema_version: str = "1.0"
     turn_id: str = ""
     content_parts: list[dict[str, Any]] = field(default_factory=list)
     reply_mode: ReplyMode = ReplyMode.normal
@@ -254,13 +286,44 @@ class AgentReply:
     status_summary: str = ""
     trace_context: TraceContext | None = None
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "turn_id": self.turn_id,
+            "content_parts": self.content_parts,
+            "reply_mode": self.reply_mode.value,
+            "render_hints": self.render_hints,
+            "memory_candidates": self.memory_candidates,
+            "suggested_tasks": self.suggested_tasks,
+            "status_summary": self.status_summary,
+            "trace_context": self.trace_context.to_dict() if self.trace_context else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AgentReply:
+        return cls(
+            schema_version=data.get("schema_version", "1.0"),
+            turn_id=data.get("turn_id", ""),
+            content_parts=data.get("content_parts", []),
+            reply_mode=ReplyMode(data.get("reply_mode", "normal")),
+            render_hints=data.get("render_hints", {}),
+            memory_candidates=data.get("memory_candidates", []),
+            suggested_tasks=data.get("suggested_tasks", []),
+            status_summary=data.get("status_summary", ""),
+            trace_context=(
+                TraceContext.from_dict(data["trace_context"])
+                if data.get("trace_context") else None
+            ),
+        )
+
 
 # ─── ToolRequest / ToolResult ───
 
 
-@dataclass
+@dataclass(frozen=True)
 class ToolRequest:
     """Tool 执行请求。"""
+    schema_version: str = "1.0"
     tool_call_id: str = ""
     tool_name: str = ""
     tool_version: str = "1.0"
@@ -273,12 +336,45 @@ class ToolRequest:
 
     def __post_init__(self) -> None:
         if not self.tool_call_id:
-            self.tool_call_id = uuid.uuid4().hex
+            object.__setattr__(self, "tool_call_id", uuid.uuid4().hex)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "tool_call_id": self.tool_call_id,
+            "tool_name": self.tool_name,
+            "tool_version": self.tool_version,
+            "arguments": self.arguments,
+            "requested_permissions": self.requested_permissions,
+            "idempotency_key": self.idempotency_key,
+            "timeout": self.timeout,
+            "risk_context": self.risk_context,
+            "trace_context": self.trace_context.to_dict() if self.trace_context else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ToolRequest:
+        return cls(
+            schema_version=data.get("schema_version", "1.0"),
+            tool_call_id=data.get("tool_call_id", ""),
+            tool_name=data.get("tool_name", ""),
+            tool_version=data.get("tool_version", "1.0"),
+            arguments=data.get("arguments", {}),
+            requested_permissions=data.get("requested_permissions", []),
+            idempotency_key=data.get("idempotency_key", ""),
+            timeout=float(data.get("timeout", 30.0)),
+            risk_context=data.get("risk_context", "none"),
+            trace_context=(
+                TraceContext.from_dict(data["trace_context"])
+                if data.get("trace_context") else None
+            ),
+        )
 
 
-@dataclass
+@dataclass(frozen=True)
 class ToolResult:
     """Tool 执行结果。"""
+    schema_version: str = "1.0"
     tool_call_id: str = ""
     status: ToolStatus = ToolStatus.succeeded
     structured_output: dict[str, Any] = field(default_factory=dict)
@@ -288,6 +384,33 @@ class ToolResult:
     started_at: str = ""
     completed_at: str = ""
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "tool_call_id": self.tool_call_id,
+            "status": self.status.value,
+            "structured_output": self.structured_output,
+            "output_ref": self.output_ref,
+            "error": self.error,
+            "side_effect_receipt": self.side_effect_receipt,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ToolResult:
+        return cls(
+            schema_version=data.get("schema_version", "1.0"),
+            tool_call_id=data.get("tool_call_id", ""),
+            status=ToolStatus(data.get("status", "succeeded")),
+            structured_output=data.get("structured_output", {}),
+            output_ref=data.get("output_ref"),
+            error=data.get("error"),
+            side_effect_receipt=data.get("side_effect_receipt"),
+            started_at=data.get("started_at", ""),
+            completed_at=data.get("completed_at", ""),
+        )
+
 
 # ─── CommandEnvelope ───
 
@@ -295,6 +418,7 @@ class ToolResult:
 @dataclass
 class CommandEnvelope:
     """命令契约信封。"""
+    schema_version: str = "1.0"
     command_id: str = ""
     command_type: str = ""
     aggregate_type: str = ""
@@ -309,6 +433,40 @@ class CommandEnvelope:
     def __post_init__(self) -> None:
         if not self.command_id:
             self.command_id = uuid.uuid4().hex
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "command_id": self.command_id,
+            "command_type": self.command_type,
+            "aggregate_type": self.aggregate_type,
+            "aggregate_id": self.aggregate_id,
+            "expected_version": self.expected_version,
+            "payload": self.payload,
+            "idempotency_key": self.idempotency_key,
+            "principal_id": self.principal_id,
+            "trace_context": self.trace_context.to_dict() if self.trace_context else None,
+            "metadata": self.metadata,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CommandEnvelope:
+        return cls(
+            schema_version=data.get("schema_version", "1.0"),
+            command_id=data.get("command_id", ""),
+            command_type=data.get("command_type", ""),
+            aggregate_type=data.get("aggregate_type", ""),
+            aggregate_id=data.get("aggregate_id", ""),
+            expected_version=data.get("expected_version"),
+            payload=data.get("payload", {}),
+            idempotency_key=data.get("idempotency_key", ""),
+            principal_id=data.get("principal_id", ""),
+            trace_context=(
+                TraceContext.from_dict(data["trace_context"])
+                if data.get("trace_context") else None
+            ),
+            metadata=data.get("metadata", {}),
+        )
 
 
 # ─── EventEnvelope ───
@@ -339,3 +497,47 @@ class EventEnvelope:
             self.event_id = uuid.uuid4().hex
         if not self.occurred_at:
             self.occurred_at = datetime.now(UTC).isoformat()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "event_id": self.event_id,
+            "event_type": self.event_type,
+            "source": self.source,
+            "aggregate_type": self.aggregate_type,
+            "aggregate_id": self.aggregate_id,
+            "aggregate_version": self.aggregate_version,
+            "occurred_at": self.occurred_at,
+            "ingested_at": self.ingested_at,
+            "payload_ref": self.payload_ref,
+            "content_hash": self.content_hash,
+            "trust_label": self.trust_label,
+            "origin": self.origin,
+            "correlation_id": self.correlation_id,
+            "causation_id": self.causation_id,
+            "trace_context": self.trace_context.to_dict() if self.trace_context else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> EventEnvelope:
+        return cls(
+            schema_version=data.get("schema_version", "1.0"),
+            event_id=data.get("event_id", ""),
+            event_type=data.get("event_type", ""),
+            source=data.get("source", ""),
+            aggregate_type=data.get("aggregate_type", ""),
+            aggregate_id=data.get("aggregate_id", ""),
+            aggregate_version=data.get("aggregate_version", 1),
+            occurred_at=data.get("occurred_at", ""),
+            ingested_at=data.get("ingested_at"),
+            payload_ref=data.get("payload_ref"),
+            content_hash=data.get("content_hash", ""),
+            trust_label=data.get("trust_label", "unverified"),
+            origin=data.get("origin", "system"),
+            correlation_id=data.get("correlation_id", ""),
+            causation_id=data.get("causation_id", ""),
+            trace_context=(
+                TraceContext.from_dict(data["trace_context"])
+                if data.get("trace_context") else None
+            ),
+        )
