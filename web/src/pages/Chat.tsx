@@ -174,6 +174,10 @@ export default function ChatPage() {
   const statusLabel =
     status === "open" ? "已连接" : status === "connecting" ? "连接中…" : "已断开";
 
+  // 删除中 + 已隐藏的 conversation 列表（必须先于 shownConvs 声明）
+  const [deletingConv, setDeletingConv] = useState<string | null>(null);
+  const [hiddenConvs, setHiddenConvs] = useState<Set<string>>(() => new Set());
+
   const backendConvs = convs.data?.items ?? [];
   const shownConvs: ConvItem[] = [
     ...backendConvs,
@@ -184,9 +188,6 @@ export default function ChatPage() {
   const activeTitle =
     titlesRef.current[conversationId] ??
     conversationId.replace(/^web:/, "").slice(0, 12);
-
-  const [deletingConv, setDeletingConv] = useState<string | null>(null);
-  const [hiddenConvs, setHiddenConvs] = useState<Set<string>>(() => new Set());
   // 用 ref 持有 reload 避免 useCallback 因 convs 引用变化而重建
   const convsRef = useRef(convs);
   convsRef.current = convs;
