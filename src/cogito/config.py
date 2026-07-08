@@ -510,10 +510,99 @@ class MCPServerEntry:
     toolset: str = "mcp"
 
 
+# ── Proactive 配置 ───────────────────────────────────────────────────────────
+
+KNOWN_QUIET_HOURS_FIELDS = frozenset({"enabled", "start", "end", "timezone"})
+PROACTIVE_QUIET_HOURS_FIELDS = KNOWN_QUIET_HOURS_FIELDS
+
+KNOWN_PROACTIVE_FIELDS = frozenset({
+    "enabled", "dry_run", "default_principal_id",
+    "minimum_relevance", "minimum_novelty",
+    "same_topic_cooldown_minutes",
+    "max_pushes_per_hour", "max_pushes_per_day",
+    "digest_max_delay_minutes", "candidate_ttl_hours",
+    "quiet_hours",
+})
+
+
+@dataclass
+class ProactiveQuietHours:
+    """Quiet Hours 子配置。"""
+    enabled: bool = True
+    start: str = "23:00"
+    end: str = "08:00"
+    timezone: str = "Asia/Shanghai"
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> ProactiveQuietHours:
+        _check_unknown(raw, PROACTIVE_QUIET_HOURS_FIELDS, "proactive.quiet_hours")
+        return cls(
+            enabled=bool(raw.get("enabled", True)),
+            start=str(raw.get("start", "23:00")),
+            end=str(raw.get("end", "08:00")),
+            timezone=str(raw.get("timezone", "Asia/Shanghai")),
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"ProactiveQuietHours(enabled={self.enabled}, {self.start!r}-"
+            f"{self.end!r}, tz={self.timezone!r})"
+        )
+
+
+@dataclass
+class ProactiveConfig:
+    """主动推送配置：观察线、预算、阈值、冷却、安静时段。
+
+    默认 dry_run=True + enabled=False：用户必须显式翻转才会进入真实发送。
+    """
+    enabled: bool = False
+    dry_run: bool = True
+    default_principal_id: str = "owner"
+    minimum_relevance: float = 0.55
+    minimum_novelty: float = 0.60
+    same_topic_cooldown_minutes: int = 360
+    max_pushes_per_hour: int = 3
+    max_pushes_per_day: int = 10
+    digest_max_delay_minutes: int = 360
+    candidate_ttl_hours: int = 48
+    quiet_hours: ProactiveQuietHours = field(default_factory=ProactiveQuietHours)
+
+    def __repr__(self) -> str:
+        return (
+            f"ProactiveConfig(enabled={self.enabled}, dry_run={self.dry_run}, "
+            f"principal={self.default_principal_id!r}, "
+            f"budget=({self.max_pushes_per_hour}/h,{self.max_pushes_per_day}/d), "
+            f"quiet_hours={self.quiet_hours!r})"
+        )
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> ProactiveConfig:
+        _check_unknown(raw, KNOWN_PROACTIVE_FIELDS, "proactive")
+        quiet = ProactiveQuietHours()  # default
+        qh_raw = raw.get("quiet_hours")
+        if isinstance(qh_raw, dict):
+            quiet = ProactiveQuietHours._from_raw(qh_raw)
+        return cls(
+            enabled=bool(raw.get("enabled", False)),
+            dry_run=bool(raw.get("dry_run", True)),
+            default_principal_id=str(raw.get("default_principal_id", "owner")),
+            minimum_relevance=float(raw.get("minimum_relevance", 0.55)),
+            minimum_novelty=float(raw.get("minimum_novelty", 0.60)),
+            same_topic_cooldown_minutes=int(raw.get("same_topic_cooldown_minutes", 360)),
+            max_pushes_per_hour=int(raw.get("max_pushes_per_hour", 3)),
+            max_pushes_per_day=int(raw.get("max_pushes_per_day", 10)),
+            digest_max_delay_minutes=int(raw.get("digest_max_delay_minutes", 360)),
+            candidate_ttl_hours=int(raw.get("candidate_ttl_hours", 48)),
+            quiet_hours=quiet,
+        )
+
+
 @dataclass
 class CapabilityConfig:
-    """Capability 配置（MCP servers 等）。"""
+    """Capability 配置（MCP servers + proactive 等）。"""
     mcp_servers: list[MCPServerEntry] = field(default_factory=list)
+    proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
 
     @classmethod
     def _from_raw(cls, raw: dict[str, Any]) -> CapabilityConfig:
@@ -529,7 +618,9 @@ class CapabilityConfig:
                 enabled=bool(cfg.get("enabled", True)),
                 toolset=str(cfg.get("toolset", "mcp")),
             ))
-        return cls(mcp_servers=servers)
+        proactive_raw = raw.get("proactive")
+        proactive = ProactiveConfig._from_raw(proactive_raw) if isinstance(proactive_raw, dict) else ProactiveConfig()
+        return cls(mcp_servers=servers, proactive=proactive)
 
 
 # =============================================================================
@@ -794,7 +885,11 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
         agent_raw = resolved.get("agent", {})
         agent = AgentConfig._from_raw(agent_raw)
 
-        capability_raw = resolved.get("capability", {})
+        capability_raw = dict(resolved.get("capability", {}))
+        # 顶层 [proactive] 节向后兼容（等同于 [capability.proactive]）
+        top_level_proactive = resolved.get("proactive")
+        if isinstance(top_level_proactive, dict) and "proactive" not in capability_raw:
+            capability_raw["proactive"] = top_level_proactive
         capability = CapabilityConfig._from_raw(capability_raw)
 
         embedding_raw = resolved.get("embedding", {})

@@ -105,6 +105,28 @@ recovery_grace_period_seconds = 30
 # enabled = true
 # toolset = "mcp"
 
+# ── Proactive 主动推送（Plan 06；默认关闭 + dry-run）──
+# 启用方法：enabled=true + dry_run=false（首次建议仅 dry-run 观察 would_send）。
+# threshold/budget/quiet_hours 都走这里——无需代码改动。
+#
+# [proactive]
+# enabled = false                # 主开关；false=完全不创建 evaluate Task
+# dry_run = true                 # 创建 decision 但不创建真实 Delivery
+# default_principal_id = "owner"
+# minimum_relevance = 0.55
+# minimum_novelty = 0.60
+# same_topic_cooldown_minutes = 360
+# max_pushes_per_hour = 3
+# max_pushes_per_day = 10
+# digest_max_delay_minutes = 360
+# candidate_ttl_hours = 48
+#
+# [proactive.quiet_hours]
+# enabled = true
+# start = "23:00"
+# end = "08:00"
+# timezone = "Asia/Shanghai"
+
 # ── Embedding（Phase 4；默认关闭）──
 # [embedding]
 # enabled = false

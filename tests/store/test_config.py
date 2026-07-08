@@ -132,3 +132,72 @@ class TestSaveDefault:
             # 现在包含注释示例，让用户知道在哪填写 API Key
             assert "api_key" in content.lower()
             assert "sk-your-key" in content
+
+
+class TestProactiveConfig:
+    """[proactive] 节的严格校验 + 默认值。"""
+
+    def test_proactive_defaults(self):
+        """无 [proactive] 节时 ProactiveConfig 取安全默认值：disabled + dry_run。"""
+        c = Config.load("/nonexistent/path/config.toml")
+        assert c.capability.proactive.enabled is False
+        assert c.capability.proactive.dry_run is True
+        assert c.capability.proactive.default_principal_id == "owner"
+        assert c.capability.proactive.quiet_hours.enabled is True
+
+    def test_proactive_parses_custom(self):
+        """自定义 [proactive] 节正确解析字段值。"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False,
+                                         encoding="utf-8") as f:
+            f.write(
+                '[proactive]\n'
+                'enabled = true\n'
+                'dry_run = false\n'
+                'minimum_relevance = 0.7\n'
+                'max_pushes_per_day = 20\n'
+                'quiet_hours.enabled = false\n'
+                'quiet_hours.start = "22:00"\n'
+            )
+            tmp = f.name
+        try:
+            c = Config.load(tmp)
+            assert c.capability.proactive.enabled is True
+            assert c.capability.proactive.dry_run is False
+            assert c.capability.proactive.minimum_relevance == 0.7
+            assert c.capability.proactive.max_pushes_per_day == 20
+            assert c.capability.proactive.quiet_hours.enabled is False
+            assert c.capability.proactive.quiet_hours.start == "22:00"
+        finally:
+            os.unlink(tmp)
+
+    def test_proactive_unknown_field_raises(self):
+        """[proactive] 节未知字段报错并列出字段名。"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False,
+                                         encoding="utf-8") as f:
+            f.write('[proactive]\nexperimental_abc = true\n')
+            tmp = f.name
+        try:
+            with pytest.raises(ConfigError, match=r"unknown fields: experimental_abc"):
+                Config.load(tmp)
+        finally:
+            os.unlink(tmp)
+
+    def test_proactive_quiet_hours_unknown_field_raises(self):
+        """[proactive.quiet_hours] 节未知字段报错。"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False,
+                                         encoding="utf-8") as f:
+            f.write('[proactive.quiet_hours]\noffset_minutes = 5\n')
+            tmp = f.name
+        try:
+            with pytest.raises(ConfigError, match=r"unknown fields: offset_minutes"):
+                Config.load(tmp)
+        finally:
+            os.unlink(tmp)
+
+    def test_proactive_repr_default_values(self):
+        """repr 不泄露任何 secret（proactive 仅断言默认 dry_run 在 repr 内）。"""
+        c = Config()
+        # repr(Config) 不含 capability（刻意精简）；改为显式 repr proactive
+        r = repr(c.capability.proactive)
+        assert "dry_run=True" in r
+        assert "enabled=False" in r
