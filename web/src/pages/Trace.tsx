@@ -1,10 +1,17 @@
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { api, type SessionTrace, type TurnTrace, type RunAttemptDetail, type ModelCall } from "../api";
-import { Empty, ErrorBox, Loading, MockBanner, PageTitle, Section, StatusPill, useAsync } from "../components";
+import {
+  api,
+  type SessionTrace,
+  type TurnTrace,
+  type RunAttemptDetail,
+  type ModelCall,
+  type TraceMessage,
+} from "../api";
+import { Empty, ErrorBox, Loading, PageTitle, Section, StatusPill, useAsync } from "../components";
 import { isUsingMock } from "../api";
 
-// ── 时间格式化（毫秒 epoch / ISO 字符串兼容） ──────────────────
+// ── 时间格式化 ────────────────────────────────────────────────
 
 function fmtTime(v: unknown): string {
   if (v == null) return "-";
@@ -17,14 +24,16 @@ function fmtTime(v: unknown): string {
   }
 }
 
-function fmtDuration(start: unknown, end: unknown): string {
-  if (typeof start !== "number" || typeof end !== "number") return "-";
-  const ms = end - start;
+function fmtMs(ms: number | null | undefined): string {
+  if (ms == null) return "-";
   if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(2)}s`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(2)}s`;
+  const m = Math.floor(ms / 60_000);
+  const s = Math.round((ms % 60_000) / 1000);
+  return s === 0 ? `${m}m` : `${m}m ${s}s`;
 }
 
-// ── 会话列表 ──────────────────────────────────────────────────
+// ── 会话列表（按用户最新提问命名） ────────────────────────────
 
 function SessionList({ onPick }: { onPick: (id: string) => void }) {
   const state = useAsync(() => api.sessions(), []);
@@ -41,18 +50,18 @@ function SessionList({ onPick }: { onPick: (id: string) => void }) {
           <button
             key={id}
             onClick={() => onPick(id)}
-            className="flex w-full items-center justify-between rounded-xl border border-borderc bg-surface-2 p-3 text-sm transition hover:border-primary/40 hover:bg-primary/5"
+            className="flex w-full items-center justify-between rounded-xl border border-borderc bg-surface-2 p-4 text-left transition hover:border-primary/40 hover:bg-primary/5"
           >
-            <div className="min-w-0 text-left">
+            <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <StatusPill status={active ? "running" : String(s.status)} />
-                <span className="font-mono text-xs text-ink">{id.slice(0, 12)}</span>
+                <span className="truncate font-medium text-ink">{String(s.name ?? id.slice(0, 12))}</span>
               </div>
-              <div className="mt-1 truncate text-[11px] text-muted">
-                conv: {String(s.conversation_id ?? "-")}
+              <div className="mt-1 truncate font-mono text-[11px] text-muted">
+                {id.slice(0, 12)} · conv {String(s.conversation_id ?? "-").slice(0, 16)}
               </div>
             </div>
-            <div className="text-right text-[11px] text-muted">
+            <div className="ml-4 shrink-0 text-right text-[11px] text-muted">
               <div>{Number(s.turn_count ?? 0)} turns</div>
               <div>{fmtTime(s.last_turn_at ?? s.created_at)}</div>
             </div>
@@ -63,7 +72,38 @@ function SessionList({ onPick }: { onPick: (id: string) => void }) {
   );
 }
 
-// ── 单个 ModelCall 明细 ──────────────────────────────────────
+// ── 单条用户消息 ──────────────────────────────────────────────
+
+function MessageRow({ m }: { m: TraceMessage }) {
+  const isUser = m.role === "user";
+  const sinceLabel = m.since_prev_ms == null ? "" : `＋${fmtMs(m.since_prev_ms)}`;
+  return (
+    <div className={`flex animate-float-in ${isUser ? "justify-end" : "justify-start"}`}>
+      <div
+        className={`max-w-[78%] rounded-2xl px-3.5 py-2.5 text-sm shadow-warm ${
+          isUser
+            ? "rounded-br-md bg-primary text-white"
+            : "rounded-bl-md bg-surface-2 text-ink"
+        }`}
+      >
+        <div className="mb-0.5 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wide opacity-70">
+          {m.role}
+          <span className="font-normal normal-case opacity-60">{fmtTime(m.created_at)}</span>
+        </div>
+        <div className="whitespace-pre-wrap break-words text-[13px]">
+          {m.preview || m.text || "·"}
+        </div>
+        {sinceLabel && (
+          <div className={`mt-1 text-right text-[10px] ${isUser ? "opacity-80" : "text-muted"}`}>
+            耗时 {sinceLabel}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── ModelCall 明细 ────────────────────────────────────────────
 
 function ModelCallRow({ mc }: { mc: ModelCall }) {
   const tone = mc.status === "success" ? "ok" : mc.status === "error" ? "danger" : "info";
@@ -86,30 +126,30 @@ function ModelCallRow({ mc }: { mc: ModelCall }) {
 
 // ── Attempt 展开条 ────────────────────────────────────────────
 
-function AttemptRow({ a, expanded, onToggle }: { a: RunAttemptDetail; expanded: boolean; onToggle: () => void }) {
-  const okAttempts = ["succeeded", "completed", "success"];
-  const tone = okAttempts.includes(a.status) ? "ok" : a.status === "failed" ? "danger" : "info";
+function AttemptRow({ a }: { a: RunAttemptDetail }) {
+  const [open, setOpen] = useState(false);
   return (
     <div className="rounded-xl border border-borderc bg-surface-2">
       <button
-        onClick={onToggle}
+        onClick={() => setOpen((v) => !v)}
         className="flex w-full items-center justify-between px-3 py-2 text-left text-xs"
       >
         <div className="flex items-center gap-2">
           <StatusPill status={a.status} />
-          <span className="font-mono text-ink">#{a.attempt_no}</span>
+          <span className="font-mono text-ink">attempt #{a.attempt_no}</span>
           {a.worker_id && <span className="text-muted">· {a.worker_id}</span>}
+          {a.duration_ms != null && <span className="text-muted">· {fmtMs(a.duration_ms)}</span>}
         </div>
         <div className="flex items-center gap-3 text-[11px] text-muted">
           {a.started_at && <span>{fmtTime(a.started_at)}</span>}
-          <span>{a.model_calls.length} 次模型调用</span>
-          <span className="text-primary">{expanded ? "收起 ▴" : "展开 ▾"}</span>
+          <span>{a.model_calls.length} 次调用</span>
+          <span className="text-primary">{open ? "收起 ▴" : "展开 ▾"}</span>
         </div>
       </button>
-      {expanded && (
+      {open && (
         <div className="space-y-1.5 border-t border-borderc px-3 py-2">
           {a.model_calls.length === 0 ? (
-            <div className="px-2 py-3 text-center text-[11px] text-muted">本轮无模型调用记录</div>
+            <div className="px-2 py-3 text-center text-[11px] text-muted">本轮无模型调用</div>
           ) : (
             a.model_calls.map((mc) => <ModelCallRow key={mc.model_call_id} mc={mc} />)
           )}
@@ -132,9 +172,6 @@ function TurnRow({ t, defaultOpen }: { t: TurnTrace; defaultOpen: boolean }) {
     (n, a) => n + a.model_calls.reduce((m, c) => m + (c.output_tokens || 0), 0),
     0,
   );
-  const [expandedAttempt, setExpandedAttempt] = useState<string | null>(
-    t.attempts.length === 1 ? t.attempts[0].attempt_id : null,
-  );
   return (
     <div className="rounded-xl border border-borderc bg-surface">
       <button
@@ -144,6 +181,9 @@ function TurnRow({ t, defaultOpen }: { t: TurnTrace; defaultOpen: boolean }) {
         <div className="flex items-center gap-2.5">
           <StatusPill status={t.status} />
           <span className="font-mono text-xs text-ink">{t.turn_id.slice(0, 12)}</span>
+          {t.duration_ms != null && (
+            <span className="pill bg-accent/20 text-primary-strong">{fmtMs(t.duration_ms)}</span>
+          )}
         </div>
         <div className="flex items-center gap-3 text-[11px] text-muted">
           <span>{fmtTime(t.created_at)}</span>
@@ -155,16 +195,9 @@ function TurnRow({ t, defaultOpen }: { t: TurnTrace; defaultOpen: boolean }) {
       {open && (
         <div className="space-y-2 border-t border-borderc px-4 py-3">
           {t.attempts.length === 0 ? (
-            <div className="px-2 py-3 text-center text-[11px] text-muted">无执行尝试记录</div>
+            <div className="px-2 py-3 text-center text-[11px] text-muted">无执行记录</div>
           ) : (
-            t.attempts.map((a) => (
-              <AttemptRow
-                key={a.attempt_id}
-                a={a}
-                expanded={expandedAttempt === a.attempt_id}
-                onToggle={() => setExpandedAttempt((cur) => (cur === a.attempt_id ? null : a.attempt_id))}
-              />
-            ))
+            t.attempts.map((a) => <AttemptRow key={a.attempt_id} a={a} />)
           )}
         </div>
       )}
@@ -172,12 +205,15 @@ function TurnRow({ t, defaultOpen }: { t: TurnTrace; defaultOpen: boolean }) {
   );
 }
 
-// ── Trace 主体 ────────────────────────────────────────────────
+// ── Trace 详情主体 ────────────────────────────────────────────
 
 function TraceView({ trace }: { trace: SessionTrace }) {
   const s = trace.session;
   const summary = trace.summary;
   const turns = trace.turns;
+  const messages = trace.messages ?? [];
+  const sessionName =
+    (s.name as string | undefined) || String(s.session_id).slice(0, 12);
   return (
     <div className="space-y-5">
       <Link to=".." className="btn-ghost">
@@ -185,21 +221,25 @@ function TraceView({ trace }: { trace: SessionTrace }) {
       </Link>
 
       <Section
-        title={`会话 #${String(s.session_id).slice(0, 12)}`}
+        title={sessionName}
         subtitle={`状态 ${String(s.status)} · 创建于 ${fmtTime(s.created_at)} · conv ${String(s.conversation_id ?? "-").slice(0, 18)}`}
       >
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
           <div className="rounded-xl bg-surface-2 p-3">
             <div className="text-[11px] text-muted">Turns</div>
             <div className="text-xl font-extrabold text-primary">{summary.turn_count}</div>
           </div>
           <div className="rounded-xl bg-surface-2 p-3">
+            <div className="text-[11px] text-muted">消息</div>
+            <div className="text-xl font-extrabold text-accent">{summary.message_count}</div>
+          </div>
+          <div className="rounded-xl bg-surface-2 p-3">
             <div className="text-[11px] text-muted">模型调用</div>
-            <div className="text-xl font-extrabold text-accent">{summary.model_call_count}</div>
+            <div className="text-xl font-extrabold text-terracotta">{summary.model_call_count}</div>
           </div>
           <div className="rounded-xl bg-surface-2 p-3">
             <div className="text-[11px] text-muted">输入 Token</div>
-            <div className="text-xl font-extrabold text-terracotta">{summary.total_input_tokens.toLocaleString()}</div>
+            <div className="text-xl font-extrabold text-ok">{summary.total_input_tokens.toLocaleString()}</div>
           </div>
           <div className="rounded-xl bg-surface-2 p-3">
             <div className="text-[11px] text-muted">输出 Token</div>
@@ -208,7 +248,19 @@ function TraceView({ trace }: { trace: SessionTrace }) {
         </div>
       </Section>
 
-      <Section title="运行轨迹 (Turns 时间线)" subtitle="每条 Turn 含多次执行尝试 (Attempt) 及其模型调用 (ModelCall)">
+      <Section title="会话消息时间线" subtitle="用户提问 → Agent 回复，标注每轮耗时">
+        {messages.length === 0 ? (
+          <Empty msg="该会话暂无消息记录" />
+        ) : (
+          <div className="max-h-[60vh] space-y-3 overflow-y-auto pr-1">
+            {messages.map((m) => (
+              <MessageRow key={m.message_id} m={m} />
+            ))}
+          </div>
+        )}
+      </Section>
+
+      <Section title="执行链路 (Turns → Attempts → ModelCalls)" subtitle="每条 Turn 的执行层级与耗时">
         {turns.length === 0 ? (
           <Empty msg="该会话暂无 Turn 记录" />
         ) : (
@@ -229,7 +281,10 @@ export default function TracePage() {
   const sessionId = id ?? pick;
 
   const trace = useAsync(
-    () => (sessionId ? api.sessionTrace(sessionId) as unknown as Promise<SessionTrace> : Promise.resolve(null)),
+    () =>
+      sessionId
+        ? (api.sessionTrace(sessionId) as unknown as Promise<SessionTrace>)
+        : Promise.resolve(null),
     [sessionId],
   );
 
@@ -237,7 +292,6 @@ export default function TracePage() {
     return (
       <div className="space-y-5">
         <PageTitle title="Trace · 会话运行轨迹" desc="选择一个会话，查看其完整 Agent 运行 trace" />
-        {!isUsingMock() && <MockBanner />}
         <SessionList onPick={setPick} />
       </div>
     );

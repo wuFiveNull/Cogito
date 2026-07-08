@@ -91,10 +91,27 @@ const MEMORY = [
 ];
 
 const SESSIONS = [
-  { session_id: "s_a1b2c3d4", conversation_id: "web:8f3a2c11aa01", status: "active", created_at: "2026-07-08T08:40:22Z", turn_count: 3, last_turn_at: "2026-07-08T09:12:04Z" },
-  { session_id: "s_99ff00aa", conversation_id: "qq:99ff00aa", status: "active", created_at: "2026-07-08T08:31:00Z", turn_count: 2, last_turn_at: "2026-07-08T08:58:33Z" },
-  { session_id: "s_77aa11bb", conversation_id: "web:7b91ee02bb02", status: "expired", created_at: "2026-07-07T22:14:09Z", turn_count: 1, last_turn_at: "2026-07-08T08:40:22Z" },
+  { session_id: "s_a1b2c3d4", conversation_id: "web:8f3a2c11aa01", status: "active", created_at: "2026-07-08T08:40:22Z", turn_count: 3, last_turn_at: "2026-07-08T09:12:04Z", name: "帮我总结一下本周的进度", latest_user_at: "2026-07-08T09:12:04Z" },
+  { session_id: "s_99ff00aa", conversation_id: "qq:99ff00aa", status: "active", created_at: "2026-07-08T08:31:00Z", turn_count: 2, last_turn_at: "2026-07-08T08:58:33Z", name: "今天天气怎么样", latest_user_at: "2026-07-08T08:58:33Z" },
+  { session_id: "s_77aa11bb", conversation_id: "web:7b91ee02bb02", status: "expired", created_at: "2026-07-07T22:14:09Z", turn_count: 1, last_turn_at: "2026-07-08T08:40:22Z", name: "写一个 Python 爬虫", latest_user_at: "2026-07-08T08:40:22Z" },
 ];
+
+const MOCK_MESSAGES: Record<string, Array<Record<string, unknown>>> = {
+  s_a1b2c3d4: [
+    { message_id: "m1", role: "user", text: "帮我总结一下本周的进度", preview: "帮我总结一下本周的进度", created_at: "2026-07-08T09:12:04Z", receive_sequence: 1, since_prev_ms: 0 },
+    { message_id: "m2", role: "assistant", text: "本周共完成 12 个 turn，3 个任务在跑，长期记忆新增 14 条。需要我展开哪一块？", preview: "本周共完成 12 个 turn...", created_at: "2026-07-08T09:12:09Z", receive_sequence: 2, since_prev_ms: 5200 },
+    { message_id: "m3", role: "user", text: "展开任务那块", preview: "展开任务那块", created_at: "2026-07-08T09:12:14Z", receive_sequence: 3, since_prev_ms: 4800 },
+    { message_id: "m4", role: "assistant", text: "3 个任务在跑：tk_aa02(web_fetch)、tk_aa03(reminder)...", preview: "3 个任务在跑...", created_at: "2026-07-08T09:12:21Z", receive_sequence: 4, since_prev_ms: 6900 },
+  ],
+  s_99ff00aa: [
+    { message_id: "m1", role: "user", text: "今天天气怎么样", preview: "今天天气怎么样", created_at: "2026-07-08T08:55:09Z", receive_sequence: 1, since_prev_ms: 0 },
+    { message_id: "m2", role: "assistant", text: "今天晴，26-33°C，东南风 2 级。", preview: "今天晴，26-33°C...", created_at: "2026-07-08T08:55:14Z", receive_sequence: 2, since_prev_ms: 5100 },
+  ],
+  s_77aa11bb: [
+    { message_id: "m1", role: "user", text: "写一个 Python 爬虫", preview: "写一个 Python 爬虫", created_at: "2026-07-08T08:40:22Z", receive_sequence: 1, since_prev_ms: 0 },
+    { message_id: "m2", role: "assistant", text: "好的，下面是一个使用 requests + BeautifulSoup 的示例...", preview: "好的，下面是一个使用 requests...", created_at: "2026-07-08T08:40:31Z", receive_sequence: 2, since_prev_ms: 9300 },
+  ],
+};
 
 function buildSessionTrace(sessionId: string) {
   const sess = SESSIONS.find((s) => s.session_id === sessionId) ?? SESSIONS[0];
@@ -104,6 +121,7 @@ function buildSessionTrace(sessionId: string) {
     const attempts = attemptList(1, t.status === "running" ? "running" : "succeeded").map((a) => ({
       ...a,
       attempt_id: `a_${idx}_${a.attempt_no}`,
+      duration_ms: 1200 + idx * 350,
       model_calls: [
         {
           model_call_id: `mc_${idx}_1`,
@@ -124,16 +142,18 @@ function buildSessionTrace(sessionId: string) {
         },
       ],
     }));
-    return { ...t, attempts };
+    return { ...t, attempts, duration_ms: 1200 + idx * 350 };
   });
   return {
     session: sess,
+    messages: MOCK_MESSAGES[sessionId] ?? [],
     turns: turnObjs,
     summary: {
       turn_count: turnObjs.length,
       model_call_count: turnObjs.length,
       total_input_tokens: turnObjs.length * 1820,
       total_output_tokens: turnObjs.length * 430,
+      message_count: (MOCK_MESSAGES[sessionId] ?? []).length,
     },
   };
 }

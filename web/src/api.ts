@@ -122,7 +122,18 @@ export interface RunAttemptDetail {
   checkpoint_ref?: string | null;
   started_at?: string | null;
   finished_at?: string | null;
+  duration_ms?: number | null;
   model_calls: ModelCall[];
+}
+
+export interface TraceMessage {
+  message_id: string;
+  role: "user" | "assistant" | "tool" | "system";
+  text: string;
+  preview?: string;
+  created_at: string;
+  receive_sequence: number;
+  since_prev_ms: number | null;
 }
 
 export interface TurnTrace {
@@ -130,17 +141,20 @@ export interface TurnTrace {
   session_id: string;
   status: string;
   created_at: string;
+  duration_ms?: number | null;
   attempts: RunAttemptDetail[];
 }
 
 export interface SessionTrace {
   session: Record<string, unknown>;
+  messages: TraceMessage[];
   turns: TurnTrace[];
   summary: {
     turn_count: number;
     model_call_count: number;
     total_input_tokens: number;
     total_output_tokens: number;
+    message_count: number;
   };
 }
 

@@ -239,7 +239,11 @@ class QueryService:
     # ── sessions ───────────────────────────────────────────────
 
     def list_sessions(self, limit: int = 100) -> dict[str, Any]:
-        """列出会话，附带 turn 数、最近活跃时间、conversation_id。"""
+        """列出会话，附带 turn 数、最近活跃时间、conversation_id。
+
+        每个 session 用其下最新一条用户提问（user role 消息文本）作为 name，
+        便于在列表中直接识别会话内容。
+        """
         rows = self._conn.execute(
             "SELECT s.session_id, s.conversation_id, s.status, s.created_at, "
             "       COUNT(t.turn_id) AS turn_count, "
@@ -255,11 +259,39 @@ class QueryService:
         for r in rows:
             d = dict(r)
             d["turn_count"] = int(d["turn_count"])
+            # 取该 session 下最新一条用户提问作为会话名称
+            name_row = self._conn.execute(
+                "SELECT cp.inline_data AS text "
+                "FROM messages m "
+                "LEFT JOIN content_parts cp ON cp.message_id = m.message_id "
+                "WHERE m.session_id = ? AND m.role = 'user' "
+                "ORDER BY m.receive_sequence DESC LIMIT 1",
+                (d["session_id"],),
+            ).fetchone()
+            raw_text = (name_row["text"] if name_row else None) or ""
+            # inline_data 可能含多段，取第一段非空文本
+            first_line = raw_text.split("\n")[0].strip() if raw_text else ""
+            d["name"] = first_line[:42] if first_line else d["session_id"][:12]
+            d["latest_user_at"] = None
+            if name_row:
+                ts_row = self._conn.execute(
+                    "SELECT created_at FROM messages "
+                    "WHERE session_id=? AND role='user' "
+                    "ORDER BY receive_sequence DESC LIMIT 1",
+                    (d["session_id"],),
+                ).fetchone()
+                d["latest_user_at"] = ts_row["created_at"] if ts_row else None
             items.append(d)
         return {"items": items, "total": len(items)}
 
     def get_session_trace(self, session_id: str) -> dict[str, Any] | None:
-        """聚合一个 session 的完整运行 trace：session 基本信息 + 所有 turns（含 attempts 与 model_calls）。
+        """聚合一个 session 的完整运行 trace。
+
+        包含：
+        - session 基本信息
+        - messages：该 session 下的完整会话消息（user/assistant/tool），按 receive_sequence，
+          附带每条消息的耗时（距上一条消息的时间差，单位 ms）
+        - turns：session 下每条 turn 的执行链路（RunAttempt → ModelCall），并标注 turn 整体耗时
 
         trace_id == turn_id（runtime/loop.py），因此一个 session 的 trace 即其全部 turn 的
         RunAttempt 与 ModelCall 的时间线聚合。
@@ -269,6 +301,37 @@ class QueryService:
         ).fetchone()
         if session is None:
             return None
+        session_dict = dict(session)
+
+        # ── 消息序列（含耗时） ─────────────────────────────────
+        msg_rows = self._conn.execute(
+            "SELECT m.message_id, m.role, m.created_at, m.receive_sequence, "
+            "       cp.inline_data AS text "
+            "FROM messages m "
+            "LEFT JOIN content_parts cp ON cp.message_id = m.message_id "
+            "WHERE m.session_id = ? "
+            "ORDER BY m.receive_sequence ASC",
+            (session_id,),
+        ).fetchall()
+        messages: list[dict[str, Any]] = []
+        prev_ts_ms: int | None = None
+        for r in msg_rows:
+            d = dict(r)
+            text = d.get("text") or ""
+            # inline_data 可能含多段（换行分隔）; 取拼接后的首行预览
+            first_line = text.split("\n")[0].strip() if text else ""
+            d["text"] = text
+            d["preview"] = first_line[:80]
+            # 计算距上一条消息的耗时（ms）
+            cur_ts_ms = self._parse_ts_ms(d.get("created_at"))
+            if cur_ts_ms is not None:
+                d["since_prev_ms"] = (cur_ts_ms - prev_ts_ms) if prev_ts_ms is not None else 0
+                prev_ts_ms = cur_ts_ms
+            else:
+                d["since_prev_ms"] = None
+            messages.append(d)
+
+        # ── turn 执行链路 ───────────────────────────────────────
         turns = self._turn_repo.list_by_session(session_id)
         turns_out: list[dict[str, Any]] = []
         total_model_calls = 0
@@ -276,29 +339,69 @@ class QueryService:
         total_output_tokens = 0
         for turn in turns:
             td = turn.to_dict()
+            turn_start_ms = self._parse_ts_ms(td.get("created_at"))
             attempts = self._turn_repo.list_attempts(turn.turn_id)
             attempts_out: list[dict[str, Any]] = []
+            turn_end_ms = turn_start_ms
             for a in attempts:
                 ad = a.to_dict()
+                a_start_ms = self._parse_ts_ms(ad.get("started_at"))
+                a_end_ms = self._parse_ts_ms(ad.get("finished_at"))
+                ad["duration_ms"] = (
+                    (a_end_ms - a_start_ms) if a_start_ms is not None and a_end_ms is not None else None
+                )
                 model_calls = [mc.to_dict() for mc in self._model_call_repo.find_by_attempt(a.attempt_id)]
                 ad["model_calls"] = model_calls
                 total_model_calls += len(model_calls)
                 for mc in model_calls:
                     total_input_tokens += mc.get("input_tokens", 0) or 0
                     total_output_tokens += mc.get("output_tokens", 0) or 0
+                    mc_start = mc.get("started_at")
+                    mc_end = mc.get("completed_at")
+                    if isinstance(mc_end, int) and (turn_end_ms is None or mc_end > turn_end_ms):
+                        turn_end_ms = mc_end
                 attempts_out.append(ad)
             td["attempts"] = attempts_out
+            # 整条 turn 的耗时（从创建到最后一次模型调用完成）
+            td["duration_ms"] = (
+                (turn_end_ms - turn_start_ms)
+                if turn_start_ms is not None and turn_end_ms is not None and turn_end_ms >= turn_start_ms
+                else None
+            )
             turns_out.append(td)
         return {
-            "session": dict(session),
+            "session": session_dict,
+            "messages": messages,
             "turns": turns_out,
             "summary": {
                 "turn_count": len(turns_out),
                 "model_call_count": total_model_calls,
                 "total_input_tokens": total_input_tokens,
                 "total_output_tokens": total_output_tokens,
+                "message_count": len(messages),
             },
         }
+
+    @staticmethod
+    def _parse_ts_ms(value: object) -> int | None:
+        """把 ISO 字符串或整数毫秒时间解析为毫秒 epoch；解析失败返回 None。"""
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            # 整数毫秒字符串
+            if value.isdigit():
+                return int(value)
+            # ISO 格式
+            from datetime import datetime
+            try:
+                s = value.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(s)
+                return int(dt.timestamp() * 1000)
+            except ValueError:
+                return None
+        return None
 
     # ── plugins (capability mcp servers config 快照) ───────────
 
