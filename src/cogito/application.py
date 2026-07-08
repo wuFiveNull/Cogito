@@ -85,6 +85,9 @@ class RuntimeApplication:
         self._shutdown_event: asyncio.Event | None = None
         self._drain_timeout: float = 10.0
 
+        # 入站唤醒事件：inbound.accept 入队新 Turn 后置位，worker 据此即时唤醒
+        self._wakeup_event: asyncio.Event | None = None
+
     # ── factory ────────────────────────────────────────────────────────────
 
     @classmethod
@@ -141,7 +144,11 @@ class RuntimeApplication:
             provider=provider,
             streaming_enabled=config.agent.streaming_enabled,
         )
-        inbound = InboundService(conn)
+
+        # 唤醒事件：入站新建 Turn 时置位，worker idle 睡眠改为等待该事件，
+        # 消除最长 heartbeat_interval_seconds 的轮询延迟。
+        wakeup_event = asyncio.Event()
+        inbound = InboundService(conn, notify=wakeup_event.set)
 
         app = cls(
             config=config,
@@ -150,6 +157,7 @@ class RuntimeApplication:
             runner=runner,
             inbound=inbound,
         )
+        app._wakeup_event = wakeup_event
         app._recovery_counts = recovery_counts
 
         # 构建 Channel 组件（Manager + Gateway），QQ 等渠道在 run_worker 中启动
@@ -415,18 +423,33 @@ class RuntimeApplication:
 
         try:
             while not self._shutdown_event.is_set():
-                cycle = await self.process_background_once(worker_id)
+                try:
+                    cycle = await self.process_background_once(worker_id)
+                except Exception:
+                    # 单轮失败不应杀死 worker —— 记录后继续，避免后续 Turn 全部静默。
+                    logger.exception("process_background_once failed (worker=%s)", worker_id)
+                    await asyncio.sleep(min(poll_interval, 1.0))
+                    continue
                 if cycle.idle:
                     if run_once:
                         return
+                    # 等待 shutdown 或「新 Turn 入队」唤醒事件；超时则回退轮询。
+                    # 唤醒事件置位后清空，避免 worker 在处理间隙空转。
+                    if self._wakeup_event is not None:
+                        self._wakeup_event.clear()
+                    waiters = [e.wait() for e in (self._shutdown_event, self._wakeup_event) if e is not None]
                     try:
-                        await asyncio.wait_for(
-                            self._shutdown_event.wait(),
+                        await asyncio.wait(
+                            waiters,
                             timeout=poll_interval,
+                            return_when=asyncio.FIRST_COMPLETED,
                         )
-                        return  # woke up from signal
-                    except TimeoutError:
+                    except (TimeoutError, ValueError):
                         pass
+                    if self._wakeup_event is not None and self._wakeup_event.is_set():
+                        self._wakeup_event.clear()
+                    if self._shutdown_event.is_set():
+                        return  # woke up from signal
                 else:
                     logger.debug(
                         "Cycle processed: turn=%d outbox=%d delivery=%d task=%d",

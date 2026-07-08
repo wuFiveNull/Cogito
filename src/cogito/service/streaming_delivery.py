@@ -97,6 +97,7 @@ class StreamingDeliveryController:
     ) -> str | None:
         """执行一次流式投递回合。返回 final_message_id，失败/取消返回 None。"""
         on_delta = on_delta or _noop_on_delta
+        _start_ts = self._clock.now().timestamp()  # 回合起点（turn 被领取后）
 
         if not self._capabilities.supports_edit:
             # 不支持编辑 → 上层应退回非流式路径
@@ -150,6 +151,11 @@ class StreamingDeliveryController:
                     self._delivery_repo.mark_placeholder(
                         delivery_id, attempt_id, platform_message_id,
                     )
+                    _first_token_ms = (now - _start_ts) * 1000
+                    _LOG.info(
+                        "stream first-token latency=%.0fms conversation=%s turn=%s",
+                        _first_token_ms, input_meta.conversation_id, turn.turn_id,
+                    )
                     on_delta(input_meta.conversation_id, full, 0, False)
                 else:
                     # 节流合并：达到间隔且未超最大操作数才发送 edit
@@ -166,6 +172,7 @@ class StreamingDeliveryController:
         except Exception:
             _LOG.exception("StreamingDeliveryController: run_stream 异常，withdraw")
             self._delivery_repo.withdraw(delivery_id, attempt_id, "error")
+            self._push_error(target_json, input_meta, "推理异常，请稍后重试")
             return None
 
         if not finished:
@@ -175,6 +182,11 @@ class StreamingDeliveryController:
                 delivery_id,
             )
             self._delivery_repo.withdraw(delivery_id, attempt_id, "cancelled")
+            # 若占位已创建则撤回占位；否则推一条取消提示
+            if platform_message_id is not None:
+                self._gateway.delete(target_json, platform_message_id, "cancelled")
+            else:
+                self._push_error(target_json, input_meta, "已取消")
             on_delta(input_meta.conversation_id, "", operation_seq, True)
             return None
 
@@ -192,8 +204,30 @@ class StreamingDeliveryController:
         final_message_id = self._finalize(
             delivery_id, platform_message_id, turn, attempt, final_text, input_meta,
         )
+        if final_message_id is None and platform_message_id is not None:
+            # 定稿事务失败（如 Turn 已被其他 worker 完成）→ 撤回占位，避免残留气泡
+            self._gateway.delete(target_json, platform_message_id, "finalize_failed")
+            self._push_error(target_json, input_meta, "定稿失败，请重试")
         on_delta(input_meta.conversation_id, final_text, operation_seq, True)
+        _total_ms = (self._clock.now().timestamp() - _start_ts) * 1000
+        _LOG.info(
+            "stream turn finished: total=%.0fms first-token included, "
+            "conversation=%s turn=%s chars=%d ops=%d",
+            _total_ms, input_meta.conversation_id, turn.turn_id,
+            len(final_text), operation_seq,
+        )
         return final_message_id
+
+    def _push_error(self, target_json: str, input_meta: StreamInputMeta, message: str) -> None:
+        """向浏览器推送一条错误/状态提示消息（经网关同步入队）。"""
+        try:
+            result = self._gateway.send_text(target_json, message)
+            _LOG.info(
+                "push_error: %s (status=%s) conversation=%s",
+                message, result.status, input_meta.conversation_id,
+            )
+        except Exception:
+            _LOG.warning("push_error failed: %s", message, exc_info=True)
 
     def _build_target(
         self,

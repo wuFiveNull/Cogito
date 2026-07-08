@@ -160,6 +160,9 @@ class AgentRunner:
             system_policy=self._system_prompt,
         )
 
+        # ── 2a. 预读输入消息元数据（流式 / 非流式都可能用来向浏览器回推） ──
+        stream_meta = self._read_stream_input_meta(turn)
+
         # ── 2b. 流式投递分支（按渠道能力 / 配置决定是否走占位→编辑→定稿）──
         if self._should_stream(turn):
             return await self._run_streaming_turn(turn, attempt, worker_id, context)
@@ -172,6 +175,7 @@ class AgentRunner:
         except Exception as e:
             _LOGGER.exception("AgentLoop.run() threw: %s", e)
             self._fail_safe(turn, attempt)
+            self._push_reply_error(stream_meta, "推理异常，请稍后重试")
             return RunOutcome.failed
 
         # ── 检查 Loop 是否成功 ──
@@ -187,6 +191,7 @@ class AgentRunner:
             if loop_result.error_message:
                 _LOGGER.error("Loop failed: %s", loop_result.error_message)
             self._fail_safe(turn, attempt)
+            self._push_reply_error(stream_meta, "推理失败，请稍后重试")
             return RunOutcome.failed
 
         # ── 4. 完成前检查取消和 Lease ──
@@ -207,7 +212,12 @@ class AgentRunner:
                 reply_text=loop_result.text,
             )
             if message_id is None:
+                self._push_reply_error(stream_meta, "处理失败，请重试")
                 return RunOutcome.failed
+
+            # 非流式路径：reply 只写入了 DB，需主动推一条 send 事件到浏览器队列，
+            # 否则依赖 WS 的 chat 页面永远看不到回复（占位气泡也不会出现）。
+            self._push_reply_event(stream_meta, loop_result.text)
 
             # Turn 成功后异步触发记忆提取（不阻塞当前回复）
             if self._memory_extractor and context.principal_id:
@@ -219,6 +229,7 @@ class AgentRunner:
         except Exception as e:
             _LOGGER.exception("complete_reply failed: %s", e)
             self._fail_safe(turn, attempt)
+            self._push_reply_error(stream_meta, "处理失败，请稍后重试")
             return RunOutcome.failed
 
     async def _run_loop_with_heartbeat(
@@ -426,6 +437,55 @@ class AgentRunner:
             )
         except Exception:
             pass
+
+    # ── 非流式路径：通过网关把回复/错误推入浏览器 WS 队列 ────────────────
+
+    def _build_target_json(self, meta: Any) -> str | None:
+        """把 StreamInputMeta 序列化成 gateway 可路由的 target_snapshot JSON。"""
+        if meta is None:
+            return None
+        reply_route = meta.reply_route or {}
+        adapter_id = (
+            reply_route.get("channel_instance_id")
+            or reply_route.get("adapter_id")
+            or ""
+        )
+        conversation_id = reply_route.get("platform_conversation_id") or meta.conversation_id
+        return json.dumps({
+            "adapter_id": adapter_id,
+            "target_endpoint_ref": reply_route.get("target_endpoint_ref") or adapter_id,
+            "conversation_id": conversation_id,
+            "reply_route": reply_route,
+        })
+
+    def _push_reply_event(self, meta: Any, text: str) -> None:
+        """非流式 Turn 完成后：把最终回复文本作为 send 事件推入浏览器队列。"""
+        if not text or self.channel_gateway is None:
+            return
+        target_json = self._build_target_json(meta)
+        if target_json is None:
+            return
+        try:
+            result = self.channel_gateway.send_text(target_json, text)
+            if result.status != "sent":
+                _LOGGER.warning(
+                    "non-stream reply push returned status=%s conversation=%s",
+                    result.status, meta.conversation_id if meta else "?",
+                )
+        except Exception:
+            _LOGGER.warning("non-stream reply push failed", exc_info=True)
+
+    def _push_reply_error(self, meta: Any, message: str) -> None:
+        """把错误提示推入浏览器队列，让用户至少看到反馈而非无声无息。"""
+        if not message or self.channel_gateway is None:
+            return
+        target_json = self._build_target_json(meta)
+        if target_json is None:
+            return
+        try:
+            self.channel_gateway.send_text(target_json, f"(错误) {message}")
+        except Exception:
+            _LOGGER.warning("reply error push failed", exc_info=True)
 
     async def _run_extraction(self, context, turn) -> None:
         """Turn 完成后异步运行记忆提取。失败不阻塞后续流程。"""
