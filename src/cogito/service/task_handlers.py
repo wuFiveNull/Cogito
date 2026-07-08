@@ -92,6 +92,11 @@ class TaskHandlerContext:
     memory_service_factory: Callable[[sqlite3.Connection], Any] | None = None
     workspace_path: str = ""
     logger: logging.Logger = field(default_factory=lambda: _LOGGER)
+    # MCP 生命周期（由 application.run_worker 注入；连接器 poll 用）
+    mcp_manager: Any = None  # MCPServerManager
+    # 当前 Task 元信息（IngestionBatch 日志需要）
+    _task_id: str = ""
+    _attempt_id: str = ""
 
 
 # Handler 签名：async 函数，接收 Task 和上下文，返回结果文本
@@ -125,6 +130,7 @@ def _build_registry(ctx: TaskHandlerContext) -> TaskHandlerRegistry:
     registry.register("memory.consolidate", _handle_memory_consolidate)
     registry.register("summary.generate", _handle_summary_generate)
     registry.register("connector.poll", _handle_connector_poll)
+    registry.register("mcp_connector.poll", _handle_mcp_connector_poll)
     return registry
 
 
@@ -133,6 +139,20 @@ def _handle_connector_poll(task: Task, ctx: TaskHandlerContext) -> str:
     from cogito.service.connector_handler import handle_connector_poll
 
     return handle_connector_poll(task, ctx)
+
+
+def _handle_mcp_connector_poll(task: Task, ctx: TaskHandlerContext) -> str:
+    """mcp_connector.poll 的薄封装 —— 委托给 mcp_connector_handler 模块。
+
+    增加 task 元信息注入 (task_id / attempt_id) 供 IngestionBatch 日志使用。
+    """
+    from cogito.service.mcp_connector_handler import handle_mcp_connector_poll
+
+    # 注入 task meta，handler 用 getattr 默认值兼容缺失情形
+    ctx._task_id = task.task_id
+    ctx._attempt_id = getattr(task, "task_id", "")
+
+    return handle_mcp_connector_poll(task, ctx)
 
 
 # ── memory.extract （B5: 替换 stub 为真实流程）──

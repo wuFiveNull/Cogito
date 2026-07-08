@@ -39,12 +39,19 @@ class TestMigration:
 
     def test_idempotent_migration(self, empty_db):
         """Running migrate twice should be safe."""
-        from cogito.store.migration import migrate
+        from pathlib import Path
+        from cogito.store.migration import migrate, MIGRATIONS_DIR
         migrate(empty_db)
         migrate(empty_db)  # second run
         rows = empty_db.execute("SELECT version FROM _schema_version ORDER BY version").fetchall()
         versions = [r[0] for r in rows]
-        assert versions == list(range(1, 22))  # all migration versions (1..21) applied exactly once
+        # 动态计算预期版本列表，避免每加一个 migration 就改一次断言
+        migration_files = sorted(
+            p for p in Path(MIGRATIONS_DIR).glob("*.sql")
+            if p.name[:4].isdigit()
+        )
+        expected = sorted(int(p.name[:4]) for p in migration_files)
+        assert versions == expected  # all migration versions applied exactly once
 
     def test_unique_constraints(self, in_memory_db):
         """Test a sample unique constraint."""
@@ -127,7 +134,13 @@ class TestMigrationUpgrade:
                 "SELECT version FROM _schema_version"
             ).fetchall()
         }
-        assert versions == set(range(1, 22))  # 1..21
+        from pathlib import Path
+        from cogito.store.migration import MIGRATIONS_DIR
+        expected = {
+            int(p.name[:4]) for p in Path(MIGRATIONS_DIR).glob("*.sql")
+            if p.name[:4].isdigit()
+        }
+        assert versions == expected
 
     def test_fresh_install_versions(self, empty_db):
         """Fresh migration from scratch applies all versions."""
@@ -139,7 +152,13 @@ class TestMigrationUpgrade:
                 "SELECT version FROM _schema_version"
             ).fetchall()
         }
-        assert versions == set(range(1, 22))  # 1..21
+        from pathlib import Path
+        from cogito.store.migration import MIGRATIONS_DIR
+        expected = {
+            int(p.name[:4]) for p in Path(MIGRATIONS_DIR).glob("*.sql")
+            if p.name[:4].isdigit()
+        }
+        assert versions == expected
 
     def test_turn_schema_v2(self, in_memory_db):
         """Verify v2 schema constraints."""

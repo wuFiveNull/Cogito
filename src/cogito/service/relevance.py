@@ -23,8 +23,13 @@ def score_relevance(
     summary: str,
     published_at: datetime | None,
     interests: list[str],
+    *,
+    now: datetime | None = None,
 ) -> float:
-    """计算条目的相关性得分（0.0~1.0）。"""
+    """计算条目的相关性得分（0.0~1.0）。
+
+    `now` 可注入以消除测试对真实时间的依赖（M0 基线修复）。
+    """
     text = f"{title} {summary}".lower()
 
     # 关键词匹配
@@ -39,10 +44,10 @@ def score_relevance(
     # 时效性衰减
     recency_score = 0.5  # 无发布时间时中性
     if published_at is not None:
-        now = datetime.now(UTC)
+        t_now = now if now is not None else datetime.now(UTC)
         if published_at.tzinfo is None:
             published_at = published_at.replace(tzinfo=UTC)
-        age_h = max(0.0, (now - published_at).total_seconds() / 3600.0)
+        age_h = max(0.0, (t_now - published_at).total_seconds() / 3600.0)
         recency_score = math.exp(-age_h / RECENCY_HALF_LIFE_H)  # 1.0 → 0.0
 
     return 0.6 * keyword_score + 0.4 * recency_score

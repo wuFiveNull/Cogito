@@ -28,6 +28,7 @@ from cogito.model.provider import ModelProvider
 from cogito.service.agent_runner import RunOutcome, build_agent_runner
 from cogito.service.inbound_service import InboundService
 from cogito.service.recovery_service import RecoveryService
+from cogito.service.task_handlers import TaskHandlerContext, _build_registry
 from cogito.store.connection import get_connection
 from cogito.store.migration import migrate
 
@@ -378,13 +379,27 @@ class RuntimeApplication:
     ) -> None:
         """Worker 循环：公平轮询 Turn → Outbox → Delivery → Task。"""
         from cogito.service.task_dispatcher import TaskDispatcher
-        from cogito.service.task_handlers import TaskHandlerContext, _build_registry
         from cogito.service.task_worker import TaskWorker
 
         self._shutdown_event = shutdown_event or asyncio.Event()
 
         # 创建 workers（Outbox / Delivery / Task）
         self.build_workers()
+
+        # 构建 MCP Manager（生命周期由 Runtime 拥有 —— M2）
+        from cogito.capability.mcp.manager import MCPServerManager
+        from cogito.service.agent_runner import start_mcp_servers
+
+        mcp_registry = self._runner.registry if self._runner else None
+        self.mcp_manager = None
+        if mcp_registry is not None:
+            self.mcp_manager = MCPServerManager(mcp_registry)
+            try:
+                self.mcp_manager = await start_mcp_servers(self.config, mcp_registry)
+            except Exception:
+                logger.warning("MCP Manager startup partially failed (non-fatal)",
+                               exc_info=True)
+                self.mcp_manager = MCPServerManager(mcp_registry)
 
         # 创建 Scheduler
         from cogito.service.scheduler import Scheduler
@@ -397,6 +412,7 @@ class RuntimeApplication:
         task_handler_ctx = TaskHandlerContext(
             connection_factory=lambda p=self.config.resolve_db_path(): get_connection(p),
             workspace_path=self.config.workspace_path,
+            mcp_manager=self.mcp_manager,
         )
         task_registry = _build_registry(task_handler_ctx)
         task_dispatcher = TaskDispatcher(self.conn)
@@ -509,10 +525,23 @@ class RuntimeApplication:
     # ── lifecycle ──────────────────────────────────────────────────────────
 
     def close(self) -> None:
-        """幂等关闭：关闭 SQLite 连接；多次调用不抛异常。"""
+        """幂等关闭：关闭 SQLite 连接 + MCP Manager；多次调用不抛异常。"""
         if self._closed:
             return
         self._closed = True
+        try:
+            if self.mcp_manager is not None:
+                import asyncio
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop and loop.is_running():
+                    loop.create_task(self.mcp_manager.stop_all())
+                else:
+                    asyncio.run(self.mcp_manager.stop_all())
+        except Exception as e:
+            logger.warning("Error stopping MCP manager: %s", e)
         try:
             self.conn.close()
             logger.info("Application closed.")

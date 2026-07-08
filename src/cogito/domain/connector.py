@@ -17,6 +17,7 @@ class ConnectorType(StrEnum):
     rss = "rss"
     atom = "atom"
     json = "json"
+    mcp = "mcp"
 
 
 class ConnectorStatus(StrEnum):

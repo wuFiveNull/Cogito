@@ -28,7 +28,8 @@ class TestScoreRelevance:
         assert fresh > old
 
     def test_no_interests_neutral_keyword(self):
-        s = score_relevance("anything", "text", self.NOW, [])
+        # 显式注入 now=self.NOW，消除 test 对真实当前时间的依赖（M0 基线修复）
+        s = score_relevance("anything", "text", self.NOW, [], now=self.NOW)
         # 无兴趣时 keyword_score=0.3, recency=1.0 → 0.6*0.3+0.4*1.0 = 0.58
         assert 0.5 < s < 0.7
 

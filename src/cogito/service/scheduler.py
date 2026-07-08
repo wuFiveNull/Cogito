@@ -30,6 +30,7 @@ from cogito.store.time_utils import epoch_ms
 _LOGGER = logging.getLogger(__name__)
 
 POLL_TASK_TYPE = "connector.poll"
+MCP_POLL_TASK_TYPE = "mcp_connector.poll"
 
 
 class Scheduler:
@@ -43,6 +44,17 @@ class Scheduler:
         self._schedule_repo = ScheduleRepository(conn)
         self._fire_repo = ScheduledFireRepository(conn)
         self._task_repo = TaskRepository(conn)
+
+    @staticmethod
+    def task_type_for_connector(connector_type: str) -> str:
+        """根据 Connector 类型分派 Task 类型。
+
+        RSS/Atom/JSON → connector.poll（现有 RSS 流程）
+        MCP → mcp_connector.poll（本计划新增）
+        """
+        if connector_type == "mcp":
+            return MCP_POLL_TASK_TYPE
+        return POLL_TASK_TYPE
 
     def _now(self) -> datetime:
         return self._clock.now()
@@ -96,9 +108,19 @@ class Scheduler:
             # 计算下次触发时间
             nxt = next_fire_at(schedule.expression, schedule.timezone, now)
 
-            # 创建 connector.poll Task
+            # 选择 task_type：按 connector_type 分派（mcp vs rss/json/atom）
+            task_type = POLL_TASK_TYPE
+            if schedule.connector_id:
+                row = self._conn.execute(
+                    "SELECT connector_type FROM connectors WHERE connector_id=?",
+                    (schedule.connector_id,),
+                ).fetchone()
+                if row is not None:
+                    task_type = self.task_type_for_connector(row[0])
+
+            # 创建 connector.poll / mcp_connector.poll Task
             task = Task(
-                task_type=POLL_TASK_TYPE,
+                task_type=task_type,
                 payload_ref=schedule.connector_id or "",
                 status=TaskStatus.queued,
                 priority=40,

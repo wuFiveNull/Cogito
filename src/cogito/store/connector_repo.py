@@ -187,13 +187,13 @@ class ConnectorItemRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
-    def insert(self, item: ConnectorItem) -> None:
+    def insert(self, item: ConnectorItem, source_metadata: str = "") -> None:
         self._conn.execute(
             "INSERT INTO connector_items "
             "(item_id, connector_id, raw_item_id, source_item_id, title, link, "
             " summary, author, published_at, content_hash, relevance, "
-            " summary_text, status, created_at) "
-            "VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?)",
+            " summary_text, status, created_at, source_metadata_json) "
+            "VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?)",
             (
                 item.item_id,
                 item.connector_id,
@@ -209,6 +209,7 @@ class ConnectorItemRepository:
                 item.summary_text,
                 item.status.value,
                 epoch_ms(item.created_at),
+                source_metadata or "",
             ),
         )
 
