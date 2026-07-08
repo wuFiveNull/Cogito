@@ -23,6 +23,7 @@ from cogito.interaction_web.models import (
     CancelTurnPayload,
     CommandResponse,
     DeleteSessionPayload,
+    DeleteSessionsByConvPayload,
     DisablePluginPayload,
     MemoryConfirmPayload,
     MemoryDeletePayload,
@@ -204,6 +205,38 @@ def delete_session(payload: DeleteSessionPayload, deps: CommandDeps = Depends(ge
         changes={"deleted_at": deleted_at},
     )
     return _ok("delete-session", payload.session_id, deleted_at=deleted_at)
+
+
+# ── delete-sessions-by-conversation (按 conversation_id 批量软删除) ──
+
+
+@router.post("/delete-sessions-by-conversation", response_model=CommandResponse)
+def delete_sessions_by_conversation(
+    payload: DeleteSessionsByConvPayload, deps: CommandDeps = Depends(get_command_deps),
+) -> CommandResponse:
+    """按 conversation_id 软删除其下所有活跃 session。"""
+    from datetime import UTC, datetime
+    rows = deps.conn.execute(
+        "SELECT session_id FROM sessions WHERE conversation_id=? AND deleted_at IS NULL",
+        (payload.conversation_id,),
+    ).fetchall()
+    if not rows:
+        return _fail("delete-sessions-by-conversation", payload.conversation_id, "no active sessions")
+    deleted_at = datetime.now(UTC).isoformat()
+    ids = [r["session_id"] for r in rows]
+    placeholders = ",".join("?" * len(ids))
+    deps.conn.execute(
+        f"UPDATE sessions SET deleted_at=? WHERE session_id IN ({placeholders})",
+        [deleted_at, *ids],
+    )
+    deps.conn.commit()
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="delete-sessions-by-conversation",
+        target_type="conversation", target_id=payload.conversation_id,
+        changes={"deleted_at": deleted_at, "session_count": len(ids), "session_ids": ids},
+    )
+    return _ok("delete-sessions-by-conversation", payload.conversation_id,
+               deleted_count=len(ids), deleted_at=deleted_at)
 
 
 # ── pause-connector ───────────────────────────────────────────

@@ -106,3 +106,21 @@ def test_delete_session_missing(client):
     r = client.post("/api/commands/delete-session", json={"session_id": "ghost"})
     assert r.status_code == 200
     assert r.json()["status"] == "failed"
+
+
+def test_delete_sessions_by_conversation(client):
+    """按 conversation_id 批量软删除其下所有 session。"""
+    # conversation c1 下有 session s1
+    r = client.post("/api/commands/delete-sessions-by-conversation", json={"conversation_id": "c1"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["details"]["deleted_count"] >= 1
+
+    # 再次删除应该 failed（没有活跃 session 了）
+    r2 = client.post("/api/commands/delete-sessions-by-conversation", json={"conversation_id": "c1"})
+    assert r2.json()["status"] == "failed"
+
+    # query 不返回
+    r3 = client.post("/api/commands/delete-session", json={"session_id": "s1"})
+    assert r3.json()["status"] == "failed"  # 已软删除

@@ -63,6 +63,10 @@ class DeleteSessionPayload(BaseModel):
     session_id: str
 
 
+class DeleteSessionsByConvPayload(BaseModel):
+    conversation_id: str
+
+
 # ── Query 响应（必要时） ───────────────────────────────────────
 
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type ChatMessage } from "../api";
 import { createChatClient, type WsServerMessage } from "../chatClient";
 import { useAsync } from "../components";
@@ -185,6 +185,34 @@ export default function ChatPage() {
     titlesRef.current[conversationId] ??
     conversationId.replace(/^web:/, "").slice(0, 12);
 
+  const [deletingConv, setDeletingConv] = useState<string | null>(null);
+  const handleDeleteConv = useCallback(
+    async (e: React.MouseEvent, convId: string) => {
+      e.stopPropagation();
+      if (!window.confirm(`确认删除会话「${convId}」？\n数据将从页面隐藏，但数据库中保留。`)) {
+        return;
+      }
+      setDeletingConv(convId);
+      try {
+        await api.deleteSessionsByConv(convId);
+        // 如果删的是当前会话，自动新建一个
+        if (convId === conversationId) {
+          const id = genConversationId();
+          localStorage.setItem(LS_KEY, id);
+          setLocalConvIds((prev) => [...prev, id]);
+          setMessages([]);
+          setConversationId(id);
+        }
+        convs.reload();
+      } catch {
+        // 静默
+      } finally {
+        setDeletingConv(null);
+      }
+    },
+    [conversationId, convs],
+  );
+
   return (
     <div className="flex h-[calc(100vh-7rem)] gap-4">
       {/* 会话侧栏 */}
@@ -207,22 +235,35 @@ export default function ChatPage() {
             const isActive = cid === conversationId;
             const title = titlesRef.current[cid] ?? cid.replace(/^web:/, "").slice(0, 14);
             const type = c.conversation_type ?? (cid.startsWith("web:") ? "web" : "—");
+            const isDeleting = deletingConv === cid;
             return (
-              <button
+              <div
                 key={cid}
-                onClick={() => selectConv(cid)}
-                className={`w-full rounded-xl px-3 py-2 text-left transition ${
+                className={`group flex w-full items-center gap-1 rounded-xl px-2 py-1.5 transition ${
                   isActive
                     ? "bg-primary/12 ring-1 ring-primary/30"
                     : "hover:bg-surface-2"
                 }`}
               >
-                <div className="truncate text-xs font-medium text-ink">{title}</div>
-                <div className="mt-0.5 flex items-center justify-between text-[10px] text-muted">
-                  <span className="pill bg-surface-2 text-muted">{type}</span>
-                  {"message_count" in c && typeof c.message_count === "number" && <span>{c.message_count} 条</span>}
-                </div>
-              </button>
+                <button
+                  onClick={() => selectConv(cid)}
+                  className="min-w-0 flex-1 px-1 py-0.5 text-left"
+                  title={cid}
+                >
+                  <div className="truncate text-xs font-medium text-ink">{title}</div>
+                  <div className="flex items-center gap-1 text-[10px] text-muted">
+                    <span className="pill bg-surface-2 text-muted text-[9px]">{cid}</span>
+                  </div>
+                </button>
+                <button
+                  onClick={(e) => handleDeleteConv(e, cid)}
+                  disabled={isDeleting}
+                  title="删除会话"
+                  className="shrink-0 rounded-md p-1 text-[10px] text-muted opacity-60 transition hover:bg-danger/10 hover:text-danger group-hover:opacity-100 disabled:opacity-40"
+                >
+                  {isDeleting ? "…" : "🗑"}
+                </button>
+              </div>
             );
           })}
         </div>

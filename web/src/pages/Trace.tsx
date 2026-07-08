@@ -73,7 +73,11 @@ function SessionList({ onPick, refreshSignal }: { onPick: (id: string) => void; 
         return (
           <div
             key={id}
-            className="flex w-full items-center justify-between gap-3 rounded-xl border border-borderc bg-surface-2 p-4 transition hover:border-primary/40 hover:bg-primary/5"
+            className={`flex w-full items-center justify-between gap-3 rounded-xl border p-4 transition ${
+              isDeleting
+                ? "border-danger/40 bg-danger/5"
+                : "border-borderc bg-surface-2 hover:border-primary/40 hover:bg-primary/5"
+            }`}
           >
             <button
               onClick={() => onPick(id)}
@@ -83,7 +87,7 @@ function SessionList({ onPick, refreshSignal }: { onPick: (id: string) => void; 
               <div className="min-w-0 flex-1">
                 <div className="truncate font-medium text-ink">{name}</div>
                 <div className="mt-0.5 truncate font-mono text-[11px] text-muted">
-                  {id.slice(0, 12)} · conv {String(s.conversation_id ?? "-").slice(0, 16)}
+                  {String(s.conversation_id ?? "-")}
                 </div>
               </div>
               <div className="shrink-0 text-right text-[11px] text-muted">
@@ -94,20 +98,10 @@ function SessionList({ onPick, refreshSignal }: { onPick: (id: string) => void; 
             <button
               onClick={(e) => handleDelete(e, id, name)}
               disabled={isDeleting}
-              title="删除会话"
-              className="shrink-0 rounded-lg p-1.5 text-muted transition hover:bg-danger/10 hover:text-danger disabled:opacity-40"
+              title="删除会话（软删除，数据库保留）"
+              className="shrink-0 rounded-lg border border-danger/30 bg-danger/10 px-2.5 py-1.5 text-xs font-medium text-danger transition hover:bg-danger/20 disabled:opacity-50"
             >
-              {isDeleting ? (
-                <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
-              ) : (
-                <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M3 6h18" />
-                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-                  <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                  <line x1="10" y1="11" x2="10" y2="17" />
-                  <line x1="14" y1="11" x2="14" y2="17" />
-                </svg>
-              )}
+              {isDeleting ? "删除中…" : "🗑 删除"}
             </button>
           </div>
         );
