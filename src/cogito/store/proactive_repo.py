@@ -9,13 +9,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
 from cogito.store.time_utils import epoch_ms
-
 
 # ── 数据类（frozen 不可变）──────────────────────────────────────────────────
 
@@ -242,8 +240,10 @@ class ProactivePolicyRepository:
 
 
 def _row_to_policy(row: Any) -> ProactivePolicy:
-    qh = _safe_json(row["quiet_hours_json"],
-                    {"enabled": True, "start": "23:00", "end": "08:00", "timezone": "Asia/Shanghai"})
+    qh = _safe_json(
+        row["quiet_hours_json"],
+        {"enabled": True, "start": "23:00", "end": "08:00", "timezone": "Asia/Shanghai"},
+    )
     bc = _safe_json(row["cooldown_json"], {"same_topic_minutes": 360})
     bud = _safe_json(row["budgets_json"], {"max_pushes_per_hour": 3, "max_pushes_per_day": 10})
     return ProactivePolicy(

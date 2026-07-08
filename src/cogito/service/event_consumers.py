@@ -15,13 +15,9 @@ import json
 import logging
 import sqlite3
 import uuid
-from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
 
-from cogito.domain.events import DomainEvent
-from cogito.service.outbox_worker import OutboxLease, OutboxWorker
-from cogito.store.repositories import OutboxRepository
+from cogito.service.outbox_worker import OutboxLease
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -125,7 +121,6 @@ class SourceEventIngestedConsumer(EventConsumer):
         stream_type = "content"  # 默认；未来 enhancement 会看 source type
         title = item["title"]
         summary = item["summary"]
-        content_hash = item["content_hash"]
         policy_version = int(lease.schema_version or "1")
 
         # 幂等键 = principal + stream + sorted(event_ids) + policy_ver

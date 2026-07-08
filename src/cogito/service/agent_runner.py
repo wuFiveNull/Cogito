@@ -24,6 +24,7 @@ from enum import StrEnum
 
 _LOGGER = logging.getLogger("cogito.agent_runner")
 
+from cogito.bench import timing as _bench_timing
 from cogito.capability import CapabilityRegistry
 from cogito.capability.executor import ToolExecutor
 from cogito.config import Config, ModelConfig
@@ -41,7 +42,6 @@ from cogito.service.streaming_delivery import (
     StreamInputMeta,
     StreamPolicy,
 )
-from cogito.bench import timing as _bench_timing
 from cogito.store.model_call_repo import ModelCallRecord, ModelCallRepository
 from cogito.store.time_utils import epoch_ms
 

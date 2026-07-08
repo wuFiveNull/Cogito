@@ -619,8 +619,13 @@ class CapabilityConfig:
                 toolset=str(cfg.get("toolset", "mcp")),
             ))
         proactive_raw = raw.get("proactive")
-        proactive = ProactiveConfig._from_raw(proactive_raw) if isinstance(proactive_raw, dict) else ProactiveConfig()
+        proactive = (
+            ProactiveConfig._from_raw(proactive_raw)
+            if isinstance(proactive_raw, dict)
+            else ProactiveConfig()
+        )
         return cls(mcp_servers=servers, proactive=proactive)
+
 
 
 # =============================================================================

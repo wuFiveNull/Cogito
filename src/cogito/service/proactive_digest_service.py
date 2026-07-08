@@ -16,7 +16,7 @@ import time
 import uuid
 from datetime import UTC, datetime
 
-from cogito.domain.digest import Digest, DigestStatus, DigestItem
+from cogito.domain.digest import Digest, DigestStatus
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,7 +38,6 @@ def assemble_and_render(
     existing = repo.find_by_date_topic(principal_id, digest_date, topic)
 
     # 2. 计算时间窗口
-    from datetime import datetime
     day_start = datetime.strptime(digest_date, "%Y-%m-%d").replace(tzinfo=UTC)
     day_start_ms = int(day_start.timestamp() * 1000)
     day_end_ms = day_start_ms + 86400 * 1000
@@ -156,9 +155,10 @@ def enqueue_digest_publish(
     delay_minutes: int = 360,
 ) -> str:
     """创建 proactive.digest.publish Task，到期时消费 items 进 digest 桶。"""
+    import uuid
+
     from cogito.domain.task import Task, TaskStatus
     from cogito.store.task_repo import TaskRepository
-    import uuid
     payload = f"{principal_id}|{digest_date}|{topic}"
     task = Task(
         task_id=f"task-pdp-{uuid.uuid4().hex[:16]}",

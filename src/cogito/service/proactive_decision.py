@@ -30,9 +30,7 @@ from cogito.store.proactive_repo import (
     ProactiveDecision,
     ProactiveDecisionRepository,
     ProactivePolicy,
-    ProactivePolicyRepository,
 )
-from cogito.service.energy_model import compute_energy
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -201,10 +199,11 @@ def enqueue_send_later(
     delay_minutes 来自 policy.digest_max_delay_minutes（默认 360 分=6h）。
     返回 request_id。
     """
+    import uuid
+
+    from cogito.domain.task import Task, TaskStatus
     from cogito.service.proactive_delivery_service import create_scheduled_request
     from cogito.store.task_repo import TaskRepository
-    from cogito.domain.task import Task, TaskStatus
-    import uuid
     scheduled_at_ms = now_ms() + int(delay_minutes) * 60 * 1000
     request_id = create_scheduled_request(
         conn,

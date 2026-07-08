@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any
 
 from cogito.model.contracts import (
     ContentPart,

@@ -19,7 +19,6 @@ from typing import Any
 
 from cogito.domain.delivery import Delivery, DeliveryStatus
 from cogito.service.delivery_service import DeliveryRequest, DeliveryService
-from cogito.store.proactive_repo import ProactiveDecision, ProactivePolicyRepository
 from cogito.store.repositories import DeliveryRepository
 
 _LOGGER = logging.getLogger(__name__)

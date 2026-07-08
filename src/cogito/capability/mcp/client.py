@@ -12,7 +12,6 @@ from typing import Any
 
 from cogito.capability.mcp import MCPServerConfig
 
-
 # ── 结构化结果 ────────────────────────────────────────────────────────────────
 
 
@@ -73,7 +72,6 @@ class MCPClient:
         兼容新版 mcp SDK：stdio_client 已经是 @asynccontextmanager，
         必须用 async with 获取 (read, write)，不能用旧式 await。
         """
-        import mcp.types as types
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
 

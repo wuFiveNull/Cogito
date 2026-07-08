@@ -196,9 +196,8 @@ def _handle_proactive_delivery_ready(task: Task, ctx: TaskHandlerContext) -> str
 
 def _deliver_scheduled_request_sync(conn, request_id, delivery_service) -> str:
     from cogito.service.proactive_delivery_service import (
-        prepare_delivery_from_request,
         mark_request_converted,
-        mark_request_expired,
+        prepare_delivery_from_request,
     )
     info = prepare_delivery_from_request(conn, request_id)
     if info is None:
@@ -215,6 +214,7 @@ def _deliver_scheduled_request_sync(conn, request_id, delivery_service) -> str:
         return "converted (dry_run)"
 
     import asyncio
+
     from cogito.service.delivery_service import DeliveryRequest
 
     async def _do():
@@ -288,6 +288,7 @@ def _publish_digest_sync(conn, principal_id, digest_date, topic, delivery_servic
         return f"sent (dry_run): {digest_id}"
 
     import asyncio
+
     from cogito.service.delivery_service import DeliveryRequest
 
     async def _do():
@@ -660,16 +661,16 @@ def _handle_proactive_evaluate(task: Task, ctx: TaskHandlerContext) -> str:
 
 
 def _evaluate_candidates_sync(conn, ctx) -> str:
+    import time
+
+    from cogito.service.energy_model import compute_energy
+    from cogito.service.proactive_decision import decide, enqueue_send_later, persist_decision
+    from cogito.service.proactive_digest_service import enqueue_digest_publish
     from cogito.store.proactive_repo import (
         ProactiveCandidateRepository,
         ProactiveDecisionRepository,
         ProactivePolicyRepository,
     )
-    from cogito.service.proactive_decision import decide, persist_decision
-    from cogito.service.proactive_decision import enqueue_send_later
-    from cogito.service.proactive_digest_service import enqueue_digest_publish
-    from cogito.service.energy_model import compute_energy
-    import time
 
     config = ctx.proactive_config
     if config is None:
@@ -706,7 +707,7 @@ def _evaluate_candidates_sync(conn, ctx) -> str:
             ),
         )
         # 持久化 decision
-        d = persist_decision(
+        persist_decision(
             conn, c, policy, action, trace,
             energy_value=energy_value,
         )
@@ -716,6 +717,7 @@ def _evaluate_candidates_sync(conn, ctx) -> str:
                 pass  # dry_run: 仅记录
             else:
                 import asyncio
+
                 from cogito.service.delivery_service import DeliveryRequest
                 async def _do():
                     return await ctx.delivery_service.enqueue(DeliveryRequest(

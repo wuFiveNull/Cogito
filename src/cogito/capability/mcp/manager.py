@@ -6,7 +6,7 @@ import threading
 from typing import Any
 
 from cogito.capability.mcp import MCPServerConfig
-from cogito.capability.mcp.client import MCPClient, MCPCallResult
+from cogito.capability.mcp.client import MCPCallResult, MCPClient
 from cogito.capability.models import ToolContext, ToolDef
 from cogito.capability.registry import CapabilityRegistry
 
@@ -18,10 +18,10 @@ class _MCPRunner:
     或 TaskWorker 主 loop）不兼容的问题。所有 MCP IO 在单个持久 loop 串行。
     """
 
-    _instance: "_MCPRunner | None" = None
+    _instance: _MCPRunner | None = None
     _lock = threading.Lock()
 
-    def __new__(cls) -> "_MCPRunner":
+    def __new__(cls) -> _MCPRunner:
         with cls._lock:
             if cls._instance is None:
                 inst = super().__new__(cls)

@@ -372,7 +372,6 @@ class QueryService:
                 for mc in model_calls:
                     total_input_tokens += mc.get("input_tokens", 0) or 0
                     total_output_tokens += mc.get("output_tokens", 0) or 0
-                    mc_start = mc.get("started_at")
                     mc_end = mc.get("completed_at")
                     if isinstance(mc_end, int) and (turn_end_ms is None or mc_end > turn_end_ms):
                         turn_end_ms = mc_end

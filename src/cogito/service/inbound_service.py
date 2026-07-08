@@ -17,6 +17,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from cogito.bench import timing as _bench_timing
 from cogito.contracts.envelope import ChannelEnvelope
 from cogito.domain.conversation import (
     ContextPartitionPolicy,
@@ -35,7 +36,6 @@ from cogito.domain.principal import (
     PrincipalStatus,
     PrincipalType,
 )
-from cogito.bench import timing as _bench_timing
 from cogito.domain.state_machines import validate_transition_turn
 from cogito.domain.turn import Turn, TurnStatus
 from cogito.service.unit_of_work import UnitOfWork
@@ -57,7 +57,7 @@ class InboundService:
     不创建 RunAttempt。
     """
 
-    def __init__(self, conn: sqlite3.Connection, notify: "callable | None" = None) -> None:
+    def __init__(self, conn: sqlite3.Connection, notify: callable | None = None) -> None:
         self._conn = conn
         # 入站新建 Turn 后的唤醒回调（用于即时唤醒后台 worker，消除轮询睡眠）
         self._notify = notify

@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -20,14 +21,11 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from cogito.capability.mcp import MCPServerConfig
 from cogito.capability.mcp.client import (
-    MCPClient,
     MCPCallResult,
     MCPResultError,
 )
 from cogito.domain.connector import (
-    Connector,
     ConnectorCursor,
     ConnectorItem,
     ConnectorRawItem,
@@ -181,7 +179,8 @@ def _poll_mcp_connector(
     next_cursor: str | None = _resolve_cursor(cursor, mapping)
 
     try:
-        while pages < mapping.max_pages_per_poll and len(fetched_items) < mapping.max_items_per_poll:
+        while (pages < mapping.max_pages_per_poll
+               and len(fetched_items) < mapping.max_items_per_poll):
             args = dict(mapping.arguments_template)
             if next_cursor:
                 args["cursor"] = next_cursor
@@ -275,7 +274,7 @@ def _poll_mcp_connector(
             model_router = getattr(ctx, "model_router", None)
             if model_router is not None and (title or body):
                 try:
-                    summary_text = asyncio_run_safe(summarize_item(title, body, model_router))
+                    summary_text = asyncio.run(summarize_item(title, body, model_router))
                 except Exception:
                     _LOGGER.warning("summary failed for %s", external_id)
                 try:
@@ -306,7 +305,9 @@ def _poll_mcp_connector(
                 status=item_status,
                 topic=topic[:200] if topic else "general",
             )
-            ConnectorItemRepository(conn).insert(connector_item, source_metadata=_build_source_metadata(item))
+            ConnectorItemRepository(conn).insert(
+                connector_item, source_metadata=_build_source_metadata(item)
+            )
 
             # 6. 发 Outbox —— SourceEventIngested
             event = DomainEvent(
@@ -352,7 +353,10 @@ def _poll_mcp_connector(
         "mcp_connector.poll: %s pages=%d fetched=%d new=%d dup=%d q=%d",
         connector_id, pages, len(fetched_items), new_count, dup_count, quarantined_count,
     )
-    return f"pages={pages} fetched={len(fetched_items)} new={new_count} dup={dup_count} q={quarantined_count}"
+    return (
+        f"pages={pages} fetched={len(fetched_items)} "
+        f"new={new_count} dup={dup_count} q={quarantined_count}"
+    )
 
 
 # ── 辅助 ─────────────────────────────────────────────────────────────────────

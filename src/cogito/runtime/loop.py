@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -279,14 +279,10 @@ class AgentLoop:
 
         复刻 run() 的迭代/终止/工具调用逻辑：
         - 工具迭代、修复迭代等非最终段：用 generate（非流式），不 yield 文本；
-        - 最终自然语言段：先用 generate 判定为 _final/_refusal，再用
-          generate_stream 流式产出 token（stream 请求的 history 不含判定
-          响应，避免模型见到自身答案）；yield 每个 delta (文本, False)，
-          末帧后 yield ("", True) 表示本段结束。
+        - 最终自然语言段：复用上方判定调用已返回的全文，切片后逐步 yield
+          （整段仅一次模型调用，消除「先判定再流式」的第二次前向），
+          yield 每个 delta (文本, False)，末帧后 yield ("", True) 表示本段结束。
         若 cancel_flag() 在 yield 前为真 → 关闭生成器（控制器负责 withdraw）。
-
-        注：最终段会触发两次模型调用（一次判定、一次流式）。首版为简单
-        正确而接受此开销；后续可在 Provider 层用单次流式 + 累积分类消除。
         """
         state = LoopState(
             turn_id=context.turn_id,
@@ -332,23 +328,15 @@ class AgentLoop:
             result = self._classify_response(response)
 
             if result in ("_final", "_refusal"):
-                # 最终自然语言段 → 流式产出（注意：stream 请求 history 不含判定响应）
-                stream_request = self._build_request(state, context, stream=True)
+                # 最终自然语言段：复用上方判定调用已返回的全文，切片后逐步 yield，
+                # 避免「先判定再流式」的第二次模型调用（整段仅一次模型调用）。
+                final_text = response.text
                 accumulated: list[str] = []
-                try:
-                    async for chunk in self._router.generate_stream(
-                        stream_request, model_role=model_role,
-                    ):
-                        if cancel_flag and cancel_flag():
-                            return
-                        delta = chunk.text
-                        if delta:
-                            accumulated.append(delta)
-                            yield (delta, False)
-                    final_text = "".join(accumulated)
-                except RouterError:
-                    final_text = response.text  # 流式失败 → 退回判定文本
-
+                for piece in self._chunk_for_stream(final_text):
+                    if cancel_flag and cancel_flag():
+                        return
+                    accumulated.append(piece)
+                    yield (piece, False)
                 state.messages.append({"role": "assistant", "content": final_text})
                 yield ("", True)  # 段结束哨兵
                 return
@@ -550,6 +538,36 @@ class AgentLoop:
             })
         except Exception:
             pass  # checkpoint 失败不阻断主流程
+
+    @staticmethod
+    def _chunk_for_stream(text: str) -> Iterator[str]:
+        """将最终段全文切成小块逐步 yield，模拟 token 流式输出。
+
+        注意：run_stream 在最终段复用判定调用的全文（只发了一次模型请求），
+        这里只是把已拿到的结果按字符切片逐步吐出，制造流式视觉效果；
+        真正的首字延迟来自上方的单次模型调用，而非此处切分。
+        中文按 3 字一块、英文按词整体切分，兼顾两种语料。
+        """
+        import re
+
+        cjk = "\u4e00-\u9fff\u3000-\u303f\uff00-\uffef"
+        # 每个 CJK 字符单独成 token；连续 ASCII 词整体；空白段整体；其他单字符
+        tokens = re.findall(rf"[{cjk}]|[A-Za-z0-9_]+|\s+|[^\s]", text)
+        buf: list[str] = []
+        cjk_count = 0
+        for tok in tokens:
+            buf.append(tok)
+            if len(tok) == 1 and cjk[0] <= tok <= cjk[-1]:
+                cjk_count += 1
+            else:
+                cjk_count = 0
+            latin_word = len(tok) > 1 and not (cjk[0] <= tok[0] <= cjk[-1])
+            if cjk_count >= 3 or latin_word:
+                yield "".join(buf)
+                buf = []
+                cjk_count = 0
+        if buf:
+            yield "".join(buf)
 
     def _classify_response(self, response: ModelResponse) -> str:
         """分类 ModelResponse 类型。"""
