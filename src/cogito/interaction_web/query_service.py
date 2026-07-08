@@ -167,8 +167,18 @@ class QueryService:
         return {"items": [{"channel_type": r["channel_type"], "count": r["n"]} for r in rows]}
 
     def list_conversations(self, limit: int = 100) -> dict[str, Any]:
+        """列出会话，过滤掉所有 session 均已软删除的 conversation。
+
+        规则：若 conversation 下存在至少一个未删除的 session，则保留；
+        若 conversation 下无任何活跃 session（全部已删除或原本无 session），则排除。
+        """
         rows = self._conn.execute(
-            "SELECT * FROM conversations ORDER BY conversation_id DESC LIMIT ?",
+            "SELECT c.* FROM conversations c "
+            "WHERE EXISTS ("
+            "  SELECT 1 FROM sessions s "
+            "  WHERE s.conversation_id = c.conversation_id AND s.deleted_at IS NULL"
+            ") "
+            "ORDER BY c.conversation_id DESC LIMIT ?",
             (limit,),
         ).fetchall()
         return {"items": [dict(r) for r in rows]}

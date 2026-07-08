@@ -47,11 +47,15 @@ function SessionList({ onPick, refreshSignal }: { onPick: (id: string) => void; 
       }
       setDeleting(sessionId);
       try {
-        await api.deleteSession(sessionId);
+        const resp = await api.deleteSession(sessionId);
+        if (resp.status !== "ok") {
+          window.alert(`删除失败：${resp.message ?? "未知错误"}`);
+          return;
+        }
         // 触发父组件刷新列表
         onPick("__refresh__");
-      } catch {
-        // 静默失败，下次刷新时会看到
+      } catch (err) {
+        window.alert(`删除失败：${err instanceof Error ? err.message : "网络错误"}`);
       } finally {
         setDeleting(null);
       }

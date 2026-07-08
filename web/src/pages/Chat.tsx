@@ -54,6 +54,15 @@ export default function ChatPage() {
     () => api.conversations() as unknown as Promise<{ items: ConvItem[] }>,
     [],
   );
+
+  // 页面从隐藏切回可见时，刷新会话列表（确保 Trace 页删除的同步过来）
+  useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState === "visible") convs.reload();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [convs]);
   const history = useAsync<{ conversation_id: string; items: ChatMessage[] }>(
     () => api.conversationMessages(conversationId),
     [conversationId],
@@ -180,12 +189,13 @@ export default function ChatPage() {
     ...localConvIds
       .filter((id) => !backendConvs.some((c) => c.conversation_id === id))
       .map((id) => ({ conversation_id: id })),
-  ];
+  ].filter((c) => !hiddenConvs.has(c.conversation_id));
   const activeTitle =
     titlesRef.current[conversationId] ??
     conversationId.replace(/^web:/, "").slice(0, 12);
 
   const [deletingConv, setDeletingConv] = useState<string | null>(null);
+  const [hiddenConvs, setHiddenConvs] = useState<Set<string>>(() => new Set());
   const handleDeleteConv = useCallback(
     async (e: React.MouseEvent, convId: string) => {
       e.stopPropagation();
@@ -194,7 +204,13 @@ export default function ChatPage() {
       }
       setDeletingConv(convId);
       try {
-        await api.deleteSessionsByConv(convId);
+        const resp = await api.deleteSessionsByConv(convId);
+        if (resp.status !== "ok") {
+          window.alert(`删除失败：${resp.message ?? "未知错误"}`);
+          return;
+        }
+        // 立即从侧栏隐藏（本地标记 + 刷新后端列表）
+        setHiddenConvs((prev) => new Set(prev).add(convId));
         // 如果删的是当前会话，自动新建一个
         if (convId === conversationId) {
           const id = genConversationId();
@@ -204,8 +220,8 @@ export default function ChatPage() {
           setConversationId(id);
         }
         convs.reload();
-      } catch {
-        // 静默
+      } catch (err) {
+        window.alert(`删除失败：${err instanceof Error ? err.message : "网络错误"}`);
       } finally {
         setDeletingConv(null);
       }
