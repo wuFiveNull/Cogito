@@ -187,6 +187,11 @@ export default function ChatPage() {
 
   const [deletingConv, setDeletingConv] = useState<string | null>(null);
   const [hiddenConvs, setHiddenConvs] = useState<Set<string>>(() => new Set());
+  // 用 ref 持有 reload 避免 useCallback 因 convs 引用变化而重建
+  const convsRef = useRef(convs);
+  convsRef.current = convs;
+  const conversationIdRef = useRef(conversationId);
+  conversationIdRef.current = conversationId;
   const handleDeleteConv = useCallback(
     async (e: React.MouseEvent, convId: string) => {
       e.stopPropagation();
@@ -203,21 +208,22 @@ export default function ChatPage() {
         // 立即从侧栏隐藏（本地标记 + 刷新后端列表）
         setHiddenConvs((prev) => new Set(prev).add(convId));
         // 如果删的是当前会话，自动新建一个
-        if (convId === conversationId) {
+        const curId = conversationIdRef.current;
+        if (convId === curId) {
           const id = genConversationId();
           localStorage.setItem(LS_KEY, id);
           setLocalConvIds((prev) => [...prev, id]);
           setMessages([]);
           setConversationId(id);
         }
-        convs.reload();
+        convsRef.current.reload();
       } catch (err) {
         window.alert(`删除失败：${err instanceof Error ? err.message : "网络错误"}`);
       } finally {
         setDeletingConv(null);
       }
     },
-    [conversationId, convs],
+    [], // 闭包通过 ref 取值，无需依赖 convs / conversationId
   );
 
   return (
