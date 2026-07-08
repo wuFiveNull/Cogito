@@ -126,6 +126,25 @@ def get_conversation_messages(
     return _svc(deps).get_conversation_messages(conversation_id, limit=limit)
 
 
+# ── sessions ──────────────────────────────────────────────────
+
+
+@router.get("/sessions")
+def list_sessions(
+    limit: int = Query(100, ge=1, le=500),
+    deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    return _svc(deps).list_sessions(limit=limit)
+
+
+@router.get("/sessions/{session_id}/trace")
+def get_session_trace(session_id: str, deps: CommandDeps = Depends(get_command_deps)) -> dict:
+    out = _svc(deps).get_session_trace(session_id)
+    if out is None:
+        raise HTTPException(status_code=404, detail=f"session {session_id} not found")
+    return out
+
+
 # ── deliveries / traces / plugins ─────────────────────────────
 
 

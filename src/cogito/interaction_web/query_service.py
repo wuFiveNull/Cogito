@@ -236,6 +236,70 @@ class QueryService:
             "attempts": attempts,
         }
 
+    # ── sessions ───────────────────────────────────────────────
+
+    def list_sessions(self, limit: int = 100) -> dict[str, Any]:
+        """列出会话，附带 turn 数、最近活跃时间、conversation_id。"""
+        rows = self._conn.execute(
+            "SELECT s.session_id, s.conversation_id, s.status, s.created_at, "
+            "       COUNT(t.turn_id) AS turn_count, "
+            "       MAX(t.created_at) AS last_turn_at "
+            "FROM sessions s "
+            "LEFT JOIN turns t ON t.session_id = s.session_id "
+            "GROUP BY s.session_id "
+            "ORDER BY COALESCE(MAX(t.created_at), s.created_at) DESC "
+            "LIMIT ?",
+            (limit,),
+        ).fetchall()
+        items = []
+        for r in rows:
+            d = dict(r)
+            d["turn_count"] = int(d["turn_count"])
+            items.append(d)
+        return {"items": items, "total": len(items)}
+
+    def get_session_trace(self, session_id: str) -> dict[str, Any] | None:
+        """聚合一个 session 的完整运行 trace：session 基本信息 + 所有 turns（含 attempts 与 model_calls）。
+
+        trace_id == turn_id（runtime/loop.py），因此一个 session 的 trace 即其全部 turn 的
+        RunAttempt 与 ModelCall 的时间线聚合。
+        """
+        session = self._conn.execute(
+            "SELECT * FROM sessions WHERE session_id=?", (session_id,)
+        ).fetchone()
+        if session is None:
+            return None
+        turns = self._turn_repo.list_by_session(session_id)
+        turns_out: list[dict[str, Any]] = []
+        total_model_calls = 0
+        total_input_tokens = 0
+        total_output_tokens = 0
+        for turn in turns:
+            td = turn.to_dict()
+            attempts = self._turn_repo.list_attempts(turn.turn_id)
+            attempts_out: list[dict[str, Any]] = []
+            for a in attempts:
+                ad = a.to_dict()
+                model_calls = [mc.to_dict() for mc in self._model_call_repo.find_by_attempt(a.attempt_id)]
+                ad["model_calls"] = model_calls
+                total_model_calls += len(model_calls)
+                for mc in model_calls:
+                    total_input_tokens += mc.get("input_tokens", 0) or 0
+                    total_output_tokens += mc.get("output_tokens", 0) or 0
+                attempts_out.append(ad)
+            td["attempts"] = attempts_out
+            turns_out.append(td)
+        return {
+            "session": dict(session),
+            "turns": turns_out,
+            "summary": {
+                "turn_count": len(turns_out),
+                "model_call_count": total_model_calls,
+                "total_input_tokens": total_input_tokens,
+                "total_output_tokens": total_output_tokens,
+            },
+        }
+
     # ── plugins (capability mcp servers config 快照) ───────────
 
     def list_plugins(self) -> dict[str, Any]:

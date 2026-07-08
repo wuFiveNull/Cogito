@@ -452,6 +452,14 @@ class TurnRepository:
         )
         return cursor.rowcount > 0
 
+    def list_by_session(self, session_id: str) -> list[Turn]:
+        """列出某个 Session 的全部 Turn（按 created_at 升序）。"""
+        rows = self._conn.execute(
+            "SELECT * FROM turns WHERE session_id=? ORDER BY created_at ASC",
+            (session_id,),
+        ).fetchall()
+        return [self._row_to_turn(r) for r in rows]
+
     def list_(
         self,
         status: str | None = None,
