@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     reset_generation       INTEGER NOT NULL DEFAULT 0,
     status                 TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','expired','closed')),
     created_at             TEXT NOT NULL,
+    deleted_at             TEXT,
     UNIQUE(conversation_id, context_partition_key, reset_generation)
 );
 

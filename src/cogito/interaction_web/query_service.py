@@ -56,7 +56,9 @@ class QueryService:
                 "conversations": self._conn.execute(
                     "SELECT COUNT(*) FROM conversations"
                 ).fetchone()[0],
-                "sessions": self._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0],
+                "sessions": self._conn.execute(
+                    "SELECT COUNT(*) FROM sessions WHERE deleted_at IS NULL"
+                ).fetchone()[0],
                 "endpoints": self._conn.execute("SELECT COUNT(*) FROM endpoints").fetchone()[0],
                 "memory_items": memory_total,
                 "connectors": self._conn.execute("SELECT COUNT(*) FROM connectors").fetchone()[0],
@@ -241,6 +243,7 @@ class QueryService:
     def list_sessions(self, limit: int = 100) -> dict[str, Any]:
         """列出会话，附带 turn 数、最近活跃时间、conversation_id。
 
+        过滤掉已软删除（deleted_at IS NOT NULL）的会话。
         每个 session 用其下最新一条用户提问（user role 消息文本）作为 name，
         便于在列表中直接识别会话内容。
         """
@@ -250,6 +253,7 @@ class QueryService:
             "       MAX(t.created_at) AS last_turn_at "
             "FROM sessions s "
             "LEFT JOIN turns t ON t.session_id = s.session_id "
+            "WHERE s.deleted_at IS NULL "
             "GROUP BY s.session_id "
             "ORDER BY COALESCE(MAX(t.created_at), s.created_at) DESC "
             "LIMIT ?",
@@ -295,9 +299,11 @@ class QueryService:
 
         trace_id == turn_id（runtime/loop.py），因此一个 session 的 trace 即其全部 turn 的
         RunAttempt 与 ModelCall 的时间线聚合。
+
+        已软删除的会话返回 None（页面不可访问）。
         """
         session = self._conn.execute(
-            "SELECT * FROM sessions WHERE session_id=?", (session_id,)
+            "SELECT * FROM sessions WHERE session_id=? AND deleted_at IS NULL", (session_id,)
         ).fetchone()
         if session is None:
             return None
@@ -426,10 +432,10 @@ class QueryService:
         conv_dict = dict(conv)
         real_id = conv_dict["conversation_id"]
 
-        # ── 会话 ──
+        # ── 会话（过滤已软删除） ──
         sessions = [
             dict(r) for r in self._conn.execute(
-                "SELECT * FROM sessions WHERE conversation_id=? ORDER BY created_at ASC",
+                "SELECT * FROM sessions WHERE conversation_id=? AND deleted_at IS NULL ORDER BY created_at ASC",
                 (real_id,),
             ).fetchall()
         ]
@@ -453,10 +459,10 @@ class QueryService:
             d["text_preview"] = txt[:120]
             messages.append(d)
 
-        # ── Turns（每条 user 消息对应一个） ──
+        # ── Turns（每条 user 消息对应一个；过滤已软删除 session） ──
         turns = self._conn.execute(
             "SELECT * FROM turns WHERE session_id IN "
-            "(SELECT session_id FROM sessions WHERE conversation_id=?) "
+            "(SELECT session_id FROM sessions WHERE conversation_id=? AND deleted_at IS NULL) "
             "ORDER BY created_at ASC",
             (real_id,),
         ).fetchall()

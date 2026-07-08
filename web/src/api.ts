@@ -207,6 +207,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  deleteSession: (sessionId: string) =>
+    request<CommandResponse>("/commands/delete-session", {
+      method: "POST",
+      body: JSON.stringify({ session_id: sessionId }),
+    }),
 };
 
 // ── 聊天 Channel（接入 Core 主链路） ─────────────────────────────────────

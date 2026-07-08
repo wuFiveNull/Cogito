@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   api,
@@ -35,8 +35,30 @@ function fmtMs(ms: number | null | undefined): string {
 
 // ── 会话列表（按用户最新提问命名） ────────────────────────────
 
-function SessionList({ onPick }: { onPick: (id: string) => void }) {
-  const state = useAsync(() => api.sessions(), []);
+function SessionList({ onPick, refreshSignal }: { onPick: (id: string) => void; refreshSignal?: number }) {
+  const state = useAsync(() => api.sessions(), [refreshSignal]);
+  const [deleting, setDeleting] = useState<string | null>(null);
+
+  const handleDelete = useCallback(
+    async (e: React.MouseEvent, sessionId: string, name: string) => {
+      e.stopPropagation();
+      if (!window.confirm(`确认删除会话「${name || sessionId.slice(0, 12)}」？\n数据将从页面隐藏，但数据库中保留。`)) {
+        return;
+      }
+      setDeleting(sessionId);
+      try {
+        await api.deleteSession(sessionId);
+        // 触发父组件刷新列表
+        onPick("__refresh__");
+      } catch {
+        // 静默失败，下次刷新时会看到
+      } finally {
+        setDeleting(null);
+      }
+    },
+    [onPick],
+  );
+
   if (state.loading) return <Loading />;
   if (state.error) return <ErrorBox msg={state.error} />;
   const items = state.data?.items ?? [];
@@ -46,26 +68,48 @@ function SessionList({ onPick }: { onPick: (id: string) => void }) {
       {items.map((s) => {
         const id = String(s.session_id);
         const active = s.status === "active";
+        const name = String(s.name ?? id.slice(0, 12));
+        const isDeleting = deleting === id;
         return (
-          <button
+          <div
             key={id}
-            onClick={() => onPick(id)}
-            className="flex w-full items-center justify-between rounded-xl border border-borderc bg-surface-2 p-4 text-left transition hover:border-primary/40 hover:bg-primary/5"
+            className="flex w-full items-center justify-between gap-3 rounded-xl border border-borderc bg-surface-2 p-4 transition hover:border-primary/40 hover:bg-primary/5"
           >
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <StatusPill status={active ? "running" : String(s.status)} />
-                <span className="truncate font-medium text-ink">{String(s.name ?? id.slice(0, 12))}</span>
+            <button
+              onClick={() => onPick(id)}
+              className="flex min-w-0 flex-1 items-center gap-3 text-left"
+            >
+              <StatusPill status={active ? "running" : String(s.status)} />
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-medium text-ink">{name}</div>
+                <div className="mt-0.5 truncate font-mono text-[11px] text-muted">
+                  {id.slice(0, 12)} · conv {String(s.conversation_id ?? "-").slice(0, 16)}
+                </div>
               </div>
-              <div className="mt-1 truncate font-mono text-[11px] text-muted">
-                {id.slice(0, 12)} · conv {String(s.conversation_id ?? "-").slice(0, 16)}
+              <div className="shrink-0 text-right text-[11px] text-muted">
+                <div>{Number(s.turn_count ?? 0)} turns</div>
+                <div>{fmtTime(s.last_turn_at ?? s.created_at)}</div>
               </div>
-            </div>
-            <div className="ml-4 shrink-0 text-right text-[11px] text-muted">
-              <div>{Number(s.turn_count ?? 0)} turns</div>
-              <div>{fmtTime(s.last_turn_at ?? s.created_at)}</div>
-            </div>
-          </button>
+            </button>
+            <button
+              onClick={(e) => handleDelete(e, id, name)}
+              disabled={isDeleting}
+              title="删除会话"
+              className="shrink-0 rounded-lg p-1.5 text-muted transition hover:bg-danger/10 hover:text-danger disabled:opacity-40"
+            >
+              {isDeleting ? (
+                <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+              ) : (
+                <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 6h18" />
+                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+                  <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                  <line x1="10" y1="11" x2="10" y2="17" />
+                  <line x1="14" y1="11" x2="14" y2="17" />
+                </svg>
+              )}
+            </button>
+          </div>
         );
       })}
     </div>
@@ -278,7 +322,8 @@ function TraceView({ trace }: { trace: SessionTrace }) {
 export default function TracePage() {
   const { id } = useParams<{ id?: string }>();
   const [pick, setPick] = useState<string | null>(null);
-  const sessionId = id ?? pick;
+  const [refreshSignal, setRefreshSignal] = useState(0);
+  const sessionId = id ?? (pick === "__refresh__" ? null : pick);
 
   const trace = useAsync(
     () =>
@@ -288,11 +333,21 @@ export default function TracePage() {
     [sessionId],
   );
 
+  const handlePick = useCallback((selectedId: string) => {
+    if (selectedId === "__refresh__") {
+      // 删除后刷新列表：清掉当前选中 + 触发重取
+      setPick(null);
+      setRefreshSignal((n) => n + 1);
+    } else {
+      setPick(selectedId);
+    }
+  }, []);
+
   if (!sessionId) {
     return (
       <div className="space-y-5">
         <PageTitle title="Trace · 会话运行轨迹" desc="选择一个会话，查看其完整 Agent 运行 trace" />
-        <SessionList onPick={setPick} />
+        <SessionList onPick={handlePick} refreshSignal={refreshSignal} />
       </div>
     );
   }

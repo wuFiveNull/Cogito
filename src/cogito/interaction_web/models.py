@@ -59,6 +59,10 @@ class ReplayDeliveryPayload(BaseModel):
     delivery_id: str
 
 
+class DeleteSessionPayload(BaseModel):
+    session_id: str
+
+
 # ── Query 响应（必要时） ───────────────────────────────────────
 
 

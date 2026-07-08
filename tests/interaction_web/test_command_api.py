@@ -75,3 +75,34 @@ def test_disable_plugin_audits(client):
     r = client.post("/api/commands/disable-plugin", json={"name": "some-mcp"})
     assert r.status_code == 200
     assert r.json()["status"] == "ok"
+
+
+def test_delete_session_soft(client):
+    """软删除会话：API 返回 ok，query 不再返回该 session，但 DB 数据保留。"""
+    # 删除成功
+    r = client.post("/api/commands/delete-session", json={"session_id": "s1"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["details"]["deleted_at"]
+
+    # 再次删除返回 failed（已删除）
+    r2 = client.post("/api/commands/delete-session", json={"session_id": "s1"})
+    assert r2.json()["status"] == "failed"
+
+    # query /sessions 不再返回
+    r3 = client.get("/api/sessions")
+    assert r3.status_code == 200
+    ids = [item["session_id"] for item in r3.json()["items"]]
+    assert "s1" not in ids
+
+    # trace 删除的 session 返回 404（已通过 deleted_at 过滤）
+    r4 = client.get("/api/sessions/s1/trace")
+    assert r4.status_code == 404
+
+
+def test_delete_session_missing(client):
+    """删除不存在的 session 返回 status=failed。"""
+    r = client.post("/api/commands/delete-session", json={"session_id": "ghost"})
+    assert r.status_code == 200
+    assert r.json()["status"] == "failed"

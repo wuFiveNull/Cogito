@@ -22,6 +22,7 @@ from cogito.interaction_web.models import (
     ApprovalPayload,
     CancelTurnPayload,
     CommandResponse,
+    DeleteSessionPayload,
     DisablePluginPayload,
     MemoryConfirmPayload,
     MemoryDeletePayload,
@@ -176,6 +177,33 @@ def delete_memory(payload: MemoryDeletePayload, deps: CommandDeps = Depends(get_
         target_type="memory", target_id=payload.memory_id,
     )
     return _ok("delete-memory", payload.memory_id)
+
+
+# ── delete-session (软删除，仅标记 deleted_at) ────────────────
+
+
+@router.post("/delete-session", response_model=CommandResponse)
+def delete_session(payload: DeleteSessionPayload, deps: CommandDeps = Depends(get_command_deps)) -> CommandResponse:
+    """软删除会话：设置 deleted_at 时间戳，数据保留但页面不再显示。"""
+    row = deps.conn.execute(
+        "SELECT session_id FROM sessions WHERE session_id=? AND deleted_at IS NULL",
+        (payload.session_id,),
+    ).fetchone()
+    if row is None:
+        return _fail("delete-session", payload.session_id, "not found or already deleted")
+    from datetime import UTC, datetime
+    deleted_at = datetime.now(UTC).isoformat()
+    deps.conn.execute(
+        "UPDATE sessions SET deleted_at=? WHERE session_id=?",
+        (deleted_at, payload.session_id),
+    )
+    deps.conn.commit()
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="delete-session",
+        target_type="session", target_id=payload.session_id,
+        changes={"deleted_at": deleted_at},
+    )
+    return _ok("delete-session", payload.session_id, deleted_at=deleted_at)
 
 
 # ── pause-connector ───────────────────────────────────────────
