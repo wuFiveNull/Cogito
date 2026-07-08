@@ -21,6 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from cogito.bench import timing as _bench_timing
 from cogito.domain.events import DomainEvent
 from cogito.domain.message import ContentPart, Message, MessageDirection, MessageRole
 from cogito.runtime.clock import Clock, ProductionClock
@@ -131,6 +132,7 @@ class StreamingDeliveryController:
         platform_message_id: str | None = None
         last_push = 0.0
         finished = False
+        _model_started = False
 
         try:
             async for delta, is_end in self._loop.run_stream(context, cancel_flag=cancel_flag):
@@ -139,6 +141,14 @@ class StreamingDeliveryController:
                     break
                 if not delta:
                     continue
+
+                # 首 token 到达打点（模型流刚开始产出）
+                if not _model_started:
+                    _model_started = True
+                    _bench_timing.checkpoint(
+                        "streaming:first_delta",
+                        extra={"first_delta": delta, "text_so_far": delta},
+                    )
 
                 accumulated.append(delta)
                 full = "".join(accumulated)
@@ -152,6 +162,10 @@ class StreamingDeliveryController:
                         delivery_id, attempt_id, platform_message_id,
                     )
                     _first_token_ms = (now - _start_ts) * 1000
+                    _bench_timing.checkpoint(
+                        "streaming:placeholder_pushed",
+                        extra={"first_token_ms": round(_first_token_ms, 1)},
+                    )
                     _LOG.info(
                         "stream first-token latency=%.0fms conversation=%s turn=%s",
                         _first_token_ms, input_meta.conversation_id, turn.turn_id,
@@ -191,6 +205,10 @@ class StreamingDeliveryController:
             return None
 
         final_text = "".join(accumulated)
+        _bench_timing.checkpoint("streaming:model_done", extra={
+            "accumulated_chars": len(final_text),
+            "operation_seq": operation_seq,
+        })
         # 定稿前再推一次完整文本作为最终 edit（保证前端收到最终全文，
         # 即便最后一次节流 edit 因间隔未触发）。
         operation_seq += 1
@@ -201,9 +219,13 @@ class StreamingDeliveryController:
             delivery_id, attempt_id, operation_seq,
             platform_message_id, "confirmed",
         )
+        _bench_timing.checkpoint("streaming:final_edit_sent")
         final_message_id = self._finalize(
             delivery_id, platform_message_id, turn, attempt, final_text, input_meta,
         )
+        _bench_timing.checkpoint("streaming:finalize_tx_done", extra={
+            "final_message_id": final_message_id or "",
+        })
         if final_message_id is None and platform_message_id is not None:
             # 定稿事务失败（如 Turn 已被其他 worker 完成）→ 撤回占位，避免残留气泡
             self._gateway.delete(target_json, platform_message_id, "finalize_failed")

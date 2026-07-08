@@ -35,6 +35,7 @@ from cogito.domain.principal import (
     PrincipalStatus,
     PrincipalType,
 )
+from cogito.bench import timing as _bench_timing
 from cogito.domain.state_machines import validate_transition_turn
 from cogito.domain.turn import Turn, TurnStatus
 from cogito.service.unit_of_work import UnitOfWork
@@ -56,8 +57,10 @@ class InboundService:
     不创建 RunAttempt。
     """
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, notify: "callable | None" = None) -> None:
         self._conn = conn
+        # 入站新建 Turn 后的唤醒回调（用于即时唤醒后台 worker，消除轮询睡眠）
+        self._notify = notify
 
     def accept(self, envelope: ChannelEnvelope) -> AcceptInboundResult:
         """接受入站消息并创建 Turn。
@@ -65,6 +68,7 @@ class InboundService:
         幂等保证：同一 (channel_instance_id, platform_message_id)
         首次返回新 ID，重复返回已有 ID。
         """
+        _bench_timing.checkpoint("inbound:enter")
         with UnitOfWork(self._conn) as uow:
             # ── 1. Inbox 幂等去重 ──
             platform_event_id = envelope.platform_message_id or envelope.message_id
@@ -242,6 +246,14 @@ class InboundService:
             ))
 
             uow.commit()
+        _bench_timing.checkpoint("inbound:commit_done", extra={"turn_id": turn.turn_id})
+
+        # 唤醒后台 worker（若存在）——即时处理新 Turn，无需等待轮询间隔
+        if self._notify is not None:
+            try:
+                self._notify()
+            except Exception:
+                pass
 
         return AcceptInboundResult(
             message_id=message.message_id,

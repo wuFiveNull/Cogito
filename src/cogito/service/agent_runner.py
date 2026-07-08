@@ -41,6 +41,7 @@ from cogito.service.streaming_delivery import (
     StreamInputMeta,
     StreamPolicy,
 )
+from cogito.bench import timing as _bench_timing
 from cogito.store.model_call_repo import ModelCallRecord, ModelCallRepository
 from cogito.store.time_utils import epoch_ms
 
@@ -145,15 +146,20 @@ class AgentRunner:
         5. complete_reply（事务内）
         """
         # ── 1. 领取 Turn（事务内）──
+        _bench_timing.checkpoint("worker:wake_up")
         claimed = self._dispatcher.claim_next(worker_id, clock=self._clock.now())
         if claimed is None:
+            _bench_timing.finalize()
             return RunOutcome.idle
 
         turn = claimed.turn
         attempt = claimed.attempt
+        _bench_timing.reset(turn.turn_id)
+        _bench_timing.checkpoint("worker:claimed", extra={"turn_id": turn.turn_id})
 
         # ── 检查即将开始前的取消状态 ──
         if self._is_cancelled(turn.turn_id):
+            _bench_timing.finalize()
             return RunOutcome.cancelled
 
         # ── 2. 构建 Context（短暂读库，不持网络锁）──
@@ -163,6 +169,7 @@ class AgentRunner:
             input_message_id=turn.input_message_id,
             system_policy=self._system_prompt,
         )
+        _bench_timing.checkpoint("context:built")
 
         # ── 2a. 预读输入消息元数据（流式 / 非流式都可能用来向浏览器回推） ──
         stream_meta = self._read_stream_input_meta(turn)
@@ -176,10 +183,15 @@ class AgentRunner:
             loop_result = await self._run_loop_with_heartbeat(
                 turn, attempt, worker_id, context,
             )
+            _bench_timing.checkpoint("loop:done", extra={
+                "result_type": loop_result.result_type,
+                "text_len": len(loop_result.text or ""),
+            })
         except Exception as e:
             _LOGGER.exception("AgentLoop.run() threw: %s", e)
             self._fail_safe(turn, attempt)
             self._push_reply_error(stream_meta, "推理异常，请稍后重试")
+            _bench_timing.finalize()
             return RunOutcome.failed
 
         # ── 检查 Loop 是否成功 ──
@@ -191,21 +203,25 @@ class AgentRunner:
                 loop_result.text[:200] if loop_result.text else "(empty)",
             )
             if loop_result.result_type == LoopResultType.cancelled:
+                _bench_timing.finalize()
                 return RunOutcome.cancelled
             if loop_result.error_message:
                 _LOGGER.error("Loop failed: %s", loop_result.error_message)
             self._fail_safe(turn, attempt)
             self._push_reply_error(stream_meta, "推理失败，请稍后重试")
+            _bench_timing.finalize()
             return RunOutcome.failed
 
         # ── 4. 完成前检查取消和 Lease ──
         if self._is_cancelled(turn.turn_id):
+            _bench_timing.finalize()
             return RunOutcome.cancelled
 
         if not self._is_lease_valid(
             turn.turn_id, attempt.attempt_id,
             attempt.worker_id, attempt.lease_version,
         ):
+            _bench_timing.finalize()
             return RunOutcome.lost
 
         # ── 5. 写入结果（事务内）──
@@ -215,13 +231,16 @@ class AgentRunner:
                 attempt=attempt,
                 reply_text=loop_result.text,
             )
+            _bench_timing.checkpoint("completion:reply_written")
             if message_id is None:
                 self._push_reply_error(stream_meta, "处理失败，请重试")
+                _bench_timing.finalize()
                 return RunOutcome.failed
 
             # 非流式路径：reply 只写入了 DB，需主动推一条 send 事件到浏览器队列，
             # 否则依赖 WS 的 chat 页面永远看不到回复（占位气泡也不会出现）。
             self._push_reply_event(stream_meta, loop_result.text)
+            _bench_timing.checkpoint("completion:pushed_to_ws")
 
             # Turn 成功后异步触发记忆提取（不阻塞当前回复）
             if self._memory_extractor and context.principal_id:
@@ -229,6 +248,7 @@ class AgentRunner:
                     self._run_extraction(context, turn)
                 )
 
+            _bench_timing.finalize()
             return RunOutcome.completed
         except Exception as e:
             _LOGGER.exception("complete_reply failed: %s", e)
@@ -327,9 +347,11 @@ class AgentRunner:
         self, turn: Any, attempt: Any, worker_id: str, context: Any,
     ) -> RunOutcome:
         """流式投递回合：占位 → 增量编辑 → 定稿（单事务完成 Turn）。"""
+        _bench_timing.checkpoint("streaming:start_controller")
         meta = self._read_stream_input_meta(turn)
         if meta is None:
             self._fail_safe(turn, attempt)
+            _bench_timing.finalize()
             return RunOutcome.failed
 
         adapter_id = (
@@ -341,6 +363,7 @@ class AgentRunner:
         if adapter is None:
             # _should_stream 已保证 adapter 存在；防御性兜底走非流式
             self._fail_safe(turn, attempt)
+            _bench_timing.finalize()
             return RunOutcome.failed
         caps = adapter.capabilities()
 
@@ -373,14 +396,19 @@ class AgentRunner:
             hb.cancel()
             _LOGGER.exception("Streaming turn failed: %s", turn.turn_id)
             self._fail_safe(turn, attempt)
+            _bench_timing.finalize()
             return RunOutcome.failed
         finally:
             hb.cancel()
 
         if final_message_id:
+            _bench_timing.checkpoint("streaming:finalized", extra={
+                "final_message_id": final_message_id,
+            })
             # 流式成功后异步触发记忆提取（与非流式路径一致）
             if self._memory_extractor and context.principal_id:
                 asyncio.ensure_future(self._run_extraction(context, turn))
+            _bench_timing.finalize()
             return RunOutcome.completed
         if self._is_cancelled(turn.turn_id):
             return RunOutcome.cancelled

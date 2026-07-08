@@ -440,15 +440,23 @@ class RuntimeApplication:
                     # 唤醒事件置位后清空，避免 worker 在处理间隙空转。
                     if self._wakeup_event is not None:
                         self._wakeup_event.clear()
-                    waiters = [e.wait() for e in (self._shutdown_event, self._wakeup_event) if e is not None]
+                    # Python 3.11+: asyncio.wait 要求传 Task 而非 coroutine。
+                    waiters = [
+                        asyncio.ensure_future(e.wait())
+                        for e in (self._shutdown_event, self._wakeup_event)
+                        if e is not None
+                    ]
                     try:
                         await asyncio.wait(
                             waiters,
                             timeout=poll_interval,
                             return_when=asyncio.FIRST_COMPLETED,
                         )
-                    except (TimeoutError, ValueError):
+                    except (TimeoutError, ValueError, TypeError):
                         pass
+                    for w in waiters:
+                        if not w.done():
+                            w.cancel()
                     if self._wakeup_event is not None and self._wakeup_event.is_set():
                         self._wakeup_event.clear()
                     if self._shutdown_event.is_set():
