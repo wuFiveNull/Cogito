@@ -59,6 +59,30 @@ class ToolDef:
         object.__setattr__(self, "permissions", tuple(self.permissions))
 
 
+# ── SideEffectReceipt (Plan 03 M2/M3) ───────────────────────────
+
+@dataclass(frozen=True)
+class SideEffectReceipt:
+    """副作用执行收据 —— 先持久化意图，后保存 Receipt。
+
+    external_operation_id: 外部平台操作 ID（幂等键）
+    request_hash: 请求参数的稳定 hash
+    status: succeeded | failed | unknown
+    summary: 结果摘要
+    raw_ref: 原始响应 Payload ref（受限访问）
+    reconcile_status: pending | reconciled | manual
+    """
+    receipt_id: str = ""
+    tool_call_id: str = ""
+    external_operation_id: str = ""
+    request_hash: str = ""
+    status: str = "pending"
+    summary: str = ""
+    raw_ref: str | None = None
+    reconcile_status: str = "pending"
+    created_at: str = ""
+
+
 # ── Tool 调用状态（运行时短生命周期）──
 
 

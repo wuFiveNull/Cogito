@@ -101,8 +101,9 @@ class ToolExecutor:
                 error_message=f"Policy denied: {decision.reason}",
             )
 
-        # 3. 持久化 executing
+        # 3. 持久化 executing + 计算幂等键（副作用 Tool 复用）
         self._persist_start(tool_call_id, context.attempt_id, tool_name, arguments)
+        request_hash = _hash_arguments(tool_name, arguments)
 
         # 4. 参数校验
         try:
@@ -123,7 +124,8 @@ class ToolExecutor:
             # 6. 结果截断
             result_text = self._truncate_output(result_text)
 
-            self._persist_end(tool_call_id, "succeeded")
+            self._persist_end(tool_call_id, "succeeded", result=result_text,
+                              request_hash=request_hash)
             self._emit_event("ToolExecuted", tool_name, "success",
                              result_text, duration)
             return ToolResult(
@@ -211,6 +213,7 @@ class ToolExecutor:
 
     def _persist_end(
         self, tool_call_id: str, status: str,
+        result: str = "", request_hash: str = "",
     ) -> None:
         if not self._repo:
             return
@@ -323,3 +326,11 @@ class ToolExecutor:
             ToolExecutor.format_tool_message(r.tool_call_id, r)
             for r in results
         ]
+
+
+def _hash_arguments(tool_name: str, arguments: dict[str, Any]) -> str:
+    """计算副作用幂等键 hash（稳定序列化 + sha256）。"""
+    import hashlib
+
+    canonical = json.dumps(arguments, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(f"{tool_name}:{canonical}".encode()).hexdigest()[:16]
