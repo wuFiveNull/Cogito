@@ -240,7 +240,13 @@ class RetrievalService:
         kinds: list[str] | None = None,
         limit: int = 10,
     ) -> list[ScoredMemory]:
-        """按文本搜索有效记忆（E4: FTS5 可用时使用 BM25 + LIKE 降级）。"""
+        """按文本搜索有效记忆（E4: FTS5 可用时使用 BM25 + LIKE 降级）。
+
+        降级链（Plan 02 M6）：
+        1. FTS5 MATCH（BM25）→ 命中即返回
+        2. FTS 损坏/无命中 → LIKE 降级
+        3. 两者都无结果 + query 非空 → recency fallback（近期高重要性记忆）
+        """
         now = datetime.now(UTC)
         now_iso = now.isoformat()
 
@@ -275,7 +281,7 @@ class RetrievalService:
         fts_ok, _ = self._detect_fts_capabilities()
         has_query = bool(query)
 
-        # ── FTS5 路径 ──
+        # ── (1) FTS5 路径 ──
         if fts_ok and has_query:
             fts_expr = _fts_escape(query)
             try:
@@ -297,26 +303,41 @@ class RetrievalService:
             except sqlite3.OperationalError:
                 pass
 
-        # ── LIKE 降级路径 ──
+        # ── (2) LIKE 降级路径 ──
         if has_query:
             like_pattern = f"%{query}%"
-            conditions.append(
+            like_conditions = conditions + [
                 "(mi.value LIKE ? OR mi.subject LIKE ? OR mi.predicate LIKE ?)"
+            ]
+            like_params = params + [like_pattern, like_pattern, like_pattern]
+
+            sql = ("SELECT mi.* FROM memory_items mi WHERE "
+                   + " AND ".join(like_conditions)
+                   + " ORDER BY mi.importance DESC, mi.confidence DESC, mi.created_at DESC"
+                   + f" LIMIT {int(limit)}")
+
+            rows = self._conn.execute(sql, like_params).fetchall()
+            if rows:
+                return self._build_results(
+                    rows, query=query, scope_type=scope_type,
+                    scope_id=scope_id, keyword_hit=True, now=now,
+                    retrieval_path="like",
+                    limit=limit,
+                )
+
+        # ── (3) recency fallback：无 query 匹配 → 返回近期高重要性记忆 ──
+        if not has_query or True:  # list 模式始终走此路径
+            sql = ("SELECT mi.* FROM memory_items mi WHERE "
+                   + " AND ".join(conditions)
+                   + " ORDER BY mi.importance DESC, mi.confidence DESC, mi.created_at DESC"
+                   + f" LIMIT {int(limit)}")
+            rows = self._conn.execute(sql, params).fetchall()
+            return self._build_results(
+                rows, query=query, scope_type=scope_type,
+                scope_id=scope_id, keyword_hit=False, now=now,
+                retrieval_path="list",
+                limit=limit,
             )
-            params.extend([like_pattern, like_pattern, like_pattern])
-
-        sql = ("SELECT mi.* FROM memory_items mi WHERE "
-               + " AND ".join(conditions)
-               + " ORDER BY mi.importance DESC, mi.confidence DESC, mi.created_at DESC"
-               + f" LIMIT {int(limit)}")
-
-        rows = self._conn.execute(sql, params).fetchall()
-        return self._build_results(
-            rows, query=query, scope_type=scope_type,
-            scope_id=scope_id, keyword_hit=has_query, now=now,
-            retrieval_path="like" if has_query else "list",
-            limit=limit,
-        )
 
     def _build_results(
         self,
