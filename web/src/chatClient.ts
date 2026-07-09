@@ -54,101 +54,13 @@ import { MockChatClient } from "./mock";
 
 /** 选择聊天客户端：
  *  - 显式 VITE_MOCK=1 → 强制离线模拟；
- *  - 否则 → 自动回退客户端：优先真实 WebSocket（Web Channel 主链路），
- *    仅在后端不可达时才透明切换到模拟，**与面板接口的全局回退无关**。
+ *  - 否则 → 仅使用真实 WebSocket（Web Channel 主链路）。
+ *
+ * 设计原则（plan/08 D1）：真实数据优先，无隐式假数据。
+ * 后端不可达时由调用方通过 onStatus("closed") 感知并显示真实错误提示。
  */
 export function createChatClient(opts: ChatClientOptions): IChatClient {
-  return isExplicitMock() ? new MockChatClient(opts) : new AutoFallbackChatClient(opts);
-}
-
-// 自动回退客户端：先尝试真实 WebSocket（接 Web Channel）；
-// 若超时内未连上或连接被拒，则透明切换到 MockChatClient，保证面板仍可用。
-const FALLBACK_TIMEOUT_MS = 2500;
-
-class AutoFallbackChatClient implements IChatClient {
-  private real: ChatClient | null = null;
-  private mock: MockChatClient | null = null;
-  private readonly opts: ChatClientOptions;
-  private fallbackTimer: ReturnType<typeof setTimeout> | null = null;
-  private fellBack = false;
-  private hasOpened = false;
-  private closedByUser = false;
-
-  constructor(opts: ChatClientOptions) {
-    this.opts = opts;
-  }
-
-  connect(): void {
-    this.closedByUser = false;
-    this.startReal();
-  }
-
-  private startReal(): void {
-    const real = new ChatClient({
-      conversationId: this.opts.conversationId,
-      onStatus: (s) => {
-        if (this.fellBack) return;
-        if (s === "open") {
-          this.hasOpened = true;
-          this.clearTimer();
-          this.opts.onStatus?.("open");
-        } else if (s === "connecting") {
-          this.opts.onStatus?.("connecting");
-          this.armTimer();
-        } else {
-          // closed：连接失败 / 被拒
-          if (!this.hasOpened) this.tryFallback();
-          else this.opts.onStatus?.("closed");
-        }
-      },
-      onMessage: (m) => {
-        if (!this.fellBack) this.opts.onMessage(m);
-      },
-    });
-    this.real = real;
-    real.connect();
-  }
-
-  private armTimer(): void {
-    if (this.fallbackTimer || this.fellBack) return;
-    this.fallbackTimer = setTimeout(() => {
-      this.fallbackTimer = null;
-      if (!this.fellBack && !this.hasOpened) this.tryFallback();
-    }, FALLBACK_TIMEOUT_MS);
-  }
-
-  private clearTimer(): void {
-    if (this.fallbackTimer) {
-      clearTimeout(this.fallbackTimer);
-      this.fallbackTimer = null;
-    }
-  }
-
-  private tryFallback(): void {
-    if (this.fellBack || this.closedByUser) return;
-    this.fellBack = true;
-    this.clearTimer();
-    this.real?.close();
-    this.real = null;
-    this.opts.onStatus?.("connecting");
-    this.opts.onFallback?.();
-    const mock = new MockChatClient(this.opts);
-    this.mock = mock;
-    mock.connect();
-  }
-
-  send(text: string): void {
-    if (this.fellBack) this.mock?.send(text);
-    else this.real?.send(text);
-  }
-
-  close(): void {
-    this.closedByUser = true;
-    this.clearTimer();
-    this.real?.close();
-    this.mock?.close();
-    this.mock = null;
-  }
+  return isExplicitMock() ? new MockChatClient(opts) : new ChatClient(opts);
 }
 
 function wsBase(): string {

@@ -74,14 +74,14 @@ export default function ChatPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId, history.data]);
 
-  // 实时连接（自动回退：仅 VITE_MOCK=1 或后端不可达时走模拟，不受面板接口失败影响）
+  // 实时连接（plan/08 D1：真实数据优先，后端不可达时显示错误，不模拟）
   useEffect(() => {
     setOfflineMock(false);
     sentAtRef.current = null;
     const client = createChatClient({
       conversationId,
       onStatus: setStatus,
-      onFallback: () => setOfflineMock(true),
+      onFallback: () => setOfflineMock(true),  // 仅 VITE_MOCK=1 时触发
       onMessage: (msg: WsServerMessage) => {
         if (msg.type === "assistant") {
           const id = msg.message_id ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -294,8 +294,8 @@ export default function ChatPage() {
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {offlineMock && (
-              <span className="pill bg-surface-3 text-warn" title="后端不可达，已自动回退到离线假数据">
-                离线演示
+              <span className="pill bg-surface-3 text-warn" title="VITE_MOCK=1，演示模式">
+                演示模式
               </span>
             )}
             <span
@@ -316,6 +316,58 @@ export default function ChatPage() {
             </span>
           </div>
         </div>
+
+        {/* 后端未连接提示（plan/08 D1：真实数据优先） */}
+        {status === "closed" && !offlineMock && (
+          <div className="mb-3 flex items-center justify-between rounded-xl border border-danger/40 bg-danger/10 px-4 py-2.5 text-sm text-danger">
+            <span>
+              <span className="h-2 w-2 animate-pulse-dot rounded-full bg-danger" />
+              {" "}后端未连接：消息无法发送或接收。
+            </span>
+            <button
+              onClick={() => {
+                clientRef.current?.close();
+                sentAtRef.current = null;
+                // 重新创建连接（仅 VITE_MOCK=1 时才会走 MockChatClient）
+                const c = createChatClient({
+                  conversationId,
+                  onStatus: setStatus,
+                  onFallback: () => setOfflineMock(true),
+                  onMessage: (msg: WsServerMessage) => {
+                    if (msg.type === "assistant") {
+                      const id = msg.message_id ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+                      const startAt = sentAtRef.current ?? Date.now();
+                      setMessages((prev) => [
+                        ...prev,
+                        { role: "assistant", text: msg.text, id, streaming: !!msg.streaming, startAt, firstTokenMs: Date.now() - startAt },
+                      ]);
+                    } else if (msg.type === "assistant.delta") {
+                      setMessages((prev) => {
+                        const idx = prev.findIndex((m) => m.id === msg.message_id);
+                        if (idx === -1) {
+                          const startAt = sentAtRef.current ?? Date.now();
+                          return [...prev, { role: "assistant", text: msg.text, id: msg.message_id, streaming: !msg.final, startAt, firstTokenMs: Date.now() - startAt }];
+                        }
+                        const next = prev.slice();
+                        next[idx] = { ...next[idx], text: msg.text, streaming: !msg.final };
+                        return next;
+                      });
+                    } else if (msg.type === "assistant.delete") {
+                      setMessages((prev) => prev.filter((m) => m.id !== msg.message_id));
+                    } else if (msg.type === "error") {
+                      setMessages((prev) => [...prev, { role: "system", text: `(错误) ${msg.text}` }]);
+                    }
+                  },
+                });
+                clientRef.current = c;
+                c.connect();
+              }}
+              className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-1 text-xs font-medium text-danger transition hover:bg-danger/20"
+            >
+              重连
+            </button>
+          </div>
+        )}
 
         <div ref={scrollRef} className="flex-1 space-y-4 overflow-y-auto pr-1">
           {messages.length === 0 && !history.loading && (

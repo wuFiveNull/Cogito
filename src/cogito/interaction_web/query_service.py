@@ -248,7 +248,13 @@ class QueryService:
 
     def get_trace(self, trace_id: str) -> dict[str, Any] | None:
         rows = self._model_call_repo.find_by_trace(trace_id)
-        if not rows:
+        # 也尝试按 trace_id 在 events 表中查找
+        events = self._conn.execute(
+            "SELECT * FROM events WHERE correlation_id=? OR causation_id=? OR event_id=? "
+            "ORDER BY occurred_at ASC LIMIT 200",
+            (trace_id, trace_id, trace_id),
+        ).fetchall()
+        if not rows and not events:
             return None
         # 关联的 run_attempts
         attempts = [
@@ -259,10 +265,30 @@ class QueryService:
                 (trace_id,),
             ).fetchall()
         ]
+        # 关联的 tool_calls
+        tool_calls = self._conn.execute(
+            "SELECT * FROM tool_calls WHERE attempt_id IN "
+            "(SELECT attempt_id FROM run_attempts WHERE attempt_id IN "
+            "(SELECT attempt_id FROM model_calls WHERE trace_id=?)) "
+            "ORDER BY started_at ASC LIMIT 200",
+            (trace_id,),
+        ).fetchall()
+        # 关联的 delivery attempts
+        deliveries = self._conn.execute(
+            "SELECT d.delivery_id, d.status, da.attempt_id, da.status AS attempt_status "
+            "FROM delivery_attempts da "
+            "JOIN deliveries d ON d.delivery_id = da.delivery_id "
+            "WHERE da.attempt_id IN (SELECT attempt_id FROM model_calls WHERE trace_id=?) "
+            "LIMIT 50",
+            (trace_id,),
+        ).fetchall()
         return {
             "trace_id": trace_id,
             "model_calls": [r.to_dict() for r in rows],
             "attempts": attempts,
+            "events": [dict(r) for r in events],
+            "tool_calls": [dict(r) for r in tool_calls],
+            "deliveries": [dict(r) for r in deliveries],
         }
 
     # ── sessions ───────────────────────────────────────────────
