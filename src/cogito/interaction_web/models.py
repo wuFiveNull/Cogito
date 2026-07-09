@@ -75,3 +75,46 @@ class Pagination(BaseModel):
     limit: int
     offset: int
     items: list[dict[str, Any]]
+
+
+# ── Dashboard DTO ─────────────────────────────────────────────
+
+
+class DashboardSummary(BaseModel):
+    """GET /api/dashboard/summary 响应。"""
+    schema_version: str = "1"
+    generated_at: str = ""
+    profile: str = ""
+    readiness: str = "ready"
+    readiness_reasons: list[str] = Field(default_factory=list)
+    counts: dict[str, int] = Field(default_factory=dict)
+    usage_24h: dict[str, Any] = Field(default_factory=dict)
+    proactive: dict[str, Any] = Field(default_factory=dict)
+    resources: dict[str, Any] = Field(default_factory=dict)
+    worker: dict[str, Any] = Field(default_factory=dict)
+
+
+class AttentionItem(BaseModel):
+    """单个待办事项。"""
+    kind: str
+    severity: str = "info"
+    label: str
+    target: str | None = None
+    target_route: str | None = None
+    count: int | None = None
+
+
+class ComponentHealth(BaseModel):
+    """单个组件健康状态。"""
+    name: str
+    status: str = "ok"
+    detail: str | None = None
+    latency_ms: int | None = None
+
+
+class HealthComponents(BaseModel):
+    """GET /api/health/components 响应。"""
+    schema_version: str = "1"
+    generated_at: str = ""
+    overall: str = "healthy"
+    components: list[ComponentHealth] = Field(default_factory=list)

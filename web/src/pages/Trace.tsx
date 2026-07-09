@@ -7,9 +7,9 @@ import {
   type RunAttemptDetail,
   type ModelCall,
   type TraceMessage,
+  type AuditRecord,
 } from "../api";
-import { Empty, ErrorBox, Loading, PageTitle, Section, StatusPill, useAsync } from "../components";
-import { isUsingMock } from "../api";
+import { Badge, Collapsible, Empty, ErrorBox, Loading, PageTitle, Section, StatusPill, useAsync } from "../components";
 
 // ── 时间格式化 ────────────────────────────────────────────────
 
@@ -52,7 +52,6 @@ function SessionList({ onPick, refreshSignal }: { onPick: (id: string) => void; 
           window.alert(`删除失败：${resp.message ?? "未知错误"}`);
           return;
         }
-        // 触发父组件刷新列表
         onPick("__refresh__");
       } catch (err) {
         window.alert(`删除失败：${err instanceof Error ? err.message : "网络错误"}`);
@@ -247,6 +246,51 @@ function TurnRow({ t, defaultOpen }: { t: TurnTrace; defaultOpen: boolean }) {
   );
 }
 
+// ── Audit 列表 ────────────────────────────────────────────────
+
+function AuditList({ entityId }: { entityId?: string }) {
+  const state = useAsync(() => api.audit({ entity_id: entityId, limit: 50 }), [entityId]);
+  if (state.loading) return <Loading />;
+  if (state.error) return <ErrorBox msg={state.error} />;
+  const items = state.data?.items ?? [];
+  if (items.length === 0) return <Empty msg="暂无审计记录" />;
+
+  const actionTone = (action: string): "ok" | "warn" | "danger" | "info" | "muted" => {
+    if (action.includes("delete") || action.includes("reject")) return "danger";
+    if (action.includes("approve") || action.includes("confirm")) return "ok";
+    if (action.includes("disable") || action.includes("pause")) return "warn";
+    if (action.includes("replay") || action.includes("retry")) return "info";
+    return "muted";
+  };
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-left text-sm">
+        <thead className="text-xs font-semibold text-muted">
+          <tr className="border-b border-borderc">
+            <th className="px-3 py-2.5">audit_id</th>
+            <th className="px-3 py-2.5">动作</th>
+            <th className="px-3 py-2.5">目标</th>
+            <th className="px-3 py-2.5">执行者</th>
+            <th className="px-3 py-2.5">时间</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((a) => (
+            <tr key={a.audit_id} className="table-row">
+              <td className="px-3 py-2.5 font-mono text-xs text-ink">{a.audit_id.slice(0, 12)}</td>
+              <td className="px-3 py-2.5"><Badge tone={actionTone(a.action)}>{a.action}</Badge></td>
+              <td className="px-3 py-2.5 text-xs text-muted">{a.target_type}/{String(a.target_id).slice(0, 12)}</td>
+              <td className="px-3 py-2.5 text-xs text-muted">{a.actor_id}</td>
+              <td className="px-3 py-2.5 text-xs text-muted">{fmtTime(a.occurred_at)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 // ── Trace 详情主体 ────────────────────────────────────────────
 
 function TraceView({ trace }: { trace: SessionTrace }) {
@@ -313,6 +357,10 @@ function TraceView({ trace }: { trace: SessionTrace }) {
           </div>
         )}
       </Section>
+
+      <Collapsible title="审计记录" badge={<Badge tone="info">Audit</Badge>}>
+        <AuditList entityId={String(s.session_id)} />
+      </Collapsible>
     </div>
   );
 }
@@ -333,7 +381,6 @@ export default function TracePage() {
 
   const handlePick = useCallback((selectedId: string) => {
     if (selectedId === "__refresh__") {
-      // 删除后刷新列表：清掉当前选中 + 触发重取
       setPick(null);
       setRefreshSignal((n) => n + 1);
     } else {
@@ -344,7 +391,7 @@ export default function TracePage() {
   if (!sessionId) {
     return (
       <div className="space-y-5">
-        <PageTitle title="Trace · 会话运行轨迹" desc="选择一个会话，查看其完整 Agent 运行 trace" />
+        <PageTitle title="Trace & 审计" desc="选择一个会话，查看其完整 Agent 运行 trace 与审计记录" />
         <SessionList onPick={handlePick} refreshSignal={refreshSignal} />
       </div>
     );

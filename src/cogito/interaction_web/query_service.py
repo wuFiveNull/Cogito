@@ -628,3 +628,123 @@ class QueryService:
             for s in self._config.capability.mcp_servers
         ]
         return {"items": servers, "count": len(servers)}
+
+    # ── dashboard summary / attention / health ──────────────────
+
+    def dashboard_summary(self) -> dict[str, Any]:
+        """聚合当前一屏所需数据：status + usage + backlog + health + proactive 摘要。"""
+        from datetime import UTC, datetime
+        status = self.status()
+        usage_self = self.usage(hours=24)
+        cfg = self._config
+        now = datetime.now(UTC).isoformat()
+
+        # backlog 计数
+        pending_approvals = self._conn.execute("SELECT COUNT(*) FROM approvals WHERE status='pending'").fetchone()[0]
+        candidate_memory = self._conn.execute("SELECT COUNT(*) FROM memory_items WHERE status='candidate' AND deleted_at IS NULL").fetchone()[0]
+        failed_tasks = self._conn.execute("SELECT COUNT(*) FROM tasks WHERE status='failed'").fetchone()[0]
+        unknown_deliveries = self._conn.execute("SELECT COUNT(*) FROM deliveries WHERE status='unknown'").fetchone()[0]
+        paused_connectors = self._conn.execute("SELECT COUNT(*) FROM connectors WHERE status='paused'").fetchone()[0]
+
+        # readiness 判定
+        readiness_reasons: list[str] = []
+        readiness: str = "ready"
+        if pending_approvals > 0:
+            readiness_reasons.append(f"{pending_approvals} 个待审批")
+        if failed_tasks > 0:
+            readiness_reasons.append(f"{failed_tasks} 个失败任务")
+        if unknown_deliveries > 0:
+            readiness_reasons.append(f"{unknown_deliveries} 个未知投递")
+        if paused_connectors > 0:
+            readiness_reasons.append(f"{paused_connectors} 个连接器已暂停")
+        if readiness_reasons:
+            readiness = "degraded"
+
+        return {
+            "schema_version": "1",
+            "generated_at": now,
+            "profile": status["profile"],
+            "readiness": readiness,
+            "readiness_reasons": readiness_reasons,
+            "counts": status["counts"],
+            "usage_24h": {
+                "calls": usage_self["windowed"].get("calls", 0),
+                "input_tokens": usage_self["windowed"].get("input_tokens", 0),
+                "output_tokens": usage_self["windowed"].get("output_tokens", 0),
+                "cached_tokens": usage_self["windowed"].get("cached_tokens", 0),
+                "avg_latency_ms": usage_self["windowed"].get("avg_latency_ms", 0),
+                "errors": usage_self.get("recent_errors", 0),
+            },
+            "proactive": {
+                "mode": "dry_run" if cfg.capability.proactive.dry_run else ("live" if cfg.capability.proactive.enabled else "disabled"),
+                "candidates_queued": 0,  # proactive_candidates 表暂缺；由 repo 接入后填充
+                "decisions_24h": 0,
+                "daily_budget_used": 0,
+                "daily_budget_limit": cfg.capability.proactive.max_pushes_per_day,
+                "quiet_hours_active": False,
+            },
+            "resources": {
+                "sqlite_size_mb": 0.0,  # 由本地文件统计填充
+                "payload_size_mb": 0.0,
+                "trace_retention_days": 7,
+                "backup_freshness_hours": None,
+                "disk_pressure": "ok",
+            },
+            "worker": status["worker"],
+        }
+
+    def attention_items(self) -> list[dict[str, Any]]:
+        """生成待处理事项列表。"""
+        items: list[dict[str, Any]] = []
+        rows = self._conn.execute("SELECT COUNT(*) FROM approvals WHERE status='pending'").fetchone()[0]
+        if rows:
+            items.append({"kind": "approval", "severity": "warn", "label": "待审批", "count": rows, "target_route": "/commands"})
+        rows = self._conn.execute("SELECT COUNT(*) FROM tasks WHERE status='failed'").fetchone()[0]
+        if rows:
+            items.append({"kind": "failed_task", "severity": "danger", "label": "失败任务", "count": rows, "target_route": "/tasks"})
+        rows = self._conn.execute("SELECT COUNT(*) FROM deliveries WHERE status='unknown'").fetchone()[0]
+        if rows:
+            items.append({"kind": "unknown_delivery", "severity": "warn", "label": "未知投递", "count": rows, "target_route": "/deliveries"})
+        rows = self._conn.execute("SELECT COUNT(*) FROM memory_items WHERE status='candidate' AND deleted_at IS NULL").fetchone()[0]
+        if rows:
+            items.append({"kind": "memory_candidate", "severity": "info", "label": "待确认记忆", "count": rows, "target_route": "/memory"})
+        rows = self._conn.execute("SELECT COUNT(*) FROM connectors WHERE status='paused'").fetchone()[0]
+        if rows:
+            items.append({"kind": "connector_paused", "severity": "warn", "label": "连接器已暂停", "count": rows, "target_route": "/connectors"})
+        return items
+
+    def health_components(self) -> dict[str, Any]:
+        """组件级健康检查。"""
+        from datetime import UTC, datetime
+        now = datetime.now(UTC).isoformat()
+        components: list[dict[str, Any]] = []
+
+        # SQLite
+        try:
+            self._conn.execute("SELECT 1").fetchone()
+            components.append({"name": "SQLite", "status": "ok", "detail": "连接正常"})
+        except Exception as e:
+            components.append({"name": "SQLite", "status": "danger", "detail": str(e)})
+
+        # Worker / Scheduler（基于配置）
+        components.append({"name": "Worker", "status": "ok", "detail": f"并发 {self._config.worker.concurrency}"})
+        components.append({"name": "Scheduler", "status": "ok", "detail": "已启用"})
+
+        # Gateway（无法直接检测，基于配置占位）
+        components.append({"name": "Gateway", "status": "warn", "detail": "LangBot 状态未知"})
+
+        # Provider
+        components.append({"name": "Provider", "status": "ok", "detail": self._config.model.main.model or ""})
+
+        overall = "healthy"
+        if any(c["status"] == "danger" for c in components):
+            overall = "blocked"
+        elif any(c["status"] == "warn" for c in components):
+            overall = "degraded"
+
+        return {
+            "schema_version": "1",
+            "generated_at": now,
+            "overall": overall,
+            "components": components,
+        }

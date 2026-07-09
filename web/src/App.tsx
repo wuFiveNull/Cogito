@@ -6,11 +6,14 @@ import MemoryPage from "./pages/Memory";
 import ConnectorsPage from "./pages/Connectors";
 import ChannelsPage from "./pages/Channels";
 import CommandsPage from "./pages/Commands";
-import PluginsPage from "./pages/Plugins";
 import ChatPage from "./pages/Chat";
 import DeliveriesPage from "./pages/Deliveries";
 import TracePage from "./pages/Trace";
-import { MockBanner, StatusPill } from "./components";
+import ProactivePage from "./pages/Proactive";
+import CapabilitiesPage from "./pages/Capabilities";
+import SystemPage from "./pages/System";
+import TasksPage from "./pages/Tasks";
+import { MockBanner } from "./components";
 
 // ── 图标（内联 SVG，无外部依赖） ─────────────────────────────
 type IconName =
@@ -18,13 +21,13 @@ type IconName =
   | "chat"
   | "runs"
   | "tasks"
-  | "memory"
-  | "connectors"
-  | "channels"
-  | "trace"
+  | "proactive"
   | "deliveries"
-  | "commands"
-  | "plugins";
+  | "connectors"
+  | "memory"
+  | "capabilities"
+  | "trace"
+  | "system";
 
 function NavIcon({ name }: { name: IconName }) {
   const common = {
@@ -66,28 +69,12 @@ function NavIcon({ name }: { name: IconName }) {
           <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
         </svg>
       );
-    case "memory":
+    case "proactive":
       return (
         <svg {...common}>
-          <path d="M9 18h6" />
-          <path d="M10 22h4" />
-          <path d="M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.3 1 2.1V18h6v-1.2c0-.8.4-1.6 1-2.1A7 7 0 0 0 12 2z" />
-        </svg>
-      );
-    case "connectors":
-      return (
-        <svg {...common}>
-          <path d="M9 2v6M15 16v6" />
-          <path d="M6 8h12v8H6z" />
-          <path d="M12 8V2M12 16v6" />
-        </svg>
-      );
-    case "channels":
-      return (
-        <svg {...common}>
-          <circle cx="12" cy="12" r="2" />
-          <path d="M16.2 7.8a6 6 0 0 1 0 8.4M7.8 16.2a6 6 0 0 1 0-8.4" />
-          <path d="M19 5a9 9 0 0 1 0 14M5 19a9 9 0 0 1 0-14" />
+          <path d="M12 2L2 7l10 5 10-5-10-5z" />
+          <path d="M2 17l10 5 10-5" />
+          <path d="M2 12l10 5 10-5" />
         </svg>
       );
     case "deliveries":
@@ -99,10 +86,27 @@ function NavIcon({ name }: { name: IconName }) {
           <circle cx="17.5" cy="18.5" r="1.8" />
         </svg>
       );
-    case "commands":
+    case "connectors":
       return (
         <svg {...common}>
-          <path d="M4 17l6-6-6-6M12 19h8" />
+          <path d="M9 2v6M15 16v6" />
+          <path d="M6 8h12v8H6z" />
+          <path d="M12 8V2M12 16v6" />
+        </svg>
+      );
+    case "memory":
+      return (
+        <svg {...common}>
+          <path d="M9 18h6" />
+          <path d="M10 22h4" />
+          <path d="M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.3 1 2.1V18h6v-1.2c0-.8.4-1.6 1-2.1A7 7 0 0 0 12 2z" />
+        </svg>
+      );
+    case "capabilities":
+      return (
+        <svg {...common}>
+          <path d="M12 2v8M12 14v8M2 12h8M14 12h8" />
+          <circle cx="12" cy="12" r="3" />
         </svg>
       );
     case "trace":
@@ -116,28 +120,28 @@ function NavIcon({ name }: { name: IconName }) {
           <path d="M6 8v8M18 8v8M8 6h8M8 18h8" />
         </svg>
       );
-    case "plugins":
+    case "system":
       return (
         <svg {...common}>
-          <path d="M12 2v8M12 14v8M2 12h8M14 12h8" />
           <circle cx="12" cy="12" r="3" />
+          <path d="M12 1v3M12 21v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M1 12h3M20 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1" />
         </svg>
       );
   }
 }
 
 const NAV: { to: string; label: string; end?: boolean; icon: IconName }[] = [
-  { to: "/", label: "概览", end: true, icon: "overview" },
+  { to: "/", label: "总览", end: true, icon: "overview" },
   { to: "/chat", label: "对话", icon: "chat" },
   { to: "/runs", label: "运行", icon: "runs" },
   { to: "/tasks", label: "任务", icon: "tasks" },
-  { to: "/memory", label: "记忆", icon: "memory" },
-  { to: "/connectors", label: "连接器", icon: "connectors" },
-  { to: "/channels", label: "渠道", icon: "channels" },
-  { to: "/trace", label: "Trace", icon: "trace" },
+  { to: "/proactive", label: "主动系统", icon: "proactive" },
   { to: "/deliveries", label: "投递", icon: "deliveries" },
-  { to: "/commands", label: "命令", icon: "commands" },
-  { to: "/plugins", label: "插件", icon: "plugins" },
+  { to: "/connectors", label: "数据源", icon: "connectors" },
+  { to: "/memory", label: "记忆", icon: "memory" },
+  { to: "/capabilities", label: "能力", icon: "capabilities" },
+  { to: "/trace", label: "Trace & 审计", icon: "trace" },
+  { to: "/system", label: "系统", icon: "system" },
 ];
 
 function BrandMark() {
@@ -151,7 +155,7 @@ function BrandMark() {
       </div>
       <div className="leading-tight">
         <div className="text-sm font-extrabold tracking-wide text-ink">COGITO</div>
-        <div className="text-[10px] font-medium text-muted">Agent 运行时</div>
+        <div className="text-[10px] font-medium text-muted">Dashboard · 控制面</div>
       </div>
     </div>
   );
@@ -175,7 +179,7 @@ function Sidebar() {
         ))}
       </nav>
       <div className="mt-auto rounded-xl bg-surface-2 p-3 text-[11px] leading-relaxed text-muted">
-        暖色调可观测面板 · 与 QQ / Terminal 共享同一条 Core 主链路。
+        暖色调可观测面板 · 所有写操作经 Command API 并审计。
       </div>
     </aside>
   );
@@ -213,7 +217,7 @@ const turnsCfg: ResourceListConfig = {
   detailAttemptsLabel: "RunAttempts",
   cols: [
     { key: "turn_id", label: "ID", render: (r) => <span className="text-[11px]">{String(r.turn_id).slice(0, 10)}</span> },
-    { key: "status", label: "状态", render: (r) => <StatusPill status={String(r.status)} /> },
+    { key: "status", label: "状态", render: (r) => <span className={`pill ${r.status === "completed" ? "bg-ok/15 text-ok" : r.status === "failed" ? "bg-danger/15 text-danger" : "bg-info/15 text-info"}`}>{String(r.status)}</span> },
     { key: "channel", label: "渠道", render: (r) => <span className="text-[11px] text-muted">{String(r.channel ?? "-")}</span> },
     { key: "session_id", label: "会话", render: (r) => (
       <Link to={`/trace/${r.session_id}`} className="text-[11px] font-medium text-primary hover:text-primary-strong" title="查看该会话 Trace">
@@ -221,25 +225,6 @@ const turnsCfg: ResourceListConfig = {
       </Link>
     ) },
     { key: "created_at", label: "创建时间" },
-  ],
-};
-
-const tasksCfg: ResourceListConfig = {
-  title: "任务 (Tasks)",
-  statusOptions: ["queued", "running", "failed", "completed", "cancelled"],
-  fetchList: (status?: string) => api.tasks(status ? { status } : {}),
-  fetchDetail: async (id: string) => {
-    const d = await api.task(id);
-    return { item: d.task, attempts: d.attempts };
-  },
-  rowKey: "task_id",
-  detailAttemptsLabel: "TaskAttempts",
-  cols: [
-    { key: "task_id", label: "ID", render: (r) => <span className="text-[11px]">{String(r.task_id).slice(0, 10)}</span> },
-    { key: "task_type", label: "类型" },
-    { key: "status", label: "状态", render: (r) => <StatusPill status={String(r.status)} /> },
-    { key: "priority", label: "优先级" },
-    { key: "origin", label: "来源" },
   ],
 };
 
@@ -257,16 +242,18 @@ export default function App() {
               <Route path="/chat" element={<ChatPage />} />
               <Route path="/runs" element={<ResourceList cfg={turnsCfg} />} />
               <Route path="/runs/:id" element={<ResourceList cfg={turnsCfg} />} />
-              <Route path="/tasks" element={<ResourceList cfg={tasksCfg} />} />
-              <Route path="/tasks/:id" element={<ResourceList cfg={tasksCfg} />} />
-              <Route path="/memory" element={<MemoryPage />} />
+              <Route path="/tasks" element={<TasksPage />} />
+              <Route path="/proactive" element={<ProactivePage />} />
+              <Route path="/deliveries" element={<DeliveriesPage />} />
               <Route path="/connectors" element={<ConnectorsPage />} />
               <Route path="/channels" element={<ChannelsPage />} />
+              <Route path="/memory" element={<MemoryPage />} />
+              <Route path="/capabilities" element={<CapabilitiesPage />} />
               <Route path="/trace" element={<TracePage />} />
               <Route path="/trace/:id" element={<TracePage />} />
-              <Route path="/deliveries" element={<DeliveriesPage />} />
+              <Route path="/trace/:id/:mid" element={<TracePage />} />
+              <Route path="/system" element={<SystemPage />} />
               <Route path="/commands" element={<CommandsPage />} />
-              <Route path="/plugins" element={<PluginsPage />} />
             </Routes>
           </div>
         </main>

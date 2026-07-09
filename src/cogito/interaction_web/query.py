@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from cogito.bench.timing import get_last
 from cogito.interaction_web.deps import CommandDeps, get_command_deps
-from cogito.interaction_web.models import Pagination
+from cogito.interaction_web.models import AttentionItem, ComponentHealth, DashboardSummary, HealthComponents, Pagination
 from cogito.interaction_web.query_service import QueryService
 
 router = APIRouter(prefix="/api", tags=["query"])
@@ -216,3 +216,21 @@ def get_trace(trace_id: str, deps: CommandDeps = Depends(get_command_deps)) -> d
 @router.get("/plugins")
 def list_plugins(deps: CommandDeps = Depends(get_command_deps)) -> dict:
     return _svc(deps).list_plugins()
+
+
+# ── dashboard summary / attention / health ───────────────────
+
+
+@router.get("/dashboard/summary", response_model=DashboardSummary)
+def dashboard_summary(deps: CommandDeps = Depends(get_command_deps)) -> DashboardSummary:
+    return _svc(deps).dashboard_summary()
+
+
+@router.get("/dashboard/attention")
+def dashboard_attention(deps: CommandDeps = Depends(get_command_deps)) -> dict:
+    return {"items": _svc(deps).attention_items()}
+
+
+@router.get("/health/components", response_model=HealthComponents)
+def health_components(deps: CommandDeps = Depends(get_command_deps)) -> HealthComponents:
+    return _svc(deps).health_components()
