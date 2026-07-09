@@ -113,6 +113,7 @@ class ModelRequest:
     messages: tuple[dict[str, Any], ...] = ()
     tools: tuple[dict[str, Any], ...] = ()
     response_schema: dict[str, Any] | None = None
+    response_format: str | None = None
     temperature: float | None = None
     top_p: float | None = None
     max_output_tokens: int | None = None
@@ -133,7 +134,7 @@ class ModelRequest:
         return (
             f"ModelRequest(id={self.request_id}, role={self.model_role}, "
             f"messages={len(self.messages)}, tools={len(self.tools)}, "
-            f"stream={self.stream})"
+            f"stream={self.stream}, response_format={self.response_format!r})"
         )
 
 

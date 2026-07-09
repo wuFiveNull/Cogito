@@ -35,6 +35,26 @@ from cogito.model.errors import ModelProviderError
 from cogito.model.provider import HealthStatus, ModelProvider
 
 
+def _extract_text_from_content(content: Any) -> str:
+    """从可能为 content block 列表的模型输出中提取文本。
+
+    OpenAI 兼容接口在纯文本回复时返回字符串；多模态场景可能返回
+    [{"type":"text","text":"..."}, ...] 列表。本函数统一收敛为字符串。
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        pieces: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    pieces.append(str(block.get("text", "")))
+                elif block.get("type") == "input_text":
+                    pieces.append(str(block.get("text", "")))
+        return "".join(pieces)
+    return ""
+
+
 class OpenAICompatProvider(ModelProvider):
     """OpenAI-compatible HTTP Provider。
 
@@ -51,12 +71,21 @@ class OpenAICompatProvider(ModelProvider):
         base_url: str,
         timeout_seconds: int = 60,
         max_retries: int = 0,
+        *,
+        context_window: int = 128_000,
+        max_output_tokens: int = 4096,
+        modalities: tuple[str, ...] = ("text",),
     ) -> None:
         self._model = model
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._timeout = timedelta(seconds=timeout_seconds)
         self._max_retries = max_retries
+
+        # 能力参数（可按实际模型注入）
+        self._context_window = context_window
+        self._max_output_tokens = max_output_tokens
+        self._modalities = modalities
 
         # MODEL-ADAPTER / 6: 名称可逆映射
         self._tool_name_map: dict[str, str] = {}  # provider_name → canonical_name
@@ -219,13 +248,13 @@ class OpenAICompatProvider(ModelProvider):
 
     def capabilities(self) -> ModelCapabilities:
         return ModelCapabilities(
-            context_window=128000,
-            max_output_tokens=4096,
-            modalities=("text",),
+            context_window=self._context_window,
+            max_output_tokens=self._max_output_tokens,
+            modalities=self._modalities,
             supports_streaming=True,
             supports_tools=True,
             supports_parallel_tools=True,
-            supports_json_schema=False,
+            supports_json_schema=True,
             supports_prompt_cache=False,
         )
 
@@ -268,6 +297,10 @@ class OpenAICompatProvider(ModelProvider):
     def _build_payload(self, request: ModelRequest, stream: bool = False) -> dict[str, Any]:
         """构建 OpenAI-compatible 请求体。
 
+        支持多模态 content block 列表、tools、response_format/response_schema、top_p。
+        """
+        """构建 OpenAI-compatible 请求体。
+
         支持 tools（在 Phase 2 启用）。stream=True 时启用 SSE 流式。
         """
         # 重置名称映射并记录 (MODEL-ADAPTER / 6)
@@ -290,11 +323,15 @@ class OpenAICompatProvider(ModelProvider):
                 entry["tool_call_id"] = msg.get("tool_call_id", "")
             elif role == "assistant" and "tool_calls" in msg:
                 # assistant 含 tool_calls：content（可能空）+ tool_calls
-                if content:
+                # 多模态 assistant 回复也支持 content block 列表
+                if isinstance(content, list):
+                    entry["content"] = content
+                elif content:
                     entry["content"] = content
                 entry["tool_calls"] = msg["tool_calls"]
             else:
                 # user / system / assistant 普通
+                # 多模态：content 为 content block 列表时直接透传
                 entry["content"] = content
 
             messages.append(entry)
@@ -312,6 +349,21 @@ class OpenAICompatProvider(ModelProvider):
             payload["max_tokens"] = request.max_output_tokens
         if request.temperature is not None:
             payload["temperature"] = request.temperature
+        if request.top_p is not None:
+            payload["top_p"] = request.top_p
+
+        # 结构化输出：优先 response_schema（JSON Schema），其次 response_format
+        if request.response_schema:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": request.response_schema.get("name", "response"),
+                    "strict": True,
+                    "schema": request.response_schema,
+                },
+            }
+        elif request.response_format == "json":
+            payload["response_format"] = {"type": "json_object"}
 
         return payload
 
@@ -337,6 +389,9 @@ class OpenAICompatProvider(ModelProvider):
                 original_type="parse_error",
                 original_message=str(e),
             )) from e
+
+        # 多模态回复：content 可能为 content block 列表，提取文本部分
+        content = _extract_text_from_content(content)
 
         finish_reason = self._normalize_finish_reason(finish_reason_str)
         usage_data = data.get("usage", {})

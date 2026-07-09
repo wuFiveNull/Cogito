@@ -72,6 +72,32 @@ recovery_grace_period_seconds = 30
 #
 # 也支持环境变量引用：api_key = "${MY_API_KEY}"
 #
+# ── 多 Provider + 模型类别路由（推荐）──
+# 按功能（main/fast/vlm）路由到不同 Provider，无需业务代码感知模型名。
+# provider 字段指定适配器：openai_compat / anthropic / echo。
+#
+# [model.providers.openai]
+# provider = "openai_compat"
+# api_key = "${OPENAI_API_KEY}"
+# base_url = "https://api.aihubmix.com/v1"
+#
+# [model.providers.anthropic]
+# provider = "anthropic"
+# api_key = "${ANTHROPIC_API_KEY}"
+# 默认 base_url = https://api.anthropic.com
+#
+# [model.roles.main]
+# provider = "anthropic"
+# model = "claude-sonnet-4-20250514"
+#
+# [model.roles.fast]
+# provider = "openai"
+# model = "gpt-4o-mini"
+#
+# [model.roles.vlm]
+# provider = "openai"
+# model = "gpt-4o"
+#
 # ── 离线调试：Echo Provider（零 Token 消耗）──
 # 将用户最后一条消息原样返回，用于调试 Agent Loop / 工具调用链 / Trace 记录。
 # 配置方式：仅设置 provider = "echo"（无需 api_key / base_url）

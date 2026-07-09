@@ -28,6 +28,7 @@ from cogito.bench import timing as _bench_timing
 from cogito.capability import CapabilityRegistry
 from cogito.capability.executor import ToolExecutor
 from cogito.config import Config, ModelConfig
+from cogito.model.llm_manager import LLMManager, create_provider
 from cogito.model.provider import ModelProvider
 from cogito.model.router import ModelRouter
 from cogito.runtime.clock import Clock, ProductionClock
@@ -599,20 +600,14 @@ def build_agent_runner(
     """
     resolved_clock = clock or ProductionClock()
 
-    # 创建或使用 Provider
-    if provider is None:
-        provider = _create_provider(config.model)
+    # 创建 LLMManager（多 Provider 角色路由门面）
+    # 传入显式 provider 时（测试/自定义），退化到单 Provider 行为
+    if provider is not None:
+        llm_manager = LLMManager.from_provider(provider)
+    else:
+        llm_manager = LLMManager.build(config.model)
 
-    # 创建 Router
-    router = ModelRouter(
-        providers={"main": provider},
-        role_map={
-            "main": "main",
-            "memory_extractor": "main",
-            "summary": "main",
-            "query_rewriter": "main",
-        },
-    )
+    router = llm_manager.router
 
     # 创建 Registry 并发现内置工具
     resolved_registry = registry
@@ -717,28 +712,15 @@ async def build_and_start_agent_runner(
 
 
 def _create_provider(model_cfg: ModelConfig) -> ModelProvider:
-    """根据配置创建真实 ModelProvider。
+    """根据配置创建真实 ModelProvider（向后兼容包装）。
 
     - provider="echo"：回显 Provider，最后一条用户消息原样返回（离线调试用）
     - 缺省配置时创建 stub provider 以免意外使用真实模型。
     - 仅在完整配置时才创建真实 provider。
+
+    实际逻辑已下沉到 cogito.model.llm_manager.create_provider。
     """
-    if model_cfg.provider == "echo":
-        from cogito.model.echo_provider import EchoModelProvider
-        return EchoModelProvider()
-
-    endpoint = model_cfg.main
-    if not endpoint.is_configured():
-        from cogito.model.stub_provider import StubModelProvider
-        return StubModelProvider()
-
-    from cogito.model.openai_compat import OpenAICompatProvider
-    return OpenAICompatProvider(
-        model=endpoint.model,
-        api_key=endpoint.api_key,
-        base_url=endpoint.base_url,
-        timeout_seconds=endpoint.timeout_seconds,
-    )
+    return create_provider(model_cfg.main, default_adapter=model_cfg.provider)
 
 
 async def start_mcp_servers(

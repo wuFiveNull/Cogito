@@ -55,10 +55,11 @@ WORKER_FIELDS = frozenset({
     "recovery_grace_period_seconds",
 })
 
-MODEL_TOP_FIELDS = frozenset({"provider", "main"})
+MODEL_TOP_FIELDS = frozenset({"provider", "main", "providers", "roles"})
 MODEL_FIELDS = frozenset({
     "model", "provider", "api_key", "base_url", "timeout_seconds",
 })
+ROLE_FIELDS = frozenset({"provider", "model"})
 
 AGENT_FIELDS = frozenset({
     "system_prompt", "system_prompt_mode", "max_output_tokens",
@@ -321,8 +322,11 @@ class ModelEndpointConfig:
     """单个模型端点的配置。
 
     Plan 01 / 五、模型配置：兼容当前 [llm] 配置。
+    provider 字段声明适配器类型（openai_compat / anthropic / echo）；
+    未声明时由上层注入默认值。
     """
     model: str = ""
+    provider: str = ""
     api_key: str = ""
     base_url: str = ""
     timeout_seconds: int = 60
@@ -331,6 +335,7 @@ class ModelEndpointConfig:
         masked_key = _mask_sensitive("api_key", self.api_key)
         return (
             f"ModelEndpointConfig(model={self.model!r}, "
+            f"provider={self.provider!r}, "
             f"api_key={masked_key}, "
             f"base_url={self.base_url!r})"
         )
@@ -340,6 +345,7 @@ class ModelEndpointConfig:
         _check_unknown(raw, MODEL_FIELDS, "model")
         return cls(
             model=str(raw.get("model", "")),
+            provider=str(raw.get("provider", "")),
             api_key=str(raw.get("api_key", "")),
             base_url=str(raw.get("base_url", "")),
             timeout_seconds=int(raw.get("timeout_seconds", 60)),
@@ -351,22 +357,101 @@ class ModelEndpointConfig:
 
 
 @dataclass
-class ModelConfig:
-    """模型配置 —— 提供者选择与模型选择。"""
-    provider: str = "openai_compat"
-    main: ModelEndpointConfig = field(default_factory=ModelEndpointConfig)
+class RoleConfig:
+    """模型类别到 Provider 的映射。
+
+    例：main/fast/vlm → 引用 providers 中的某个 Provider + 可选 model 覆盖。
+    """
+    provider: str = ""  # 引用 ModelConfig.providers 的 key
+    model: str = ""     # 可选：覆盖 Provider 默认 model
 
     def __repr__(self) -> str:
-        return f"ModelConfig(provider={self.provider!r}, main={self.main!r})"
+        return f"RoleConfig(provider={self.provider!r}, model={self.model!r})"
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> RoleConfig:
+        _check_unknown(raw, ROLE_FIELDS, "model.roles.*")
+        return cls(
+            provider=str(raw.get("provider", "")),
+            model=str(raw.get("model", "")),
+        )
+
+
+@dataclass
+class ModelConfig:
+    """模型配置 —— 提供者选择与模型选择。
+
+    兼容两种写法：
+    - 传统单 provider：[model] provider + [model.main]
+    - 多 provider + 角色路由：[model.providers.<name>] + [model.roles.<name>]
+    当配置了 roles 时，按角色路由优先；否则退化到单 provider 行为。
+    """
+    provider: str = "openai_compat"
+    main: ModelEndpointConfig = field(default_factory=ModelEndpointConfig)
+    providers: dict[str, ModelEndpointConfig] = field(default_factory=dict)
+    roles: dict[str, RoleConfig] = field(default_factory=dict)
+
+    def __repr__(self) -> str:
+        return (
+            f"ModelConfig(provider={self.provider!r}, main={self.main!r}, "
+            f"providers={list(self.providers)}, roles={list(self.roles)})"
+        )
 
     @classmethod
     def _from_raw(cls, raw: dict[str, Any]) -> ModelConfig:
         _check_unknown(raw, MODEL_TOP_FIELDS, "model")
+
+        provider = str(raw.get("provider", "openai_compat"))
         main_raw = dict(raw.get("main", {}))
+        main = ModelEndpointConfig._from_raw(main_raw)
+
+        # 解析多 Provider：[model.providers.<name>]
+        providers: dict[str, ModelEndpointConfig] = {}
+        providers_raw = raw.get("providers", {})
+        if isinstance(providers_raw, dict):
+            for name, cfg in providers_raw.items():
+                if isinstance(cfg, dict):
+                    providers[str(name)] = ModelEndpointConfig._from_raw(dict(cfg))
+
+        # 解析角色路由：[model.roles.<name>]
+        roles: dict[str, RoleConfig] = {}
+        roles_raw = raw.get("roles", {})
+        if isinstance(roles_raw, dict):
+            for name, cfg in roles_raw.items():
+                if isinstance(cfg, dict):
+                    roles[str(name)] = RoleConfig._from_raw(dict(cfg))
+
         return cls(
-            provider=str(raw.get("provider", "openai_compat")),
-            main=ModelEndpointConfig._from_raw(main_raw),
+            provider=provider,
+            main=main,
+            providers=providers,
+            roles=roles,
         )
+
+    def resolve_role(self, role: str) -> tuple[str, ModelEndpointConfig]:
+        """解析角色到 (provider_key, endpoint)。
+
+        优先使用 roles 配置；否则退化到 ("main", main)。
+        role 可覆盖 model：返回一个 model 被替换的新 endpoint。
+        """
+        role_cfg = self.roles.get(role)
+        if role_cfg is None:
+            return ("main", self.main)
+
+        provider_key = role_cfg.provider or "main"
+        base = self.providers.get(provider_key, self.main)
+
+        # role 覆盖 model 时，构造新 endpoint 避免修改共享配置
+        if role_cfg.model and role_cfg.model != base.model:
+            return (provider_key, ModelEndpointConfig(
+                model=role_cfg.model,
+                provider=base.provider,
+                api_key=base.api_key,
+                base_url=base.base_url,
+                timeout_seconds=base.timeout_seconds,
+            ))
+
+        return (provider_key, base)
 
 
 # =============================================================================
