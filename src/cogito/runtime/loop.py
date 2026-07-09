@@ -5,6 +5,7 @@ AGENT-LOOP / 3. 单轮协议：统一 ModelResponse 输出类型。
 AGENT-LOOP / 4. Tool Call：执行并迭代。
 AGENT-LOOP / 5. 输出校验与修复：无效输出最多修复一次。
 AGENT-LOOP / 6. 终止条件。
+AGENT-LOOP / 11. 验收测试。
 """
 
 from __future__ import annotations
@@ -57,6 +58,7 @@ class LoopResult:
     usage: Usage = field(default_factory=Usage)
     latency_ms: int = 0
     iterations: int = 0
+    model_call_count: int = 0
     tool_call_count: int = 0
     error_message: str = ""
     finish_reason: FinishReason = FinishReason.stop
@@ -69,12 +71,52 @@ class LoopResult:
         return self.result_type == LoopResultType.final_response
 
 
+@dataclass(frozen=True)
+class ResourceBudget:
+    """Agent Loop 统一硬约束 (Plan 02 M4)。
+
+    跨 Attempt 恢复：Budget 从 Checkpoint 恢复，不归零。
+    限制至少覆盖：max_loop_iterations / max_model_calls / max_tool_calls /
+    max_input_tokens / max_output_tokens / max_wall_time / max_cost。
+    """
+    max_loop_iterations: int = 10
+    max_model_calls: int = 20
+    max_tool_calls: int = 50
+    max_input_tokens: int = 32000
+    max_output_tokens: int = 8192
+    max_wall_time_s: int = 120
+    max_cost: float = 0.0  # 0 = 不限
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "max_loop_iterations": self.max_loop_iterations,
+            "max_model_calls": self.max_model_calls,
+            "max_tool_calls": self.max_tool_calls,
+            "max_input_tokens": self.max_input_tokens,
+            "max_output_tokens": self.max_output_tokens,
+            "max_wall_time_s": self.max_wall_time_s,
+            "max_cost": self.max_cost,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ResourceBudget:
+        return cls(**{k: data.get(k, def_v) for k, def_v in {
+            "max_loop_iterations": 10, "max_model_calls": 20, "max_tool_calls": 50,
+            "max_input_tokens": 32000, "max_output_tokens": 8192,
+            "max_wall_time_s": 120, "max_cost": 0.0,
+        }.items()})
+
+
 @dataclass
 class LoopState:
-    """Agent Loop 运行时状态。"""
+    """Agent Loop 运行时状态。
+
+    明确记录轮次、模型调用数、Tool 调用数、重复签名和剩余预算。
+    """
     turn_id: str = ""
     attempt_id: str = ""
     iteration_no: int = 0
+    model_call_count: int = 0
     context_snapshot_id: str = ""
     messages: list[dict[str, Any]] = field(default_factory=list)
     pending_tool_calls: list[dict[str, Any]] = field(default_factory=list)
@@ -88,6 +130,10 @@ class LoopState:
     tool_call_count: int = 0
     tool_signatures: list[tuple[str, str]] = field(default_factory=list)
     tool_repaired: bool = False  # 本 attempt 是否已做过一次参数修复（AGENT-LOOP / 5）
+    # Budget (跨 Attempt 恢复)
+    budget: ResourceBudget = field(default_factory=ResourceBudget)
+    accumulated_cost: float = 0.0
+    output_repaired: bool = False  # 结构化输出失败只允许预算内修复一次
 
 
 class AgentLoop:
@@ -116,17 +162,21 @@ class AgentLoop:
         max_repeated_tool_signature: int = 3,
         max_runtime_s: int = 120,
         max_total_tokens: int = 32000,
+        budget: ResourceBudget | None = None,
         checkpoint_callback: Callable[[dict], None] | None = None,
     ) -> None:
         self._router = router
         self._registry = registry
         self._executor = executor
         self._toolsets = toolsets or set()
-        self._max_iterations = max_iterations
-        self._max_tool_calls = max_tool_calls
+        # ResourceBudget 优先；否则从 legacy 参数构造
+        self._budget = budget or ResourceBudget(
+            max_loop_iterations=max_iterations,
+            max_tool_calls=max_tool_calls,
+            max_wall_time_s=max_runtime_s,
+            max_input_tokens=max_total_tokens,
+        )
         self._max_repeated_tool_signature = max_repeated_tool_signature
-        self._max_runtime = timedelta(seconds=max_runtime_s)
-        self._max_total_tokens = max_total_tokens
         self._checkpoint_callback = checkpoint_callback
 
     async def run(
@@ -138,12 +188,13 @@ class AgentLoop:
         """执行 Agent Loop。"""
         state = LoopState(
             turn_id=context.turn_id,
+            attempt_id=getattr(context, "attempt_id", None) or "",
             context_snapshot_id=context.snapshot_id,
             started_at=datetime.now(UTC),
             iteration_no=0,
+            model_call_count=0,
+            budget=self._budget,
         )
-
-        output_repaired = False
 
         while True:
             state.iteration_no += 1
@@ -155,33 +206,41 @@ class AgentLoop:
                                          "Cancelled by request")
 
             # ── 终止条件检查（迭代次数）──
-            if state.iteration_no > self._max_iterations:
+            if state.iteration_no > state.budget.max_loop_iterations:
                 return self._make_result(LoopResultType.max_iterations, state,
-                                         f"Exceeded max iterations ({self._max_iterations})")
+                                         f"Exceeded max iterations ({state.budget.max_loop_iterations})")
+
+            # ── 终止条件检查（模型调用数）──
+            if state.model_call_count >= state.budget.max_model_calls:
+                return self._make_result(
+                    LoopResultType.max_iterations, state,
+                    f"Exceeded max model calls ({state.budget.max_model_calls})",
+                )
 
             # ── 终止条件检查（Tool 调用次数）──
-            if state.tool_call_count >= self._max_tool_calls:
+            if state.tool_call_count >= state.budget.max_tool_calls:
                 return self._make_result(
                     LoopResultType.max_tool_calls, state,
-                    f"Exceeded max tool calls ({self._max_tool_calls})",
+                    f"Exceeded max tool calls ({state.budget.max_tool_calls})",
                 )
 
             # ── 终止条件检查（运行时间）──
             elapsed = state.last_iteration_at - state.started_at
-            if elapsed > self._max_runtime:
+            if elapsed > timedelta(seconds=state.budget.max_wall_time_s):
                 return self._make_result(LoopResultType.max_runtime, state,
-                                         f"Exceeded max runtime ({self._max_runtime})")
+                                         f"Exceeded max runtime ({state.budget.max_wall_time_s}s)")
 
             # ── 终止条件检查（总 Token）──
-            if state.usage.total_tokens > self._max_total_tokens:
+            if state.usage.total_tokens > state.budget.max_input_tokens:
                 return self._make_result(LoopResultType.max_tokens, state,
-                                         f"Exceeded max tokens ({self._max_total_tokens})")
+                                         f"Exceeded max tokens ({state.budget.max_input_tokens})")
 
             # ── 构建 ModelRequest ──
             request = self._build_request(state, context)
 
             # ── 调用 Provider ──
             try:
+                state.model_call_count += 1
                 iter_start = datetime.now(UTC)
                 response = await self._router.generate(
                     request, model_role=model_role,
@@ -190,9 +249,10 @@ class AgentLoop:
                     (datetime.now(UTC) - iter_start).total_seconds() * 1000
                 )
                 _LOGGER.info(
-                    "AgentLoop iteration %d/%d: model call took %dms, "
+                    "AgentLoop iteration %d/%d (model_call #%d): model call took %dms, "
                     "finish=%s, tool_calls=%d, text_len=%d",
-                    state.iteration_no, self._max_iterations,
+                    state.iteration_no, state.budget.max_loop_iterations,
+                    state.model_call_count,
                     iter_latency,
                     response.finish_reason.value,
                     len(response.tool_calls),
@@ -255,13 +315,13 @@ class AgentLoop:
                     )
                 continue  # 继续下一轮迭代
             elif result == "_invalid":
-                if output_repaired:
+                if state.output_repaired:
                     return self._make_result(
                         LoopResultType.invalid_output, state,
                         "Invalid output after repair attempt",
                     )
-                # 修复一次：从消息中移除无效的 assistant 回复，重新请求
-                output_repaired = True
+                # 结构化输出失败只允许预算内修复一次（AGENT-LOOP / 5）
+                state.output_repaired = True
                 state.messages.pop()  # 移除无效回复
                 continue
 
@@ -300,15 +360,17 @@ class AgentLoop:
             if cancel_flag and cancel_flag():
                 return
 
-            # 终止条件检查
-            if state.iteration_no > self._max_iterations:
+            # 终止条件检查（使用 ResourceBudget 统一硬约束）
+            if state.iteration_no > state.budget.max_loop_iterations:
                 return
-            if state.tool_call_count >= self._max_tool_calls:
+            if state.model_call_count >= state.budget.max_model_calls:
+                return
+            if state.tool_call_count >= state.budget.max_tool_calls:
                 return
             elapsed = state.last_iteration_at - state.started_at
-            if elapsed > self._max_runtime:
+            if elapsed > timedelta(seconds=state.budget.max_wall_time_s):
                 return
-            if state.usage.total_tokens > self._max_total_tokens:
+            if state.usage.total_tokens > state.budget.max_input_tokens:
                 return
 
             # 构建请求并调用 Provider（判定用，非流式）
@@ -611,6 +673,7 @@ class AgentLoop:
             usage=usage or state.usage,
             latency_ms=state.total_latency_ms,
             iterations=state.iteration_no,
+            model_call_count=state.model_call_count,
             tool_call_count=state.tool_call_count,
             finish_reason=finish_reason,
         )
