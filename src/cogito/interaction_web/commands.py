@@ -36,6 +36,7 @@ from cogito.interaction_web.models import (
     MemoryDeletePayload,
     PauseConnectorPayload,
     PayloadGcDryRunPayload,
+    ReconcileDeliveryPayload,
     ReconcileReceiptPayload,
     ReplayDeliveryPayload,
     ReplayEventPayload,
@@ -480,6 +481,57 @@ def reconcile_receipt(
         changes={"before_reconcile": before_reconcile, "after_reconcile": "reconciled"},
     )
     return _ok("reconcile-receipt", payload.receipt_id, before=before_reconcile)
+
+
+@router.post("/reconcile-delivery", response_model=CommandResponse)
+def reconcile_delivery(
+    payload: "ReconcileDeliveryPayload", deps: CommandDeps = Depends(get_command_deps),
+) -> CommandResponse:
+    """对账投递：unknown → confirmed（写 receipt_kind=confirmed）。"""
+    from pydantic import BaseModel
+    # 动态引用避免循环（payload 是由 ReconcileDeliveryPayload 传入的）
+    class _Inline(BaseModel):
+        delivery_id: str
+    # 读取当前 delivery
+    delivery = deps.conn.execute(
+        "SELECT * FROM deliveries WHERE delivery_id=?", (payload.delivery_id,)
+    ).fetchone()
+    if delivery is None:
+        raise HTTPException(status_code=404, detail=f"delivery {payload.delivery_id} not found")
+    if delivery["status"] != "unknown":
+        return _fail("reconcile-delivery", payload.delivery_id,
+                     f"status is {delivery['status']}, only unknown can be reconciled")
+    # 写一条 confirmed receipt
+    import uuid
+    receipt_id = uuid.uuid4().hex
+    # 找到最新的 attempt
+    latest_attempt = deps.conn.execute(
+        "SELECT attempt_id FROM delivery_attempts WHERE delivery_id=? "
+        "ORDER BY attempt_no DESC LIMIT 1",
+        (payload.delivery_id,),
+    ).fetchone()
+    deps.conn.execute(
+        "INSERT INTO delivery_receipts "
+        "(receipt_id, delivery_id, delivery_attempt_id, operation_seq, "
+        " request_hash, receipt_kind, platform_message_id, observed_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (receipt_id, payload.delivery_id,
+         latest_attempt["attempt_id"] if latest_attempt else "",
+         0, "", "confirmed", delivery["platform_message_id"],
+         int(__import__("datetime").datetime.now(__import__("datetime").UTC).timestamp() * 1000)),
+    )
+    # 更新 delivery 状态
+    deps.conn.execute(
+        "UPDATE deliveries SET status='sent' WHERE delivery_id=?",
+        (payload.delivery_id,),
+    )
+    deps.conn.commit()
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="reconcile-delivery",
+        target_type="delivery", target_id=payload.delivery_id,
+        changes={"before": "unknown", "after": "sent", "receipt_id": receipt_id},
+    )
+    return _ok("reconcile-delivery", payload.delivery_id, receipt_id=receipt_id)
 
 
 @router.post("/disable-tool", response_model=CommandResponse)

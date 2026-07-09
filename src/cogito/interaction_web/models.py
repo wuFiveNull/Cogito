@@ -173,5 +173,9 @@ class RollbackConfigPayload(BaseCommandPayload):
     version_id: str
 
 
+class ReconcileDeliveryPayload(BaseCommandPayload):
+    delivery_id: str
+
+
 class PayloadGcDryRunPayload(BaseCommandPayload):
     pass

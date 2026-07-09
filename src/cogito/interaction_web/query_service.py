@@ -981,6 +981,55 @@ class QueryService:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    # ── delivery detail (attempts + receipts) ────────────────────
+
+    def get_delivery_detail(self, delivery_id: str) -> dict[str, Any] | None:
+        """投递详情：delivery + attempts timeline + receipts。"""
+        delivery = self._conn.execute(
+            "SELECT * FROM deliveries WHERE delivery_id=?", (delivery_id,)
+        ).fetchone()
+        if delivery is None:
+            return None
+        delivery_dict = dict(delivery)
+        # attempts timeline
+        attempts = self._conn.execute(
+            "SELECT * FROM delivery_attempts WHERE delivery_id=? ORDER BY attempt_no ASC",
+            (delivery_id,),
+        ).fetchall()
+        attempts_out: list[dict[str, Any]] = []
+        for a in attempts:
+            a_dict = dict(a)
+            # receipts for this attempt
+            receipts = self._conn.execute(
+                "SELECT * FROM delivery_receipts WHERE delivery_attempt_id=? ORDER BY operation_seq ASC",
+                (a["attempt_id"],),
+            ).fetchall()
+            a_dict["receipts"] = [dict(r) for r in receipts]
+            # 失败归因
+            if a["error"]:
+                a_dict["failure_reason"] = a["error"]
+            elif a_dict["status"] == "failed":
+                # 从关联 model_calls 找 error_category
+                err = self._conn.execute(
+                    "SELECT error_category FROM model_calls WHERE attempt_id=? AND status='error' LIMIT 1",
+                    (a["attempt_id"],),
+                ).fetchone()
+                a_dict["failure_reason"] = err["error_category"] if err else "unknown"
+            else:
+                a_dict["failure_reason"] = None
+            attempts_out.append(a_dict)
+        delivery_dict["attempts"] = attempts_out
+        # streaming operation sequence（按 operation_seq 聚合所有 receipts）
+        all_receipts = self._conn.execute(
+            "SELECT * FROM delivery_receipts WHERE delivery_id=? ORDER BY operation_seq ASC",
+            (delivery_id,),
+        ).fetchall()
+        delivery_dict["operation_sequence"] = [dict(r) for r in all_receipts]
+        # 关联对象
+        delivery_dict["related_turn"] = delivery_dict.get("turn_id")
+        delivery_dict["related_message"] = delivery_dict.get("final_message_id")
+        return delivery_dict
+
     # ── audit ────────────────────────────────────────────────────
 
     def list_audit(self, entity_id: str | None = None, action: str | None = None, limit: int = 50) -> list[dict[str, Any]]:

@@ -458,6 +458,8 @@ export const api = {
     request<{ items: Record<string, unknown>[]; total: number }>(
       `/deliveries${status ? `?status=${status}` : ""}`,
     ),
+  deliveryDetail: (id: string) =>
+    request<Record<string, unknown>>(`/deliveries/${id}`),
   trace: (id: string) => request<Record<string, unknown>>(`/traces/${id}`),
   plugins: () => request<{ items: Record<string, unknown>[]; count?: number }>("/plugins"),
   sessions: (limit = 100) =>

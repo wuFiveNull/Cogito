@@ -368,3 +368,14 @@ def list_backups(deps: CommandDeps = Depends(get_command_deps)) -> dict:
 @router.get("/config/versions")
 def list_config_versions(deps: CommandDeps = Depends(get_command_deps)) -> dict:
     return {"items": _svc(deps).list_config_versions()}
+
+
+# ── delivery detail (attempts + receipts + operation sequence) ──
+
+
+@router.get("/deliveries/{delivery_id}")
+def get_delivery_detail(delivery_id: str, deps: CommandDeps = Depends(get_command_deps)) -> dict:
+    out = _svc(deps).get_delivery_detail(delivery_id)
+    if out is None:
+        raise HTTPException(status_code=404, detail=f"delivery {delivery_id} not found")
+    return out
