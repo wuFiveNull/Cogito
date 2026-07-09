@@ -18,7 +18,7 @@ from typing import Any, Literal
 
 @dataclass(frozen=True)
 class ToolDef:
-    """注册表中的不可变工具定义。
+    """注册表中的不可变工具定义 (Capability Registry 2.0, Plan 03 M1)。
 
     一个 ToolDef 表示一项原子执行能力。
     同一 Tool 可属于多个 toolset。
@@ -31,18 +31,32 @@ class ToolDef:
     # handler 签名：async def handler(args: dict, context: ToolContext) -> str
     handler: Callable[..., Any] = field(compare=False, hash=False)
 
+    # ── Capability Registry 2.0 元数据 ──
+    version: str = "1.0"
+    namespace: str = "core"          # 全局唯一 namespace:name
     toolset: tuple[str, ...] = ("core",)
+    supported_modes: tuple[str, ...] = ()   # 空 = 所有模式
+    permissions: tuple[str, ...] = ()       # 所需权限声明
+    risk_level: Literal["low", "medium", "high"] = "low"
+    side_effect_class: Literal["none", "idempotent", "reconcilable", "non_retriable"] = "none"
+    resource_requirements: dict[str, Any] = field(default_factory=dict)
     check_fn: Callable[[], bool] | None = field(
         default=None, compare=False, hash=False,
     )
     requires_env: tuple[str, ...] = ()
-    risk_level: Literal["low", "medium", "high"] = "low"
-    supported_modes: tuple[str, ...] = ()
+    deprecated: bool = False
+    disabled: bool = False
+
+    @property
+    def capability_id(self) -> str:
+        """全局唯一 capability_id = namespace:name。"""
+        return f"{self.namespace}:{self.name}"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "toolset", tuple(self.toolset))
         object.__setattr__(self, "requires_env", tuple(self.requires_env))
         object.__setattr__(self, "supported_modes", tuple(self.supported_modes))
+        object.__setattr__(self, "permissions", tuple(self.permissions))
 
 
 # ── Tool 调用状态（运行时短生命周期）──
