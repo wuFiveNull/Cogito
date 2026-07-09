@@ -48,5 +48,14 @@
     {"file":"07_quality/00_安全策略可观察性与资源治理.md","doc_id":"SECURITY-OBS","title":"安全策略、可观察性与资源治理","version":"1.3","status":"active","layer":"subsystem-overview","domain":"quality","authority":"security-boundaries"},
     {"file":"07_quality/01_可观察性与审计.md","doc_id":"OBSERVABILITY-AUDIT","title":"可观察性与审计","version":"1.2","status":"active","layer":"quality-spec","domain":"quality","authority":"observability-audit"},
     {"file":"07_quality/02_测试回放与质量评估.md","doc_id":"TEST-EVALUATION","title":"测试、回放与质量评估","version":"1.0","status":"active","layer":"quality-spec","domain":"quality","authority":"testing-evaluation"}
+  ],
+  "plans": [
+    {"file":"plan/01_架构边界与领域契约下一步开发计划.md","plan_id":"PLAN-01","status":"completed","version":"1.0","covers":["Plan 01 M1-M6"]},
+    {"file":"plan/02_运行时认知检索与恢复下一步开发计划.md","plan_id":"PLAN-02","status":"completed","version":"1.0","covers":["Plan 02 M1-M8"]},
+    {"file":"plan/03_能力工具Sandbox与插件下一步开发计划.md","plan_id":"PLAN-03","status":"completed","version":"1.0","covers":["Plan 03 M1-M8"]},
+    {"file":"plan/04_后台任务Connector事件与主动系统下一步开发计划.md","plan_id":"PLAN-04","status":"completed","version":"1.0","covers":["Plan 04 M0-M9"]},
+    {"file":"plan/05_交互身份消息与投递下一步开发计划.md","plan_id":"PLAN-05","status":"completed","version":"1.0","covers":["Plan 05 M1-M9"]},
+    {"file":"plan/06_存储配置部署与数据治理下一步开发计划.md","plan_id":"PLAN-06","status":"completed","version":"1.0","covers":["Plan 06 M0-M10"]},
+    {"file":"plan/07_剩余任务收尾计划.md","plan_id":"PLAN-07","status":"completed","version":"1.0","covers":["Plan 04 M2","Plan 05 M2","Plan 06 M2/M5/M6"]}
   ]
 }

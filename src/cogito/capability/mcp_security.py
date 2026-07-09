@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from cogito.contracts.envelope import ErrorCategory, ErrorEnvelope
@@ -70,7 +70,10 @@ def sanitize_mcp_output(raw: bytes | str, max_chars: int = 50_000) -> str:
     return text
 
 
-def mcp_error_envelope(message: str, category: ErrorCategory = ErrorCategory.dependency_unavailable) -> ErrorEnvelope:
+def mcp_error_envelope(
+    message: str,
+    category: ErrorCategory = ErrorCategory.dependency_unavailable,
+) -> ErrorEnvelope:
     """MCP 错误标准映射。"""
     return ErrorEnvelope(
         category=category,
