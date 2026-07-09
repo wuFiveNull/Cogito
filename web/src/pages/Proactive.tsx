@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   api,
@@ -268,6 +268,86 @@ function PolicyControls({ status, onUpdate }: { status: ProactiveStatus; onUpdat
   );
 }
 
+// ── PROACTIVE_CONTEXT.md 管理 ────────────────────────────────
+
+function ProactiveContext() {
+  const ctx = useAsync(() => api.proactiveContext(), []);
+  const [content, setContent] = useState("");
+  const [diff, setDiff] = useState<{ has_changes: boolean; diff_lines: string[]; added_lines: number; removed_lines: number } | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+
+  // 加载后同步到编辑区
+  useEffect(() => {
+    if (ctx.data?.content) setContent(ctx.data.content);
+  }, [ctx.data?.content]);
+
+  const previewDiff = async () => {
+    const result = await api.proactiveContextDiff(content);
+    setDiff(result);
+    setEditing(true);
+  };
+
+  const submitImport = async () => {
+    try {
+      const r = await api.importProactiveContext(content);
+      setMsg(r.message);
+      setDiff(null);
+      setEditing(false);
+      ctx.reload();
+    } catch (e) {
+      setMsg(`导入失败：${e instanceof Error ? e.message : "未知错误"}`);
+    }
+  };
+
+  const rebuild = async () => {
+    try {
+      const r = await api.rebuildProactiveContext();
+      setMsg(r.message);
+      ctx.reload();
+    } catch (e) {
+      setMsg(`重建失败：${e instanceof Error ? e.message : "未知错误"}`);
+    }
+  };
+
+  if (ctx.loading) return <Loading />;
+  if (ctx.error) return <ErrorBox msg={ctx.error} />;
+
+  return (
+    <div className="space-y-3">
+      {msg && <div className="rounded-lg bg-ok/10 p-2 text-xs text-ok">{msg}</div>}
+      {!ctx.data?.file_exists && (
+        <div className="rounded-lg bg-warn/10 p-2 text-xs text-warn">PROACTIVE_CONTEXT.md 不存在，可从 SQLite 重建。</div>
+      )}
+      <div className="text-xs text-muted">
+        当前版本 v{ctx.data?.policy_version} · dry_run={ctx.data?.dry_run ? "是" : "否"}
+      </div>
+      <textarea
+        value={content}
+        onChange={(e) => setContent(e.target.value)}
+        rows={12}
+        className="w-full rounded-xl border border-borderc bg-surface-2 p-3 font-mono text-xs text-ink outline-none focus:border-primary"
+        placeholder="编辑 PROACTIVE_CONTEXT.md 内容…"
+      />
+      {editing && diff && (
+        <div className="rounded-xl border border-borderc bg-surface-2 p-3">
+          <div className="mb-2 text-xs text-muted">
+            变更：<span className="text-ok">+{diff.added_lines}</span> / <span className="text-danger">-{diff.removed_lines}</span>
+          </div>
+          <pre className="max-h-[30vh] overflow-auto rounded-lg bg-surface p-2 font-mono text-[10px] text-ink">
+            {diff.diff_lines.join("\n") || "无变更"}
+          </pre>
+        </div>
+      )}
+      <div className="flex flex-wrap gap-2">
+        <CommandButton variant="ghost" onClick={previewDiff}>预览 Diff</CommandButton>
+        <CommandButton onClick={submitImport} disabled={!diff?.has_changes}>提交导入</CommandButton>
+        <CommandButton variant="ghost" onClick={rebuild}>从 SQLite 重建</CommandButton>
+      </div>
+    </div>
+  );
+}
+
 // ── 主导航 ───────────────────────────────────────────────────
 
 export default function ProactivePage() {
@@ -350,6 +430,10 @@ export default function ProactivePage() {
       <Section title="策略控制" subtitle="调整主动系统参数（写操作走 Command API）">
         <PolicyControls status={s} onUpdate={refreshAll} />
       </Section>
+
+      <Collapsible title="PROACTIVE Context" badge={<Badge tone="info">.md</Badge>}>
+        <ProactiveContext />
+      </Collapsible>
     </div>
   );
 }

@@ -346,10 +346,8 @@ def list_reconcile(deps: CommandDeps = Depends(get_command_deps)) -> dict:
 
 @router.get("/skills")
 def list_skills(deps: CommandDeps = Depends(get_command_deps)) -> dict:
-    # skills 表暂未建立；返回 capabilities 中 kind='skill' 的子集
-    caps = _svc(deps).list_capabilities()
-    skills = [c for c in caps if c.get("kind") == "skill"]
-    return {"items": skills, "total": len(skills)}
+    items = _svc(deps).list_skills()
+    return {"items": items, "total": len(items)}
 
 
 # ── storage / backups / config ─────────────────────────────────
@@ -368,6 +366,46 @@ def list_backups(deps: CommandDeps = Depends(get_command_deps)) -> dict:
 @router.get("/config/versions")
 def list_config_versions(deps: CommandDeps = Depends(get_command_deps)) -> dict:
     return {"items": _svc(deps).list_config_versions()}
+
+
+# ── mcp connector configs ──────────────────────────────────────
+
+
+@router.get("/mcp-connector-configs")
+def list_mcp_connector_configs(deps: CommandDeps = Depends(get_command_deps)) -> dict:
+    return {"items": _svc(deps).list_mcp_connector_configs()}
+
+
+# ── connector detail ───────────────────────────────────────────
+
+
+@router.get("/connectors/{connector_id}")
+def get_connector_detail(connector_id: str, deps: CommandDeps = Depends(get_command_deps)) -> dict:
+    out = _svc(deps).get_connector_detail(connector_id)
+    if out is None:
+        raise HTTPException(status_code=404, detail=f"connector {connector_id} not found")
+    return out
+
+
+# ── proactive context (PROACTIVE_CONTEXT.md) ──────────────────
+
+
+@router.get("/proactive/context")
+def get_proactive_context(deps: CommandDeps = Depends(get_command_deps)) -> dict:
+    return _svc(deps).get_proactive_context()
+
+
+from pydantic import BaseModel
+
+class _ContextDiffBody(BaseModel):
+    content: str = ""
+
+@router.post("/proactive/context-diff")
+def proactive_context_diff(
+    body: _ContextDiffBody,
+    deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    return _svc(deps).proactive_context_diff(body.content)
 
 
 # ── delivery detail (attempts + receipts + operation sequence) ──

@@ -177,5 +177,30 @@ class ReconcileDeliveryPayload(BaseCommandPayload):
     delivery_id: str
 
 
+class ImportProactiveContextPayload(BaseCommandPayload):
+    content: str  # PROACTIVE_CONTEXT.md 的新内容
+
+
+class RebuildProactiveContextPayload(BaseCommandPayload):
+    pass
+
+
+class ForceConnectorPollPayload(BaseCommandPayload):
+    connector_id: str
+
+
+class ArchiveSkillPayload(BaseCommandPayload):
+    skill_id: str
+
+
+class RestoreSkillPayload(BaseCommandPayload):
+    skill_id: str
+
+
+class PinSkillPayload(BaseCommandPayload):
+    skill_id: str
+    pinned: bool = True
+
+
 class PayloadGcDryRunPayload(BaseCommandPayload):
     pass

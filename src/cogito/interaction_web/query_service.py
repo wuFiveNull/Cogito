@@ -1030,6 +1030,104 @@ class QueryService:
         delivery_dict["related_message"] = delivery_dict.get("final_message_id")
         return delivery_dict
 
+    # ── proactive context (PROACTIVE_CONTEXT.md) ────────────────
+
+    def get_proactive_context(self) -> dict[str, Any]:
+        """读取当前 PROACTIVE_CONTEXT.md 内容 + 当前 policy 版本。"""
+        from pathlib import Path
+        workspace = Path(self._config.workspace_path)
+        context_file = workspace / "PROACTIVE_CONTEXT.md"
+        content = ""
+        if context_file.exists():
+            content = context_file.read_text(encoding="utf-8")
+        # 直接读最新版本，避免 repo.get_current() 的 NOT NULL 约束问题
+        row = self._conn.execute(
+            "SELECT * FROM proactive_policies ORDER BY version DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return {
+                "content": content,
+                "policy_version": 1,
+                "dry_run": True,
+                "file_exists": context_file.exists(),
+            }
+        return {
+            "content": content,
+            "policy_version": row["version"],
+            "dry_run": bool(row["dry_run"]),
+            "file_exists": context_file.exists(),
+        }
+
+    def proactive_context_diff(self, new_content: str) -> dict[str, Any]:
+        """计算当前文件与新内容的 diff。"""
+        import difflib
+        from pathlib import Path
+        workspace = Path(self._config.workspace_path)
+        context_file = workspace / "PROACTIVE_CONTEXT.md"
+        current = ""
+        if context_file.exists():
+            current = context_file.read_text(encoding="utf-8")
+        current_lines = current.splitlines(keepends=True)
+        new_lines = new_content.splitlines(keepends=True)
+        diff = list(difflib.unified_diff(
+            current_lines, new_lines,
+            fromfile="current", tofile="proposed", lineterm="",
+        ))
+        return {
+            "has_changes": current != new_content,
+            "diff_lines": diff,
+            "added_lines": sum(1 for l in diff if l.startswith("+") and not l.startswith("+++")),
+            "removed_lines": sum(1 for l in diff if l.startswith("-") and not l.startswith("---")),
+        }
+
+    # ── connector detail ─────────────────────────────────────────
+
+    def list_mcp_connector_configs(self) -> list[dict[str, Any]]:
+        """读 mcp_connector_configs 表 → MCP 服务器列表。"""
+        rows = self._conn.execute(
+            "SELECT m.*, c.name, c.connector_type, c.status "
+            "FROM mcp_connector_configs m "
+            "JOIN connectors c ON c.connector_id = m.connector_id "
+            "ORDER BY m.server_name ASC LIMIT 100"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_connector_detail(self, connector_id: str) -> dict[str, Any] | None:
+        """连接器详情：connector + cursor + items + ingestion stats。"""
+        connector = self._conn.execute(
+            "SELECT * FROM connectors WHERE connector_id=?", (connector_id,)
+        ).fetchone()
+        if connector is None:
+            return None
+        result = dict(connector)
+        # cursor
+        cursor = self._conn.execute(
+            "SELECT * FROM connector_cursors WHERE connector_id=?", (connector_id,)
+        ).fetchone()
+        result["cursor"] = dict(cursor) if cursor else None
+        # ingestion stats
+        stats = self._conn.execute(
+            "SELECT status, COUNT(*) AS n FROM connector_items "
+            "WHERE connector_id=? GROUP BY status",
+            (connector_id,),
+        ).fetchall()
+        result["ingestion_stats"] = {r["status"]: r["n"] for r in stats}
+        # items
+        items = self._conn.execute(
+            "SELECT * FROM connector_items WHERE connector_id=? "
+            "ORDER BY created_at DESC LIMIT 100",
+            (connector_id,),
+        ).fetchall()
+        result["items"] = [dict(r) for r in items]
+        # outbox events
+        events = self._conn.execute(
+            "SELECT * FROM outbox_events WHERE aggregate_id=? "
+            "ORDER BY created_at DESC LIMIT 50",
+            (connector_id,),
+        ).fetchall()
+        result["events"] = [dict(r) for r in events]
+        return result
+
     # ── audit ────────────────────────────────────────────────────
 
     def list_audit(self, entity_id: str | None = None, action: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
@@ -1051,6 +1149,14 @@ class QueryService:
     def list_capabilities(self) -> list[dict[str, Any]]:
         rows = self._conn.execute("SELECT * FROM capabilities ORDER BY discovered_at DESC LIMIT 200").fetchall()
         return [dict(r) for r in rows]
+
+    def list_skills(self) -> list[dict[str, Any]]:
+        """读 skills 表。"""
+        try:
+            rows = self._conn.execute("SELECT * FROM skills ORDER BY name ASC LIMIT 200").fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
 
     def list_tool_calls(self, limit: int = 50) -> list[dict[str, Any]]:
         rows = self._conn.execute(

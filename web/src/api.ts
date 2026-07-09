@@ -448,6 +448,8 @@ export const api = {
       `/memory?q=${encodeURIComponent(q)}&limit=${limit}`,
     ),
   connectors: () => request<{ items: Record<string, unknown>[] }>("/connectors"),
+  connectorDetail: (id: string) => request<Record<string, unknown>>(`/connectors/${id}`),
+  mcpConnectorConfigs: () => request<{ items: Record<string, unknown>[] }>("/mcp-connector-configs"),
   channels: () => request<{ items: Record<string, unknown>[] }>("/channels"),
   conversations: () => request<{ items: Record<string, unknown>[] }>("/conversations"),
   conversationMessages: (conversationId: string, limit = 200) =>
@@ -498,6 +500,22 @@ export const api = {
     request<{ items: ScheduledRequest[] }>("/proactive/scheduled-requests"),
   proactiveDigests: () => request<{ items: DigestBucket[] }>("/proactive/digests"),
   proactiveFeedback: () => request<ProactiveFeedback>("/proactive/feedback"),
+  proactiveContext: () => request<{ content: string; policy_version: number; dry_run: boolean; file_exists: boolean }>("/proactive/context"),
+  proactiveContextDiff: (content: string) =>
+    request<{ has_changes: boolean; diff_lines: string[]; added_lines: number; removed_lines: number }>(
+      "/proactive/context-diff",
+      { method: "POST", body: JSON.stringify({ content }) },
+    ),
+  importProactiveContext: (content: string) =>
+    request<CommandResponse>("/commands/import-proactive-context", {
+      method: "POST",
+      body: JSON.stringify({ content, idempotency_key: `import-${Date.now()}` }),
+    }),
+  rebuildProactiveContext: () =>
+    request<CommandResponse>("/commands/rebuild-proactive-context", {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
   reviewProactiveCandidate: (candidateId: string, action: string) =>
     request<CommandResponse>("/commands/review-proactive-candidate", {
       method: "POST",

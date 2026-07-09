@@ -170,19 +170,43 @@ function ReceiptList({ receipts, onRefresh }: { receipts: SideEffectReceipt[]; o
 
 // ── Skills ───────────────────────────────────────────────────
 
-function SkillsSection({ skills }: { skills: Skill[] }) {
+function SkillsSection({ skills, onRefresh }: { skills: Skill[]; onRefresh: () => void }) {
+  const [acting, setActing] = useState<string | null>(null);
+
+  async function act(action: string, skillId: string) {
+    setActing(skillId);
+    try {
+      await api.command(action, { skill_id: skillId });
+      onRefresh();
+    } catch (e) {
+      alert(`${action} 失败：${e instanceof Error ? e.message : "未知错误"}`);
+    } finally {
+      setActing(null);
+    }
+  }
+
   if (skills.length === 0) return <Empty msg="暂无 Skill" />;
   return (
     <div className="grid gap-3 sm:grid-cols-2">
       {skills.map((s) => (
-        <div key={s.skill_id} className="flex items-center justify-between rounded-xl border border-borderc bg-surface-2 p-3 text-sm">
-          <div>
+        <div key={s.skill_id} className="rounded-xl border border-borderc bg-surface-2 p-3 text-sm">
+          <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <span className="font-medium text-ink">{s.name}</span>
               <StatusPill status={s.status} />
               {s.pinned && <Badge tone="accent">置顶</Badge>}
             </div>
-            <div className="text-[11px] text-muted">版本 {s.version}{s.archived_at ? ` · 归档于 ${new Date(s.archived_at).toLocaleDateString("zh-CN")}` : ""}</div>
+          </div>
+          <div className="text-[11px] text-muted">版本 {s.version}{s.archived_at ? ` · 归档于 ${new Date(s.archived_at).toLocaleDateString("zh-CN")}` : ""}</div>
+          <div className="mt-2 flex gap-1">
+            {s.status === "active" ? (
+              <CommandButton variant="ghost" disabled={acting === s.skill_id} onClick={() => act("archive-skill", s.skill_id)}>归档</CommandButton>
+            ) : (
+              <CommandButton variant="ghost" disabled={acting === s.skill_id} onClick={() => act("restore-skill", s.skill_id)}>恢复</CommandButton>
+            )}
+            <CommandButton variant="ghost" disabled={acting === s.skill_id} onClick={() => act("pin-skill", s.skill_id)}>
+              {s.pinned ? "取消置顶" : "置顶"}
+            </CommandButton>
           </div>
         </div>
       ))}
@@ -197,18 +221,20 @@ export default function CapabilitiesPage() {
   const toolCalls = useAsync(() => api.toolCalls(), []);
   const receipts = useAsync(() => api.receipts(), []);
   const skills = useAsync(() => api.skills(), []);
+  const mcp = useAsync(() => api.mcpConnectorConfigs(), []);
 
   const refreshAll = () => {
     tools.reload();
     toolCalls.reload();
     receipts.reload();
     skills.reload();
+    mcp.reload();
   };
 
   const loading = tools.loading || toolCalls.loading || receipts.loading || skills.loading;
   if (loading) return <Loading />;
 
-  const mcpServers: McpServer[] = []; // MCP 数据内嵌在 tools 响应中的扩展字段，这里做演示占位
+  const mcpServers = (mcp.data?.items ?? []) as unknown as McpServer[];
 
   return (
     <div className="space-y-5">
@@ -222,7 +248,7 @@ export default function CapabilitiesPage() {
         <ToolRegistry tools={tools.data?.items ?? []} onRefresh={refreshAll} />
       </Section>
 
-      <Collapsible title="MCP 服务器" badge={<Badge tone="info">{mcpServers.length || 2}</Badge>}>
+      <Collapsible title="MCP 服务器" badge={<Badge tone="info">{mcpServers.length || 0}</Badge>}>
         <McpServers servers={mcpServers} />
       </Collapsible>
 
@@ -234,8 +260,8 @@ export default function CapabilitiesPage() {
         <ReceiptList receipts={receipts.data?.items ?? []} onRefresh={refreshAll} />
       </Collapsible>
 
-      <Collapsible title="Skills">
-        <SkillsSection skills={skills.data?.items ?? []} />
+      <Collapsible title="Skills" badge={<Badge tone="info">{skills.data?.total ?? 0}</Badge>}>
+        <SkillsSection skills={skills.data?.items ?? []} onRefresh={refreshAll} />
       </Collapsible>
 
       <Collapsible title="Sandbox Profiles" badge={<Badge tone="muted">演示</Badge>}>

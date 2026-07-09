@@ -36,8 +36,14 @@ from cogito.interaction_web.models import (
     MemoryDeletePayload,
     PauseConnectorPayload,
     PayloadGcDryRunPayload,
+    ArchiveSkillPayload,
+    ForceConnectorPollPayload,
+    ImportProactiveContextPayload,
+    PinSkillPayload,
+    RebuildProactiveContextPayload,
     ReconcileDeliveryPayload,
     ReconcileReceiptPayload,
+    RestoreSkillPayload,
     ReplayDeliveryPayload,
     ReplayEventPayload,
     RestoreBackupPayload,
@@ -483,6 +489,154 @@ def reconcile_receipt(
     return _ok("reconcile-receipt", payload.receipt_id, before=before_reconcile)
 
 
+@router.post("/force-connector-poll", response_model=CommandResponse)
+def force_connector_poll(
+    payload: ForceConnectorPollPayload, deps: CommandDeps = Depends(get_command_deps),
+) -> CommandResponse:
+    """强制触发 Connector poll（重置 next_fire_at 或写入 poll 调度）。"""
+    cached = _check_idempotency(deps.conn, ACTOR, "force-connector-poll", payload.idempotency_key)
+    if cached:
+        return cached
+    connector = deps.conn.execute(
+        "SELECT * FROM connectors WHERE connector_id=?", (payload.connector_id,)
+    ).fetchone()
+    if connector is None:
+        raise HTTPException(status_code=404, detail=f"connector {payload.connector_id} not found")
+    # 关联 active schedule，触发一次 fire
+    from datetime import UTC, datetime
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    sched = deps.conn.execute(
+        "SELECT * FROM schedules WHERE connector_id=? AND enabled=1 LIMIT 1",
+        (payload.connector_id,),
+    ).fetchone()
+    if sched:
+        deps.conn.execute(
+            "UPDATE schedules SET next_fire_at=? WHERE schedule_id=?",
+            (now_ms, sched["schedule_id"]),
+        )
+        deps.conn.commit()
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="force-connector-poll",
+        target_type="connector", target_id=payload.connector_id,
+        changes={"schedule_id": sched["schedule_id"] if sched else None},
+    )
+    return _ok("force-connector-poll", payload.connector_id)
+
+
+@router.post("/import-proactive-context", response_model=CommandResponse)
+def import_proactive_context(
+    payload: ImportProactiveContextPayload, deps: CommandDeps = Depends(get_command_deps),
+) -> CommandResponse:
+    """导入 PROACTIVE_CONTEXT.md：写文件 + 解析为 ProactivePolicy 新版本。"""
+    # 幂等检查
+    cached = _check_idempotency(deps.conn, ACTOR, "import-proactive-context", payload.idempotency_key)
+    if cached:
+        return cached
+    import json
+    from pathlib import Path
+    import uuid
+    from datetime import UTC, datetime
+    workspace = Path(deps.config.workspace_path)
+    context_file = workspace / "PROACTIVE_CONTEXT.md"
+    # 写文件
+    context_file.write_text(payload.content, encoding="utf-8")
+    # 简单解析：提取黑白名单主题
+    allow_topics, deny_topics = _parse_topics_from_markdown(payload.content)
+    # 读当前最新版本
+    current = deps.conn.execute(
+        "SELECT * FROM proactive_policies ORDER BY version DESC LIMIT 1"
+    ).fetchone()
+    new_version = (current["version"] + 1) if current else 1
+    dry_run = bool(current["dry_run"]) if current else True
+    new_id = uuid.uuid4().hex
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    deps.conn.execute(
+        "INSERT INTO proactive_policies "
+        "(policy_id, principal_id, version, allow_topics_json, deny_topics_json, "
+        " dry_run, filters_json, updated_by, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (new_id, "owner", new_version,
+         json.dumps(allow_topics, ensure_ascii=False),
+         json.dumps(deny_topics, ensure_ascii=False),
+         1 if dry_run else 0,
+         "{}", "dashboard-import", now_ms),
+    )
+    deps.conn.commit()
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="import-proactive-context",
+        target_type="proactive_context", target_id=new_policy.policy_id,
+        changes={"version": new_policy.version, "allow_topics": allow_topics, "deny_topics": deny_topics},
+    )
+    return _ok("import-proactive-context", new_policy.policy_id, version=new_policy.version,
+                allow_topics=allow_topics, deny_topics=deny_topics)
+
+
+def _parse_topics_from_markdown(content: str) -> tuple[list[str], list[str]]:
+    """从 PROACTIVE_CONTEXT.md 提取白名单/黑名单主题。"""
+    allow, deny = [], []
+    section = None
+    for line in content.splitlines():
+        stripped = line.strip()
+        if "白名单" in stripped:
+            section = "allow"
+        elif "黑名单" in stripped:
+            section = "deny"
+        elif stripped.startswith("#"):
+            section = None
+        elif stripped.startswith("- ") and section == "allow":
+            allow.append(stripped[2:].strip())
+        elif stripped.startswith("- ") and section == "deny":
+            deny.append(stripped[2:].strip())
+    return allow, deny
+
+
+@router.post("/rebuild-proactive-context", response_model=CommandResponse)
+def rebuild_proactive_context(
+    payload: RebuildProactiveContextPayload, deps: CommandDeps = Depends(get_command_deps),
+) -> CommandResponse:
+    """从 SQLite proactive_policies 重建 PROACTIVE_CONTEXT.md。"""
+    row = deps.conn.execute(
+        "SELECT * FROM proactive_policies ORDER BY version DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return _fail("rebuild-proactive-context", "none", "no policy found")
+    import json
+    class _P:
+        pass
+    policy = _P()
+    policy.version = row["version"]
+    policy.dry_run = bool(row["dry_run"])
+    policy.allow_topics = json.loads(row["allow_topics_json"] or "[]")
+    policy.deny_topics = json.loads(row["deny_topics_json"] or "[]")
+    bud = json.loads(row["budgets_json"] or "{}")
+    policy.max_pushes_per_hour = bud.get("max_pushes_per_hour", 3)
+    policy.max_pushes_per_day = bud.get("max_pushes_per_day", 10)
+    # 渲染 Markdown
+    md_lines = ["# Proactive Context", ""]
+    md_lines.append(f"> 版本 v{policy.version} · dry_run={'是' if policy.dry_run else '否'}")
+    md_lines.append("")
+    md_lines.append("## 白名单（可以推的主题）")
+    for t in policy.allow_topics:
+        md_lines.append(f"- {t}")
+    md_lines.append("")
+    md_lines.append("## 黑名单（不要推的主题）")
+    for t in policy.deny_topics:
+        md_lines.append(f"- {t}")
+    md_lines.append("")
+    md_lines.append("## 过滤条件")
+    md_lines.append(f"- 每小时最多推 {policy.max_pushes_per_hour} 次")
+    md_lines.append(f"- 每天最多推 {policy.max_pushes_per_day} 次")
+    from pathlib import Path
+    context_file = Path(deps.config.workspace_path) / "PROACTIVE_CONTEXT.md"
+    context_file.write_text("\n".join(md_lines), encoding="utf-8")
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="rebuild-proactive-context",
+        target_type="proactive_context", target_id=policy.policy_id,
+        changes={"version": policy.version},
+    )
+    return _ok("rebuild-proactive-context", policy.policy_id, version=policy.version)
+
+
 @router.post("/reconcile-delivery", response_model=CommandResponse)
 def reconcile_delivery(
     payload: "ReconcileDeliveryPayload", deps: CommandDeps = Depends(get_command_deps),
@@ -532,6 +686,93 @@ def reconcile_delivery(
         changes={"before": "unknown", "after": "sent", "receipt_id": receipt_id},
     )
     return _ok("reconcile-delivery", payload.delivery_id, receipt_id=receipt_id)
+
+
+@router.post("/archive-skill", response_model=CommandResponse)
+def archive_skill(
+    payload: ArchiveSkillPayload, deps: CommandDeps = Depends(get_command_deps),
+) -> CommandResponse:
+    """归档 skill：skills 表 status → archived。"""
+    import sqlite3
+    from datetime import UTC, datetime
+    from pathlib import Path
+    # 优先 skills 表，其次 capabilities
+    row = deps.conn.execute("SELECT * FROM skills WHERE skill_id=?", (payload.skill_id,)).fetchone()
+    if row is None:
+        row = deps.conn.execute("SELECT * FROM capabilities WHERE capability_id=? OR name=?", (payload.skill_id, payload.skill_id)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"skill {payload.skill_id} not found")
+    before_status = row["status"] if "status" in row.keys() else "active"
+    deps.conn.execute(
+        "UPDATE skills SET status='archived', archived_at=?, updated_at=? WHERE skill_id=?",
+        (datetime.now(UTC).isoformat(), datetime.now(UTC).isoformat(), payload.skill_id),
+    )
+    if deps.conn.total_changes == 0:
+        # 尝试 capabilities
+        deps.conn.execute(
+            "UPDATE capabilities SET disabled=1, health='archived' WHERE capability_id=? OR name=?",
+            (payload.skill_id, payload.skill_id),
+        )
+    deps.conn.commit()
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="archive-skill",
+        target_type="skill", target_id=payload.skill_id,
+        changes={"before": before_status, "after": "archived"},
+    )
+    return _ok("archive-skill", payload.skill_id, before=before_status)
+
+
+@router.post("/restore-skill", response_model=CommandResponse)
+def restore_skill(
+    payload: RestoreSkillPayload, deps: CommandDeps = Depends(get_command_deps),
+) -> CommandResponse:
+    """恢复 skill：status → active。"""
+    from datetime import UTC, datetime
+    row = deps.conn.execute("SELECT * FROM skills WHERE skill_id=?", (payload.skill_id,)).fetchone()
+    if row is None:
+        row = deps.conn.execute("SELECT * FROM capabilities WHERE capability_id=? OR name=?", (payload.skill_id, payload.skill_id)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"skill {payload.skill_id} not found")
+    before_status = row["status"] if "status" in row.keys() else "archived"
+    deps.conn.execute(
+        "UPDATE skills SET status='active', archived_at=NULL, updated_at=? WHERE skill_id=?",
+        (datetime.now(UTC).isoformat(), payload.skill_id),
+    )
+    if deps.conn.total_changes == 0:
+        deps.conn.execute(
+            "UPDATE capabilities SET disabled=0, health='healthy' WHERE capability_id=? OR name=?",
+            (payload.skill_id, payload.skill_id),
+        )
+    deps.conn.commit()
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="restore-skill",
+        target_type="skill", target_id=payload.skill_id,
+        changes={"before": before_status, "after": "active"},
+    )
+    return _ok("restore-skill", payload.skill_id, before=before_status)
+
+
+@router.post("/pin-skill", response_model=CommandResponse)
+def pin_skill(
+    payload: PinSkillPayload, deps: CommandDeps = Depends(get_command_deps),
+) -> CommandResponse:
+    """置顶/取消置顶 skill。"""
+    from datetime import UTC, datetime
+    row = deps.conn.execute("SELECT * FROM skills WHERE skill_id=?", (payload.skill_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"skill {payload.skill_id} not found in skills table")
+    before_pinned = bool(row["pinned"])
+    deps.conn.execute(
+        "UPDATE skills SET pinned=?, updated_at=? WHERE skill_id=?",
+        (1 if payload.pinned else 0, datetime.now(UTC).isoformat(), payload.skill_id),
+    )
+    deps.conn.commit()
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="pin-skill",
+        target_type="skill", target_id=payload.skill_id,
+        changes={"before_pinned": before_pinned, "after_pinned": payload.pinned},
+    )
+    return _ok("pin-skill", payload.skill_id, pinned=payload.pinned)
 
 
 @router.post("/disable-tool", response_model=CommandResponse)
