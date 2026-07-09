@@ -54,6 +54,10 @@ def main() -> None:
         "check", help="Validate configuration file and report status"
     )
     _add_config_arg(config_check)
+    config_dump = config_sub.add_parser(
+        "dump", help="Dump effective config (secrets masked)"
+    )
+    _add_config_arg(config_dump)
 
     # ── Memory CLI (H1) ──
     memory_parser = sub.add_parser("memory", help="Memory management CLI")
@@ -156,11 +160,49 @@ def _cmd_config(args: argparse.Namespace) -> None:
         print(f"[ok] workspace: {Path(config.workspace_path).resolve()}")
         print(f"[ok] model:     {model_label}")
         print("[ok] schema:    valid")
+        if config.content_hash:
+            print(f"[ok] cfg_hash:  {config.content_hash}")
         if config.channel.qq.enabled:
             print(f"[ok] channel.qq: enabled (instance={config.channel.qq.instance_id})")
         return
+    elif args.config_command == "dump":
+        # Plan 06 M2: 输出有效配置（Secret 脱敏）
+        import tomllib
+        config_path = _resolve_config_path(args).resolve()
+        if not config_path.exists():
+            raise SystemExit(f"Config file not found: {config_path}")
+        with config_path.open("rb") as f:
+            raw = tomllib.load(f)
+        config = Config.load(config_path)
+        _print_config_dump(raw, config)
+        return
     else:
         raise SystemExit(f"Unknown config subcommand: {args.config_command}")
+
+
+def _print_config_dump(raw: dict, config: Config) -> None:
+    """打印配置转储（敏感字段脱敏）。"""
+    import json
+
+    from cogito.config import SENSITIVE_FIELDS
+
+    def mask(obj):
+        if isinstance(obj, dict):
+            return {
+                k: ("****" if k.lower() in SENSITIVE_FIELDS else mask(v))
+                for k, v in obj.items()
+            }
+        if isinstance(obj, list):
+            return [mask(i) for i in obj]
+        return obj
+
+    print("# Effective configuration (secrets masked)")
+    print(f"# config_version: {config.config_version}")
+    print(f"# schema_version: {config.schema_version}")
+    print(f"# content_hash:   {config.content_hash}")
+    print(f"# profile:        {config.runtime.profile}")
+    print()
+    print(json.dumps(mask(raw), indent=2, ensure_ascii=False))
 
 
 def _cmd_memory(args: argparse.Namespace) -> None:

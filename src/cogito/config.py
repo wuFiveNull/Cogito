@@ -756,6 +756,11 @@ class Config:
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     channel: ChannelConfig = field(default_factory=ChannelConfig)
 
+    # ── Plan 06 M2: 配置版本元数据（load() 时计算）──
+    content_hash: str = ""
+    schema_version: str = "1"
+    config_version: str = "1"
+
     def __repr__(self) -> str:
         return (
             f"Config(workspace_path={self.workspace_path!r}, "
@@ -904,6 +909,10 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
         channel_raw = resolved.get("channel", {})
         channel = ChannelConfig._from_raw(channel_raw) if channel_raw else ChannelConfig()
 
+        # Plan 06 M2: 计算配置版本元数据（hash 基于解析后的内容）
+        from cogito.infrastructure.config_version import normalize_config
+        version_meta = normalize_config(resolved)
+
         return cls(
             workspace_path=str(resolved.get("workspace_path", ".workspace")),
             storage=storage,
@@ -915,4 +924,30 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
             capability=capability,
             embedding=embedding,
             channel=channel,
+            content_hash=version_meta.get("content_hash", ""),
+            schema_version=version_meta.get("schema_version", "1"),
+            config_version=version_meta.get("config_version", "1"),
         )
+
+    # ── Plan 06 M2: Secret 引用解析 ──
+
+    SENSITIVE_KEYS = SENSITIVE_FIELDS  # alias for external callers
+
+    def resolve_secret(self, value: str) -> str:
+        """解析 secret_ref（env://REF_NAME → 环境变量值）。
+
+        非 secret_ref 形式的值直接返回。
+        """
+        if value.startswith("env://"):
+            ref = value[len("env://"):]
+            return os.environ.get(ref, "")
+        if value.startswith("${") and value.endswith("}"):
+            # 复用 _resolve_env 的 ${VAR} 语法
+            return _resolve_env(value)
+        return value
+
+    def get_masked(self, section: str, key: str, value: str) -> str:
+        """获取脱敏后的值（用于 dump/dashboard/trace）。"""
+        if key.lower() in SENSITIVE_FIELDS and value:
+            return "***secret_ref:" + key + "***"
+        return value

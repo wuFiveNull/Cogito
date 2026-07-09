@@ -32,6 +32,37 @@ from cogito.service.task_handlers import TaskHandlerContext, _build_registry
 from cogito.store.connection import get_connection
 from cogito.store.migration import migrate
 
+# ── Plan 06 M2: 配置版本持久化辅助 ──
+
+
+def _persist_config_version(
+    conn: sqlite3.Connection, config: Config
+) -> None:
+    """启动时记录配置版本（幂等：同一 content_hash 不重复插入）。"""
+    try:
+        from datetime import datetime
+
+        from cogito.store.config_version_repo import (
+            ConfigVersionRecord,
+            ConfigVersionRepository,
+        )
+        from cogito.store.time_utils import epoch_ms
+
+        cfg_repo = ConfigVersionRepository(conn)
+        if cfg_repo.get_by_hash(config.content_hash) is not None:
+            return
+        cfg_repo.insert(ConfigVersionRecord(
+            version_id=f"cfg-{uuid.uuid4().hex[:12]}",
+            content_hash=config.content_hash,
+            schema_version=config.schema_version,
+            source_layers=["profile"],
+            applied_at=epoch_ms(datetime.now()),
+            applied_by="startup",
+        ))
+        conn.commit()
+    except Exception as e:
+        logger.warning("Config version persistence failed: %s", e)
+
 logger = logging.getLogger("cogito.application")
 
 
@@ -111,6 +142,9 @@ class RuntimeApplication:
         except Exception:
             conn.close()
             raise
+
+        # Plan 06 M2: 持久化配置版本（启动时记录，供 Attempt/Task 追溯）
+        _persist_config_version(conn, config)
 
         try:
             recovery = RecoveryService(conn)
