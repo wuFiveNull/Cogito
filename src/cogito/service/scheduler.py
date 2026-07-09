@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from cogito.domain.schedule import (
     FireStatus,
+    MisfirePolicy,
     Schedule,
     ScheduledFire,
     next_fire_at,
@@ -102,17 +103,112 @@ class Scheduler:
 
         for schedule in due:
             try:
-                task = self._process_schedule(schedule, now)
-                if task is not None:
-                    created.append(task)
+                if self._is_misfired(schedule, now):
+                    tasks = self._handle_misfire(schedule, now)
+                else:
+                    task = self._process_schedule(schedule, now)
+                    tasks = [task] if task is not None else []
+                created.extend(tasks)
             except Exception:
                 _LOGGER.exception("Scheduler: failed to process %s", schedule.schedule_id)
 
         return created
 
-    def _process_schedule(self, schedule: Schedule, now: datetime) -> Task | None:
-        """处理单条到期 schedule。返回创建的 Task，或 None（跳过）。"""
-        fire_at = schedule.next_fire_at or now
+    def _is_misfired(self, schedule: Schedule, now: datetime) -> bool:
+        """判断 schedule 是否处于错过触发状态。
+
+        当 now - last_fired_at > 1.5 * interval 时判定为 misfire。
+        """
+        if schedule.last_fire_at is None:
+            return False
+        interval = self._estimate_interval(schedule)
+        if interval is None or interval <= 0:
+            return False
+        gap = (now - schedule.last_fire_at).total_seconds()
+        return gap > interval * 1.5
+
+    def _estimate_interval(self, schedule: Schedule) -> float | None:
+        """估算 schedule 的触发间隔（秒）。
+
+        优先使用 normalized_interval_s；否则从 expression 解析。
+        """
+        # 尝试从 schedule 的规范化字段获取
+        row = self._conn.execute(
+            "SELECT normalized_interval_s FROM schedules WHERE schedule_id=?",
+            (schedule.schedule_id,),
+        ).fetchone()
+        if row and row[0]:
+            return float(row[0])
+        # 回退：从 expression 解析
+        from cogito.domain.schedule import parse_duration
+        delta = parse_duration(schedule.expression)
+        if delta is not None:
+            return delta.total_seconds()
+        return None
+
+    def _handle_misfire(self, schedule: Schedule, now: datetime) -> list[Task]:
+        """按 misfire_policy 处理错过的触发。
+
+        返回创建的 Task 列表（可能多个，也可能合并为一个）。
+        """
+        policy = schedule.misfire_policy
+        interval = self._estimate_interval(schedule)
+        last = schedule.last_fire_at or schedule.created_at
+
+        if interval is None or interval <= 0:
+            # 无法计算间隔：只触发一次
+            task = self._process_schedule(schedule, now)
+            return [task] if task is not None else []
+
+        gap = (now - last).total_seconds()
+        missed_count = max(1, int(gap / interval))
+
+        if missed_count <= 1:
+            task = self._process_schedule(schedule, now)
+            return [task] if task is not None else []
+
+        if policy in (MisfirePolicy.skip, MisfirePolicy.run_once):
+            # 只补一次当前触发
+            task = self._process_schedule(schedule, now)
+            return [task] if task is not None else []
+
+        if policy == MisfirePolicy.catch_up_limited:
+            n = min(missed_count, schedule.max_catch_up)
+            tasks: list[Task] = []
+            for i in range(1, n + 1):
+                fire_at = last + timedelta(seconds=interval * i)
+                # 每次触发后重新获取 schedule（version 已变）
+                fresh = self._schedule_repo.get(schedule.schedule_id)
+                if fresh is None:
+                    break
+                task = self._process_schedule(fresh, now, fire_at=fire_at)
+                if task is not None:
+                    tasks.append(task)
+            return tasks
+
+        if policy == MisfirePolicy.merge:
+            # 合并为一个 Task，payload 携带合并元数据
+            task = self._process_schedule(schedule, now, merged_count=missed_count)
+            return [task] if task is not None else []
+
+        # 默认：只触发一次
+        task = self._process_schedule(schedule, now)
+        return [task] if task is not None else []
+
+    def _process_schedule(
+        self,
+        schedule: Schedule,
+        now: datetime,
+        fire_at: datetime | None = None,
+        merged_count: int = 0,
+    ) -> Task | None:
+        """处理单条到期 schedule。返回创建的 Task，或 None（跳过）。
+
+        Args:
+            fire_at: 显式指定触发时间（misfire 补触发时使用）。
+            merged_count: 合并触发的次数（merge 策略 > 1 时写入 payload）。
+        """
+        fire_at = fire_at or schedule.next_fire_at or now
 
         # 幂等：此 fire_at 是否已触发过
         existing = self._fire_repo.find(schedule.schedule_id, fire_at)
@@ -153,10 +249,22 @@ class Scheduler:
                 if row is not None:
                     task_type = self.task_type_for_connector(row[0])
 
+            # 构建 payload：merge 时携带合并元数据
+            payload_ref = schedule.connector_id or ""
+            if merged_count > 1:
+                # merge 策略：payload 携带合并次数和时间窗口
+                import json
+                payload_ref = json.dumps({
+                    "connector_id": schedule.connector_id or "",
+                    "merged_count": merged_count,
+                    "first_missed_at": (fire_at.isoformat() if fire_at else None),
+                    "last_missed_at": (now.isoformat() if now else None),
+                })
+
             # 创建 connector.poll / mcp_connector.poll Task
             task = Task(
                 task_type=task_type,
-                payload_ref=schedule.connector_id or "",
+                payload_ref=payload_ref,
                 status=TaskStatus.queued,
                 priority=40,
                 scheduled_at=nxt,
@@ -165,11 +273,11 @@ class Scheduler:
             )
             self._task_repo.insert(task)
 
-            # 更新 schedule 的 next_fire_at（version 再 +1）
+            # 更新 schedule 的 next_fire_at + last_fired_at（version 再 +1）
             self._conn.execute(
-                "UPDATE schedules SET next_fire_at=?, version=version+1 "
+                "UPDATE schedules SET next_fire_at=?, last_fired_at=?, version=version+1 "
                 "WHERE schedule_id=?",
-                (epoch_ms(nxt), schedule.schedule_id),
+                (epoch_ms(nxt), epoch_ms(fire_at), schedule.schedule_id),
             )
 
             # 回填 fire.task_id

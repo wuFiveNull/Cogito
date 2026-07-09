@@ -27,11 +27,14 @@ class ScheduleRepository:
         return self._row_to_schedule(row) if row else None
 
     def insert(self, schedule: Schedule) -> None:
+        # 计算规范化间隔（用于 misfire 检测）
+        normalized_s = self._compute_interval(schedule.expression)
         self._conn.execute(
             "INSERT INTO schedules (schedule_id, schedule_type, expression, "
             "  timezone, misfire_policy, max_catch_up, enabled, "
-            "  next_fire_at, last_fire_at, version, connector_id, created_at) "
-            "VALUES (?,?,?,?,?, ?,?,?,?, ?,?,?)",
+            "  next_fire_at, last_fire_at, normalized_interval_s, "
+            "  version, connector_id, created_at) "
+            "VALUES (?,?,?,?,?, ?,?,?,?, ?,?,?,?)",
             (
                 schedule.schedule_id,
                 schedule.schedule_type.value,
@@ -42,11 +45,21 @@ class ScheduleRepository:
                 1 if schedule.enabled else 0,
                 epoch_ms(schedule.next_fire_at),
                 epoch_ms(schedule.last_fire_at),
+                normalized_s,
                 schedule.version,
                 schedule.connector_id,
                 epoch_ms(schedule.created_at),
             ),
         )
+
+    @staticmethod
+    def _compute_interval(expression: str) -> int | None:
+        """从 expression 估算触发间隔（秒）。"""
+        from cogito.domain.schedule import parse_duration
+        delta = parse_duration(expression.strip())
+        if delta is not None:
+            return int(delta.total_seconds())
+        return None
 
     def find_due(self, now: datetime, limit: int = 10) -> list[Schedule]:
         """查找已到期的 enabled schedules。"""

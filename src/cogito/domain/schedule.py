@@ -192,6 +192,34 @@ def _next_weekday(after: datetime, weekday: int, hour: int, minute: int) -> date
     return target
 
 
+# ── DST 确定策略 ──
+# spring-forward (gap): 跳到 gap 之后
+# fall-back (overlap): fold=0 选择较早（UTC 较晚）的那个
+DST_POLICY = "post"       # gap → 跳到 gap 之后
+FOLD_POLICY = "earlier"   # overlap → fold=0
+
+
+def _localize_with_dst(dt: datetime, tz) -> datetime:  # noqa: ANN401
+    """本地化 datetime，处理 DST gap/overlap。
+
+    - gap (spring forward): 返回 gap 之后的时间（DST_POLICY="post"）
+    - overlap (fall back): 返回 fold=0（较早的本地时间）
+    """
+    if dt.tzinfo is not None:
+        dt = dt.replace(tzinfo=None)
+    localized = dt.replace(tzinfo=tz)
+    # 检测 gap: 如果 fold 导致时间跳跃，调整到 gap 之后
+    if localized.fold == 0:
+        try:
+            pre = (dt - timedelta(minutes=1)).replace(tzinfo=tz)
+            post = (dt + timedelta(minutes=1)).replace(tzinfo=tz)
+            if (post - pre) > timedelta(hours=1, minutes=2):
+                return dt.replace(tzinfo=tz) + timedelta(hours=1)
+        except Exception:
+            pass
+    return localized
+
+
 def next_fire_at(
     expression: str,
     timezone: str = "UTC",
@@ -200,6 +228,7 @@ def next_fire_at(
     """计算下次触发时间。
 
     解析顺序: ISO 时间戳 → "every"短语 → Duration → cron 表达式。
+    支持 DST 确定策略（gap/overlap 处理）。
     """
     from zoneinfo import ZoneInfo
 
