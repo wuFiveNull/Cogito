@@ -16,7 +16,11 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 from cogito.interaction_web.audit import write_audit
-from cogito.interaction_web.command_service import replay_delivery, set_approval_decision
+from cogito.interaction_web.command_service import (
+    replay_delivery,
+    resume_turn_after_approval,
+    set_approval_decision,
+)
 from cogito.interaction_web.deps import CommandDeps, get_command_deps
 from cogito.interaction_web.models import (
     ApprovalPayload,
@@ -119,11 +123,14 @@ def approve(payload: ApprovalPayload, deps: CommandDeps = Depends(get_command_de
         if not exists:
             raise HTTPException(status_code=404, detail=f"approval {payload.approval_id} not found")
         return _fail("approve", payload.approval_id, "not in pending status")
+    # 审批通过后：仅创建一个恢复（Turn waiting_user → queued，幂等）
+    resumed_turn_id = resume_turn_after_approval(deps.conn, approval_id=payload.approval_id)
     write_audit(
         deps.conn, actor_id=ACTOR, action="approve",
         target_type="approval", target_id=payload.approval_id,
+        changes={"resumed_turn_id": resumed_turn_id},
     )
-    return _ok("approve", payload.approval_id)
+    return _ok("approve", payload.approval_id, resumed_turn_id=resumed_turn_id)
 
 
 @router.post("/reject", response_model=CommandResponse)

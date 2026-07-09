@@ -46,3 +46,34 @@ def replay_delivery(conn: sqlite3.Connection, *, delivery_id: str) -> bool:
     )
     conn.commit()
     return True
+
+
+def resume_turn_after_approval(
+    conn: sqlite3.Connection,
+    *,
+    approval_id: str,
+) -> str | None:
+    """审批消费后把关联 Turn 从 waiting_user → queued（仅一次）。
+
+    返回 turn_id 表示成功；None 表示 approval 不存在/非 pending/无关联 Turn。
+    幂等：重复消费同一 approved approval 不产生第二个 queued 状态。
+    """
+    row = conn.execute(
+        "SELECT turn_id, status FROM approvals WHERE approval_id=?",
+        (approval_id,),
+    ).fetchone()
+    if row is None or row["status"] != "approved":
+        return None
+    turn_id = row["turn_id"]
+    if not turn_id:
+        return None
+    # 仅 waiting_user/waiting_external 可恢复；已 queued 说明已被消费过（幂等）
+    cur = conn.execute(
+        "UPDATE turns SET status='queued', version=version+1 "
+        "WHERE turn_id=? AND status IN ('waiting_user','waiting_external')",
+        (turn_id,),
+    )
+    conn.commit()
+    if cur.rowcount == 0:
+        return None  # 已消费或状态不对
+    return turn_id
