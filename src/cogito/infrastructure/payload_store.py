@@ -14,9 +14,8 @@ import hashlib
 import sqlite3
 import tempfile
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 _lock = threading.Lock()
 

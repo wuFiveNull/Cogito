@@ -909,6 +909,17 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
         channel_raw = resolved.get("channel", {})
         channel = ChannelConfig._from_raw(channel_raw) if channel_raw else ChannelConfig()
 
+        # Plan 06 M2: 跨字段校验（在构建前执行，失败则 ConfigError）
+        from cogito.infrastructure.config_version import validate_cross_fields
+        cross_errors = validate_cross_fields(resolved)
+        if cross_errors:
+            raise ConfigError(
+                section="config",
+                field="",
+                reason="; ".join(cross_errors),
+                source_path=str(cfg_path),
+            )
+
         # Plan 06 M2: 计算配置版本元数据（hash 基于解析后的内容）
         from cogito.infrastructure.config_version import normalize_config
         version_meta = normalize_config(resolved)

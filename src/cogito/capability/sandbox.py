@@ -14,8 +14,7 @@ Host/IP/端口/协议、CPU/内存/进程数/磁盘/输出/超时、取消和进
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)

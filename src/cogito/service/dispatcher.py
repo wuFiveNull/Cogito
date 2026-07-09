@@ -59,6 +59,10 @@ class Dispatcher:
         lease_expires_ms = epoch_ms(now) + self._lease_ttl_s * 1000
 
         with UnitOfWork(self._conn) as uow:
+            # Plan 04 M2: aging —— 低优先级任务等待超过阈值时提升有效优先级
+            # 避免高优先级任务永久饥饿低优先级任务
+            aging_threshold_ms = 5 * 60 * 1000  # 5 分钟
+            now_ms = epoch_ms(now)
             turn_row = self._conn.execute("""
                 SELECT t.* FROM turns t
                 JOIN sessions s ON s.session_id = t.session_id
@@ -68,9 +72,14 @@ class Dispatcher:
                     WHERE t2.session_id = t.session_id
                       AND t2.status = 'running'
                   )
-                ORDER BY t.priority DESC, t.created_at ASC
+                ORDER BY
+                  (t.priority + CASE
+                    WHEN (? - t.created_at) > ? THEN 20
+                    ELSE 0
+                  END) DESC,
+                  t.created_at ASC
                 LIMIT 1
-            """).fetchone()
+            """, (now_ms, aging_threshold_ms)).fetchone()
 
             if turn_row is None:
                 return None

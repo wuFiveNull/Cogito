@@ -137,3 +137,90 @@ class TestSchedulerMisfire:
         tasks2 = scheduler2.tick()
         # 不应重复触发（幂等键已存在）
         assert len(tasks2) == 0
+
+
+# ── DST + 边界测试 ─────────────────────────────────────────
+
+
+class TestDSTHandling:
+    """misfire-06/07: DST spring forward / fall back 确定策略。"""
+
+    def test_next_fire_at_deterministic_same_input(self):
+        """相同输入返回稳定输出（DST 策略确定性）。"""
+        from cogito.domain.schedule import next_fire_at
+        # UTC 时无 DST 影响
+        t1 = next_fire_at("30m", "UTC", after=datetime(2026, 1, 1, 12, 0, tzinfo=UTC))
+        t2 = next_fire_at("30m", "UTC", after=datetime(2026, 1, 1, 12, 0, tzinfo=UTC))
+        assert t1 == t2
+
+    def test_next_fire_at_non_utc_timezone(self):
+        """非 UTC 时区能正确计算（zoneinfo 可用）。"""
+        from cogito.domain.schedule import next_fire_at
+        result = next_fire_at("1h", "Asia/Shanghai",
+                              after=datetime(2026, 7, 7, 12, 0, tzinfo=UTC))
+        assert result is not None
+        assert result > datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
+
+    def test_next_fire_at_every_daily_dst_policy(self):
+        """every day 08:00 + DST policy 参数传递。"""
+        from cogito.domain.schedule import next_fire_at
+        result_post = next_fire_at(
+            "every day 08:00", "America/New_York",
+            after=datetime(2026, 3, 8, 12, 0, tzinfo=UTC),  # DST 前一天
+            dst_policy="post",
+        )
+        assert result_post is not None
+
+    def test_schedule_entity_has_dst_policy(self):
+        """Schedule 实体携带 dst_policy 字段。"""
+        s = Schedule(
+            schedule_id="s-dst",
+            schedule_type=ScheduleType.cron,
+            expression="0 8 * * *",
+            timezone="America/New_York",
+            dst_policy="post",
+        )
+        assert s.dst_policy == "post"
+
+    def test_next_fire_at_365d_duration(self):
+        """misfire 测试矩阵：365d Duration。"""
+        from cogito.domain.schedule import next_fire_at
+        result = next_fire_at(
+            "365d", "UTC",
+            after=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+        )
+        assert result is not None
+        assert result == datetime(2027, 1, 1, 0, 0, tzinfo=UTC)
+
+
+class TestParallelScheduler:
+    """misfire-10: 并行 Scheduler 竞争同一 Fire。"""
+
+    @pytest.fixture
+    def clock(self):
+        return FakeClock(start=datetime(2026, 7, 7, 12, 0, 0, tzinfo=UTC))
+
+    def test_parallel_scheduler_contention(self, in_memory_db, clock):
+        """双 Worker 同时领取同一 schedule lease。"""
+        conn = in_memory_db
+        now = clock.now()
+        s = Schedule(
+            schedule_id="sch-race",
+            schedule_type=ScheduleType.interval,
+            expression="30m",
+            next_fire_at=now,
+            connector_id="c1",
+        )
+        ScheduleRepository(conn).insert(s)
+        conn.commit()
+
+        # 两个 scheduler 实例竞争
+        sched1 = Scheduler(conn, clock=clock)
+        sched2 = Scheduler(conn, clock=clock)
+
+        tasks1 = sched1.tick()
+        tasks2 = sched2.tick()
+
+        total = len(tasks1) + len(tasks2)
+        # 只有一个应成功（lease 互斥）
+        assert total == 1

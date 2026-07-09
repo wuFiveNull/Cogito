@@ -10,7 +10,10 @@ import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from zoneinfo import ZoneInfo
 
 
 class ScheduleStatus(StrEnum):
@@ -55,6 +58,7 @@ class Schedule:
         version: int = 1,
         connector_id: str | None = None,
         created_at: datetime | None = None,
+        dst_policy: str = "post",
     ) -> None:
         self.schedule_id = schedule_id or uuid.uuid4().hex
         self.schedule_type = ScheduleType(schedule_type)
@@ -68,6 +72,7 @@ class Schedule:
         self.version = version
         self.connector_id = connector_id
         self.created_at = created_at or datetime.now(UTC)
+        self.dst_policy = dst_policy
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -199,41 +204,60 @@ DST_POLICY = "post"       # gap → 跳到 gap 之后
 FOLD_POLICY = "earlier"   # overlap → fold=0
 
 
-def _localize_with_dst(dt: datetime, tz) -> datetime:  # noqa: ANN401
-    """本地化 datetime，处理 DST gap/overlap。
-
-    - gap (spring forward): 返回 gap 之后的时间（DST_POLICY="post"）
-    - overlap (fall back): 返回 fold=0（较早的本地时间）
-    """
+def _localize_with_dst(
+    dt: datetime,
+    tz: ZoneInfo,
+    policy: str = DST_POLICY,
+) -> datetime:
+    """本地化 datetime，处理 DST gap/overlap（fold 确定策略）。"""
     if dt.tzinfo is not None:
         dt = dt.replace(tzinfo=None)
-    localized = dt.replace(tzinfo=tz)
-    # 检测 gap: 如果 fold 导致时间跳跃，调整到 gap 之后
-    if localized.fold == 0:
-        try:
-            pre = (dt - timedelta(minutes=1)).replace(tzinfo=tz)
-            post = (dt + timedelta(minutes=1)).replace(tzinfo=tz)
-            if (post - pre) > timedelta(hours=1, minutes=2):
-                return dt.replace(tzinfo=tz) + timedelta(hours=1)
-        except Exception:
-            pass
+    # fold=0 表示较早的本地时间（fall-back 时 UTC 较晚）
+    localized = dt.replace(tzinfo=tz, fold=0)
+    # 检测 gap (spring forward): 如果 naive 时间不存在于 tz
+    # 表现为：localized 比预期偏移了 1 小时
+    if policy == "post":
+        # 跳到 gap 之后：如果 fold=0 的时间被解释为 gap 后，加 1 小时
+        pre = (dt - timedelta(minutes=1)).replace(tzinfo=tz, fold=0)
+        post = (dt + timedelta(minutes=1)).replace(tzinfo=tz, fold=0)
+        if (post - pre) > timedelta(hours=1, minutes=2):
+            # 处于 gap 内，跳到 gap 之后
+            return (dt + timedelta(hours=1)).replace(tzinfo=tz, fold=0)
     return localized
+
+
+def _apply_local_timezone(
+    dt: datetime,
+    tz: ZoneInfo,
+    policy: str = DST_POLICY,
+) -> datetime:
+    """将 naive/UTC datetime 转为带 DST 处理的本地时间。"""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    if str(tz) == "UTC" or not hasattr(tz, "key") or tz.key == "UTC":
+        return dt
+    return _localize_with_dst(dt.astimezone(UTC).replace(tzinfo=None), tz, policy)
 
 
 def next_fire_at(
     expression: str,
     timezone: str = "UTC",
     after: datetime | None = None,
+    dst_policy: str = DST_POLICY,
 ) -> datetime | None:
     """计算下次触发时间。
 
     解析顺序: ISO 时间戳 → "every"短语 → Duration → cron 表达式。
     支持 DST 确定策略（gap/overlap 处理）。
+
+    Args:
+        dst_policy: "post" (gap 跳到之后) 或 "pre" (gap 跳到之前)。
     """
     from zoneinfo import ZoneInfo
 
-    tz = ZoneInfo(timezone) if timezone else UTC
+    tz = ZoneInfo(timezone) if timezone and timezone != "UTC" else UTC
     after = after or datetime.now(tz)
+    is_non_utc = str(tz) != "UTC" and hasattr(tz, "key") and tz.key != "UTC"
 
     expr = expression.strip()
 
@@ -263,7 +287,10 @@ def next_fire_at(
     if m:
         weekday = _WEEKDAY_MAP[m.group(1).lower()]
         hour, minute = _parse_time(m.group(2), m.group(3), m.group(4))
-        return _next_weekday(after, weekday, hour, minute)
+        result = _next_weekday(after, weekday, hour, minute)
+        if is_non_utc:
+            result = _apply_local_timezone(result, tz, dst_policy)
+        return result
 
     # "every day 08:00"
     m = _EVERY_DAILY_RE.match(expr)
@@ -272,6 +299,8 @@ def next_fire_at(
         target = after.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if target <= after:
             target += timedelta(days=1)
+        if is_non_utc:
+            target = _apply_local_timezone(target, tz, dst_policy)
         return target
 
     # 3. Duration 格式
@@ -282,6 +311,8 @@ def next_fire_at(
     # 4. 5-field cron
     cron_next = _cron_next_fire(expr, after)
     if cron_next is not None:
+        if is_non_utc:
+            cron_next = _apply_local_timezone(cron_next, tz, dst_policy)
         return cron_next
 
     return None

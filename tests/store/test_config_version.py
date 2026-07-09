@@ -175,3 +175,58 @@ class TestConfigVersionPersistence:
                 source_layers=[], applied_at=2000,
             ))
             in_memory_db.commit()
+
+
+# ── 8.6: 配置跨字段校验（load 时调用）─────────────────────
+
+
+class TestConfigLoadValidation:
+    """cfg-05: Config.load() 调用 validate_cross_fields。"""
+
+    def test_hostname_lease_validation_passes(self, tmp_path):
+        """合法 worker 配置（lease > heartbeat）通过。"""
+        cfg_file = tmp_path / "config.toml"
+        cfg_file.write_text(
+            '[worker]\nheartbeat_interval_seconds = 60\n'
+            'lease_duration_seconds = 300\n',
+            encoding="utf-8",
+        )
+        config = Config.load(cfg_file)
+        assert config.worker.heartbeat_interval_seconds == 60
+
+    def test_lease_less_than_heartbeat_rejected(self, tmp_path):
+        """lease < 2*heartbeat 应在 load() 时 ConfigError。"""
+        from cogito.config import ConfigError
+        cfg_file = tmp_path / "config.toml"
+        cfg_file.write_text(
+            '[worker]\nheartbeat_interval_seconds = 200\n'
+            'lease_duration_seconds = 300\n',
+            encoding="utf-8",
+        )
+        with pytest.raises(ConfigError):
+            Config.load(cfg_file)
+
+
+# ── 8.7: 热更新原子激活 + 失败保留旧版本 ──────────────────
+
+
+class TestHotReload:
+    def test_reload_success_activates(self):
+        from cogito.infrastructure.config_version import ConfigHotReloader
+        reloader = ConfigHotReloader({"runtime": {"profile": "old"}})
+        ok, errors = reloader.attempt_reload({"runtime": {"profile": "new"}})
+        assert ok is True
+        assert errors == []
+        assert reloader.current["runtime"]["profile"] == "new"
+
+    def test_reload_failure_keeps_old(self):
+        """cfg-06: 热更新失败保留旧版本。"""
+        from cogito.infrastructure.config_version import ConfigHotReloader
+        reloader = ConfigHotReloader({"runtime": {"profile": "original"}})
+        # 传入未知 key 触发 dry-run 拒绝
+        ok, errors = reloader.attempt_reload({"unknown_key": "value"})
+        assert ok is False
+        assert len(errors) == 1
+        # 旧版本保留
+        assert reloader.current["runtime"]["profile"] == "original"
+        assert len(reloader.failed_attempts) == 1

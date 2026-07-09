@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -214,6 +215,36 @@ class DeliveryOperation:
 
 
 # ── V0 → V1 升级器 ──
+
+@dataclass(frozen=True)
+class DeliveryOperationV0:
+    """V0 出站投递（旧版，无 schema_version）。"""
+    delivery_id: str = ""
+    attempt_id: str = ""
+    channel: str = ""
+    conversation_id: str = ""
+    text: str = ""
+    operation_seq: int = 1
+
+    def to_v1(self) -> DeliveryOperation:
+        """升级到 V1。"""
+        return DeliveryOperation(
+            schema_version="1",
+            operation_id=f"op-{uuid.uuid4().hex[:12]}",
+            delivery_id=self.delivery_id,
+            attempt_id=self.attempt_id,
+            operation_seq=self.operation_seq,
+            idempotency_key=f"{self.delivery_id}:{self.operation_seq}",
+            target_snapshot=TargetSnapshot(
+                adapter_id="",
+                channel_type=self.channel,
+                conversation_id=self.conversation_id,
+                endpoint_ref=self.conversation_id,
+            ),
+            action="send",
+            content=[ContentPart(type="text", data=self.text)] if self.text else [],
+        )
+
 
 @dataclass(frozen=True)
 class InboundMessageV0:

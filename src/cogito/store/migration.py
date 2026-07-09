@@ -13,11 +13,14 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+_LOGGER = logging.getLogger("cogito.migration")
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 _VERSION_PATTERN = re.compile(r"^(\d+)_")
@@ -268,6 +271,62 @@ def migrate(
         applied_versions.append(mf.version)
 
     return applied_versions
+
+
+MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+PLUGIN_MIGRATIONS_DIR = Path(__file__).parent / "migrations_plugins"
+
+
+def _discover_dir(directory: Path) -> list[MigrationFile]:
+    """扫描单个 migrations 目录。"""
+    if not directory.is_dir():
+        return []
+    files: list[MigrationFile] = []
+    for p in sorted(directory.iterdir()):
+        if p.suffix != ".sql":
+            continue
+        m = _VERSION_PATTERN.match(p.name)
+        if not m:
+            continue
+        version = int(m.group(1))
+        meta_path = p.with_suffix(".meta.toml")
+        meta = _parse_meta(meta_path)
+        files.append(MigrationFile(version=version, path=p, meta=meta))
+    return files
+
+
+def _discover() -> list[MigrationFile]:
+    """扫描 migrations/ + migrations_plugins/ 目录，返回按版本升序的迁移列表。"""
+    core_files = _discover_dir(MIGRATIONS_DIR)
+    plugin_files = _discover_dir(PLUGIN_MIGRATIONS_DIR)
+    # Plugin migrations 独立 namespace：version 从 1 开始，不与 core 混合
+    all_files = core_files + plugin_files
+    all_files.sort(key=lambda mf: (0 if "plugins" not in str(mf.path) else 1, mf.version))
+    return all_files
+
+
+def apply_contract_phase(conn: sqlite3.Connection, migration_version: int) -> None:
+    """Plan 06 M6: contract 阶段 —— 清理 expand 阶段遗留的临时结构。
+
+    在 expand → backfill → switch 完成后，删除旧的列/表。
+    contract 阶段的 SQL 存储在 migration 文件的 -- CONTRACT: 注释后。
+    """
+    # 查找对应 migration 文件
+    mf = None
+    for f in _discover():
+        if f.version == migration_version:
+            mf = f
+            break
+    if mf is None:
+        return
+    sql = mf.path.read_text(encoding="utf-8")
+    # 提取 CONTRACT 段
+    contract_marker = "-- CONTRACT:"
+    if contract_marker in sql:
+        contract_sql = sql.split(contract_marker, 1)[1].strip()
+        if contract_sql:
+            conn.executescript(contract_sql)
+            _LOGGER.info("Applied contract phase for migration %s", migration_version)
 
 
 def get_migration_status(conn: sqlite3.Connection) -> list[dict[str, Any]]:

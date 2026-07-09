@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from cogito.capability.models import SideEffectReceipt
-from cogito.service.recovery_decision import RecoveryDecision, RecoveryEvidence
 
 
 @dataclass(frozen=True)
@@ -94,7 +93,7 @@ class ReconcileService:
 
     def _create_manual_approval(self, receipt: SideEffectReceipt) -> str:
         import uuid
-        from datetime import datetime, UTC, timedelta
+        from datetime import UTC, datetime, timedelta
 
         approval_id = uuid.uuid4().hex
         now = datetime.now(UTC)

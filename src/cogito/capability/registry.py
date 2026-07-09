@@ -9,7 +9,7 @@ CAPABILITY-PLUGINS / 4. Capability Registry：
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from cogito.capability.models import ToolDef

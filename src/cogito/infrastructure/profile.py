@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 
 def get_home(profile: str = "default") -> Path:

@@ -52,6 +52,36 @@ def create_app(
 
     app.include_router(chat.router)
 
+    # ── Plan 05 M2: LangBot Bridge（入站/出站/健康）──
+    # Bridge Server 允许 Gateway 通过版本化 DTO 与 Core 通信
+    try:
+        from cogito.channel.bridge_server import BridgeServer
+        # inbound_handler: 将 DTO 转给 runtime InboundService（如可用）
+        async def _bridge_inbound_handler(dto):
+            if runtime and hasattr(runtime, 'inbound'):
+                # 复用 InboundService 的 accept 路径
+                from cogito.inbound.models import Inbound, InboundContent, InboundRoute
+                inbound = Inbound(
+                    channel=dto.channel_name,
+                    channel_instance_id=dto.instance_id,
+                    conversation_id=dto.conversation_ref,
+                    sender_id=dto.sender_ref,
+                    message_id=dto.event_id,
+                    content=[InboundContent(type=p.type, data=p.data) for p in dto.content_parts],
+                    route=InboundRoute(adapter_id=dto.instance_id, channel_type=dto.channel_name,
+                                       conversation_id=dto.conversation_ref,
+                                       source_message_id=dto.event_id),
+                )
+                return await runtime.inbound.accept(inbound)
+            return f"dto-{dto.event_id}"
+        bridge = BridgeServer(conn=provider.conn, inbound_handler=_bridge_inbound_handler)
+        app.include_router(bridge.create_router())
+        app.state.bridge_server = bridge  # type: ignore[attr-defined]
+    except Exception as e:
+        # Bridge 装配失败不应阻塞主 server 启动
+        import logging
+        logging.getLogger("interaction_web").warning("Bridge server not mounted: %s", e)
+
     # ── 静态前端托管 ───────────────────────────────────────────
     if static_dir is not None and static_dir.is_dir():
         app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")

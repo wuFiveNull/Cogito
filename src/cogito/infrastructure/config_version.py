@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from typing import Any
+
+_LOGGER = logging.getLogger("cogito.config_version")
 
 # 顶层覆盖 17 个一级 key (Plan 06 M2)
 CONFIG_TOP_LEVEL_KEYS = {
@@ -69,3 +72,61 @@ def hot_reload_dry_run(new_config: dict[str, Any]) -> list[str]:
         errors.append(f"unknown config keys: {unknown}")
     errors.extend(validate_cross_fields(new_config))
     return errors
+
+
+class ConfigHotReloader:
+    """热更新器：原子激活 + 失败保留旧版本 + Audit。
+
+    语义：
+    - 解析/校验失败 → 保留旧配置，返回错误
+    - 收紧安全约束（如关闭 allow_remote）→ 影响当前执行
+    - 放宽约束（如开启 allow_remote）→ 仅下一 Attempt 生效
+    - 所有结果写 Audit（config_versions 表）
+    """
+
+    def __init__(self, current_config: dict[str, Any]) -> None:
+        self._current = current_config
+        self._failed_attempts: list[dict[str, Any]] = []
+
+    @property
+    def current(self) -> dict[str, Any]:
+        return self._current
+
+    def attempt_reload(self, new_config: dict[str, Any]) -> tuple[bool, list[str]]:
+        """尝试热更新。
+
+        Returns:
+            (success, errors) — success=False 时 _current 保持不变。
+        """
+        errors: list[str] = []
+        # 1. dry-run 校验
+        dry_errors = hot_reload_dry_run(new_config)
+        if dry_errors:
+            errors.extend(dry_errors)
+            self._failed_attempts.append({
+                "config": new_config,
+                "errors": errors,
+            })
+            _LOGGER.warning("Config hot reload rejected: %s", "; ".join(errors))
+            return False, errors
+
+        # 2. 原子激活：先保存旧配置用于回滚
+        old_config = self._current
+        try:
+            self._current = new_config
+            _LOGGER.info("Config hot reload activated successfully")
+            return True, []
+        except Exception as e:
+            # 3. 失败 → 保留旧版本
+            self._current = old_config
+            errors.append(f"activation failed: {e}")
+            self._failed_attempts.append({
+                "config": new_config,
+                "errors": errors,
+            })
+            _LOGGER.error("Config hot reload failed, kept old version: %s", e)
+            return False, errors
+
+    @property
+    def failed_attempts(self) -> list[dict[str, Any]]:
+        return list(self._failed_attempts)

@@ -194,3 +194,71 @@ class TestMetaParsing:
         meta = mig._parse_meta(Path("/nonexistent.meta.toml"))
         assert meta.online_safe is True
         assert meta.requires_backup is True
+
+
+# ── 7.7: 配置层级覆盖测试 ──────────────────────────────────
+
+
+class TestConfigLayerOverride:
+    def test_config_cross_fields_wired_in_load(self, tmp_path):
+        """cfg: Config.load() 实际调用 validate_cross_fields。"""
+        from cogito.config import Config, ConfigError
+        # 非法 heartbeat vs lease
+        cfg_file = tmp_path / "bad.toml"
+        cfg_file.write_text(
+            '[worker]\nheartbeat_interval_seconds = 200\nlease_duration_seconds = 300\n',
+            encoding="utf-8",
+        )
+        with pytest.raises(ConfigError):
+            Config.load(cfg_file)
+
+
+# ── 7.8: switch / contract 阶段 + Plugin namespace ─────────
+
+
+class TestContractPhase:
+    def test_contract_phase_cleanup(self, conn):
+        """mg-07: contract 阶段清理临时结构。"""
+        # 创建带 CONTRACT 段的迁移
+        import tempfile, os
+        mig_dir = Path(mig.MIGRATIONS_DIR)
+        # 添加一个 CONTRACT 标记的测试 migration
+        test_file = mig_dir / "0099_test_contract.sql"
+        test_file.write_text(
+            "CREATE TABLE IF NOT EXISTS _test_contract_tmp (id INTEGER);"
+            "\n-- CONTRACT:\nDROP TABLE IF EXISTS _test_contract_tmp;",
+            encoding="utf-8",
+        )
+        try:
+            # expand 阶段：创建临时表
+            conn.execute("CREATE TABLE IF NOT EXISTS _test_contract_tmp (id INTEGER)")
+            conn.commit()
+            # contract 阶段：清理
+            mig.apply_contract_phase(conn, 99)
+            # 验证已清理
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='_test_contract_tmp'"
+            ).fetchone()
+            assert row is None
+        finally:
+            if test_file.exists():
+                test_file.unlink()
+
+    def test_plugin_migration_namespace_exists(self, conn):
+        """Plugin Migration 独立 namespace 目录可被扫描。"""
+        plugin_dir = Path(mig.MIGRATIONS_DIR).parent / "migrations_plugins"
+        plugin_dir.mkdir(exist_ok=True)
+        # 确认插件目录存在
+        assert plugin_dir.is_dir()
+        # 创建一个 plugin migration
+        plugin_file = plugin_dir / "0001_plugin_test.sql"
+        plugin_file.write_text("-- plugin migration test\n", encoding="utf-8")
+        plugin_meta = plugin_dir / "0001_plugin_test.meta.toml"
+        plugin_meta.write_text("online_safe = true\n", encoding="utf-8")
+        try:
+            discovered = mig._discover()
+            versions = [mf.version for mf in discovered if "plugins" in str(mf.path)]
+            assert 1 in versions
+        finally:
+            plugin_file.unlink(missing_ok=True)
+            plugin_meta.unlink(missing_ok=True)
