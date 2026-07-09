@@ -264,6 +264,84 @@ class Dispatcher:
             uow.commit()
             return updated.rowcount > 0
 
+    def resume(
+        self,
+        turn_id: str,
+        worker_id: str,
+        checkpoint_ref: str = "",
+        clock: datetime | None = None,
+    ) -> ClaimedRun | None:
+        """从恢复点新建一个 RunAttempt（Plan 02 M2 恢复路径）。
+
+        严格创建新 Attempt（不复活旧 Attempt），Leae/Version 重算。
+        前置条件：Turn 处于可恢复状态（waiting/failed/expired）且无活跃 Attempt。
+        """
+        now = self._now(clock)
+        lease_expires_ms = epoch_ms(now) + self._lease_ttl_s * 1000
+
+        with UnitOfWork(self._conn) as uow:
+            turn_row = self._conn.execute(
+                "SELECT * FROM turns WHERE turn_id=? AND active_attempt_id IS NULL "
+                "AND status IN ('waiting_user','waiting_external','failed','expired')",
+                (turn_id,),
+            ).fetchone()
+            if turn_row is None:
+                return None
+
+            turn = Turn(
+                turn_id=turn_row["turn_id"],
+                session_id=turn_row["session_id"],
+                input_message_id=turn_row["input_message_id"],
+                status=TurnStatus(turn_row["status"]),
+                priority=turn_row["priority"],
+                version=turn_row["version"],
+                cancel_requested_at=from_epoch_ms(turn_row["cancel_requested_at"]),
+                final_message_id=turn_row["final_message_id"],
+                created_at=from_epoch_ms(turn_row["created_at"]),
+            )
+
+            max_no_row = self._conn.execute(
+                "SELECT COALESCE(MAX(attempt_no), 0) + 1 FROM run_attempts WHERE turn_id=?",
+                (turn.turn_id,),
+            ).fetchone()
+            attempt_no = max_no_row[0]
+
+            attempt = RunAttempt(
+                turn_id=turn.turn_id,
+                attempt_no=attempt_no,
+                status=RunAttemptStatus.running,
+                started_at=now,
+                worker_id=worker_id,
+                lease_version=1,
+                lease_expires_at=from_epoch_ms(lease_expires_ms),
+                checkpoint_ref=checkpoint_ref,
+            )
+
+            updated = self._conn.execute(
+                "UPDATE turns SET status=?, active_attempt_id=?, version=version+1 "
+                "WHERE turn_id=? AND version=? AND active_attempt_id IS NULL",
+                (TurnStatus.running.value, attempt.attempt_id,
+                 turn.turn_id, turn.version),
+            )
+            if updated.rowcount == 0:
+                return None
+
+            turn.version += 1
+            turn.status = TurnStatus.running
+            turn.active_attempt_id = attempt.attempt_id
+
+            self._conn.execute(
+                "INSERT INTO run_attempts (attempt_id, turn_id, attempt_no, status, "
+                "started_at, worker_id, lease_version, lease_expires_at, checkpoint_ref) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (attempt.attempt_id, attempt.turn_id, attempt.attempt_no,
+                 RunAttemptStatus.running.value, epoch_ms(attempt.started_at),
+                 worker_id, attempt.lease_version, lease_expires_ms, checkpoint_ref),
+            )
+            uow.commit()
+
+        return ClaimedRun(turn=turn, attempt=attempt)
+
     def heartbeat(
         self,
         turn_id: str,
