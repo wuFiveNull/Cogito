@@ -51,9 +51,18 @@ export default function DeliveriesPage() {
                     <div className="mt-1 text-[11px] text-muted">
                       渠道 {String(d.channel ?? "-")} · 尝试 {String(d.attempt_count ?? 0)} 次
                       {d.last_error != null && String(d.last_error) !== "" && <span className="text-danger"> · 错误：{String(d.last_error)}</span>}
+                      {String(d.content_mode ?? "final") === "streaming" && <span className="text-warn"> · 流式</span>}
                     </div>
                   </div>
-                  <div className="flex shrink-0 gap-1">
+                  <div className="flex shrink-0 flex-col items-end gap-1">
+                    <div className="flex gap-1">
+                      {d.message_id != null && String(d.message_id) !== "" && (
+                        <Link to="/chat" className="text-[10px] text-primary hover:text-primary-strong" title="查看关联消息">消息 →</Link>
+                      )}
+                      {d.turn_id != null && String(d.turn_id) !== "" && (
+                        <Link to={`/trace/${d.turn_id}`} className="text-[10px] text-primary hover:text-primary-strong" title="查看关联 Turn">Turn →</Link>
+                      )}
+                    </div>
                     {(d.status === "failed" || d.status === "cancelled" || d.status === "unknown") && (
                       <CommandButton variant="ghost" onClick={() => replay(String(d.delivery_id))}>
                         {d.status === "unknown" ? "对账" : "重放"}

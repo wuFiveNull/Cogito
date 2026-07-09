@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
-import { Badge, Collapsible, Empty, ErrorBox, Loading, PageTitle, Section, StatTile, useAsync } from "../components";
+import { Badge, Collapsible, Empty, ErrorBox, Loading, PageTitle, Section, StatTile, StatusPill, useAsync } from "../components";
 
 export default function MemoryPage() {
   const [q, setQ] = useState("");
@@ -114,6 +114,34 @@ export default function MemoryPage() {
             ))}
           </div>
         )}
+      </Collapsible>
+
+      {/* Goals 分区（基于 goal_status 字段） */}
+      <Collapsible title="目标 (Goals)" badge={<Badge tone="info">{items.filter((m) => m.kind === "goal").length}</Badge>}>
+        {items.filter((m) => m.kind === "goal").length === 0 ? (
+          <div className="text-sm text-muted">暂无目标记忆。</div>
+        ) : (
+          <div className="space-y-2">
+            {items.filter((m) => m.kind === "goal").map((m) => (
+              <div key={String(m.memory_id)} className="flex items-center justify-between rounded-xl border border-borderc bg-surface-2 p-3 text-sm">
+                <div>
+                  <span className="font-medium text-ink">{String(m.subject)}/{String(m.predicate)} = {String(m.value)}</span>
+                  <div className="text-[11px] text-muted">状态 {String(m.goal_status ?? "active")} · 优先级 {String(m.goal_priority ?? "-")}</div>
+                </div>
+                <StatusPill status={String(m.goal_status ?? "active")} />
+              </div>
+            ))}
+          </div>
+        )}
+      </Collapsible>
+
+      {/* 检索活动统计 */}
+      <Collapsible title="检索活动" badge={<Badge tone="info">Retrieval</Badge>}>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          <StatTile label="总检索次数" value={items.reduce((n, m) => n + Number(m.retrieval_count ?? 0), 0)} tone="text-primary" />
+          <StatTile label="已确认" value={confirmed.length} tone="text-ok" />
+          <StatTile label="候选" value={candidates.length} tone="text-accent" />
+        </div>
       </Collapsible>
     </div>
   );

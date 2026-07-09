@@ -9,6 +9,7 @@ import CommandsPage from "./pages/Commands";
 import ChatPage from "./pages/Chat";
 import DeliveriesPage from "./pages/Deliveries";
 import TracePage from "./pages/Trace";
+import AuditPage from "./pages/Audit";
 import ProactivePage from "./pages/Proactive";
 import CapabilitiesPage from "./pages/Capabilities";
 import SystemPage from "./pages/System";
@@ -27,6 +28,7 @@ type IconName =
   | "memory"
   | "capabilities"
   | "trace"
+  | "audit"
   | "system";
 
 function NavIcon({ name }: { name: IconName }) {
@@ -120,6 +122,13 @@ function NavIcon({ name }: { name: IconName }) {
           <path d="M6 8v8M18 8v8M8 6h8M8 18h8" />
         </svg>
       );
+    case "audit":
+      return (
+        <svg {...common}>
+          <path d="M9 11l3 3L22 4" />
+          <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+        </svg>
+      );
     case "system":
       return (
         <svg {...common}>
@@ -140,7 +149,8 @@ const NAV: { to: string; label: string; end?: boolean; icon: IconName }[] = [
   { to: "/connectors", label: "数据源", icon: "connectors" },
   { to: "/memory", label: "记忆", icon: "memory" },
   { to: "/capabilities", label: "能力", icon: "capabilities" },
-  { to: "/trace", label: "Trace & 审计", icon: "trace" },
+  { to: "/trace", label: "Trace", icon: "trace" },
+  { to: "/audit", label: "审计", icon: "audit" },
   { to: "/system", label: "系统", icon: "system" },
 ];
 
@@ -252,6 +262,7 @@ export default function App() {
               <Route path="/trace" element={<TracePage />} />
               <Route path="/trace/:id" element={<TracePage />} />
               <Route path="/trace/:id/:mid" element={<TracePage />} />
+              <Route path="/audit" element={<AuditPage />} />
               <Route path="/system" element={<SystemPage />} />
               <Route path="/commands" element={<CommandsPage />} />
             </Routes>

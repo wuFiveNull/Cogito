@@ -198,12 +198,14 @@ function FeedbackSummary({ feedback }: { feedback: ProactiveFeedback }) {
 
 function PolicyControls({ status, onUpdate }: { status: ProactiveStatus; onUpdate: () => void }) {
   const [energy, setEnergy] = useState(status.energy_value);
+  const [dailyBudget, setDailyBudget] = useState(status.daily_budget);
+  const [hourlyBudget, setHourlyBudget] = useState(status.hourly_budget);
   const [saving, setSaving] = useState(false);
 
   async function save() {
     setSaving(true);
     try {
-      await api.updateProactivePolicy({ energy_value: energy });
+      await api.updateProactivePolicy({ energy_value: energy, max_pushes_per_day: dailyBudget, max_pushes_per_hour: hourlyBudget });
       onUpdate();
     } catch (e) {
       alert(`保存失败：${e instanceof Error ? e.message : "未知错误"}`);
@@ -212,20 +214,54 @@ function PolicyControls({ status, onUpdate }: { status: ProactiveStatus; onUpdat
     }
   }
 
+  async function toggleDryRun() {
+    const newDryRun = !status.dry_run;
+    if (!newDryRun) {
+      // 切换到 live 模式必须二次确认
+      if (!window.confirm("确认切换到 live 模式？\n\nlive 模式下 Agent 将实际发送消息到外部渠道，可能产生不可逆的外部副作用。")) {
+        return;
+      }
+    }
+    setSaving(true);
+    try {
+      await api.updateProactivePolicy({ dry_run: newDryRun });
+      onUpdate();
+    } catch (e) {
+      alert(`切换失败：${e instanceof Error ? e.message : "未知错误"}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <div className="space-y-3">
+      {/* live / dry-run 切换 */}
+      <div className="flex items-center justify-between rounded-xl border border-borderc bg-surface-2 p-3">
+        <div>
+          <div className="text-sm font-medium text-ink">运行模式</div>
+          <div className="text-xs text-muted">{status.dry_run ? "dry-run：不产生真实外部副作用" : "live：将实际发送消息"}</div>
+        </div>
+        <CommandButton variant={status.dry_run ? "primary" : "danger"} onClick={toggleDryRun} disabled={saving}>
+          {status.dry_run ? "当前 dry-run — 切到 live" : "当前 live — 切回 dry-run"}
+        </CommandButton>
+      </div>
+
       <div className="flex items-center gap-3">
         <label className="text-sm text-muted">能量值</label>
         <input type="range" min={0} max={1} step={0.01} value={energy} onChange={(e) => setEnergy(Number(e.target.value))} className="flex-1" />
         <span className="w-12 text-right font-mono text-sm text-ink">{energy.toFixed(2)}</span>
       </div>
+      <div className="flex items-center gap-3">
+        <label className="w-20 text-sm text-muted">小时预算</label>
+        <input type="number" min={0} max={100} value={hourlyBudget} onChange={(e) => setHourlyBudget(Number(e.target.value))} className="w-24 rounded-lg border border-borderc bg-surface px-2 py-1 text-sm" />
+      </div>
+      <div className="flex items-center gap-3">
+        <label className="w-20 text-sm text-muted">日预算</label>
+        <input type="number" min={0} max={500} value={dailyBudget} onChange={(e) => setDailyBudget(Number(e.target.value))} className="w-24 rounded-lg border border-borderc bg-surface px-2 py-1 text-sm" />
+      </div>
       <div className="flex items-center gap-2">
         <label className="text-sm text-muted">安静时段</label>
         <span className="text-sm text-ink">{status.quiet_hours_start}:00 – {status.quiet_hours_end}:00</span>
-      </div>
-      <div className="flex items-center gap-2">
-        <label className="text-sm text-muted">日预算</label>
-        <span className="text-sm text-ink">{status.daily_budget}</span>
       </div>
       <CommandButton onClick={save} disabled={saving}>{saving ? "保存中…" : "更新策略"}</CommandButton>
     </div>

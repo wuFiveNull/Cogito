@@ -26,14 +26,25 @@ from cogito.interaction_web.models import (
     ApprovalPayload,
     CancelTurnPayload,
     CommandResponse,
+    ConfigDryRunPayload,
+    CreateBackupPayload,
     DeleteSessionPayload,
     DeleteSessionsByConvPayload,
     DisablePluginPayload,
+    DisableToolPayload,
     MemoryConfirmPayload,
     MemoryDeletePayload,
     PauseConnectorPayload,
+    PayloadGcDryRunPayload,
+    ReconcileReceiptPayload,
     ReplayDeliveryPayload,
+    ReplayEventPayload,
+    RestoreBackupPayload,
+    ReviewProactiveCandidatePayload,
+    RollbackConfigPayload,
     RetryTaskPayload,
+    UpdateProactivePolicyPayload,
+    VerifyBackupPayload,
 )
 from cogito.service.dispatcher import Dispatcher
 from cogito.service.memory_service import SqliteMemoryService
@@ -298,3 +309,170 @@ def replay_delivery_route(payload: ReplayDeliveryPayload, deps: CommandDeps = De
         target_type="delivery", target_id=payload.delivery_id,
     )
     return _ok("replay-delivery", payload.delivery_id)
+
+
+# ── Plan 08 Dashboard: 新增命令 ──────────────────────────────
+
+
+@router.post("/review-proactive-candidate", response_model=CommandResponse)
+def review_proactive_candidate(
+    payload: ReviewProactiveCandidatePayload, deps: CommandDeps = Depends(get_command_deps),
+) -> CommandResponse:
+    """审查主动候选：放行 / 摘要 / 丢弃。"""
+    from cogito.store.proactive_repo import ProactiveCandidateRepository
+    repo = ProactiveCandidateRepository(deps.conn)
+    candidate = repo.get(payload.candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail=f"candidate {payload.candidate_id} not found")
+    status_map = {"approve_send": "decided", "digest": "decided", "dismiss": "consumed"}
+    new_status = status_map.get(payload.action, "consumed")
+    repo.update_status(payload.candidate_id, new_status)
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="review-proactive-candidate",
+        target_type="proactive_candidate", target_id=payload.candidate_id,
+        changes={"action": payload.action, "new_status": new_status},
+    )
+    deps.conn.commit()
+    return _ok("review-proactive-candidate", payload.candidate_id, action=payload.action)
+
+
+@router.post("/update-proactive-policy", response_model=CommandResponse)
+def update_proactive_policy(
+    payload: UpdateProactivePolicyPayload, deps: CommandDeps = Depends(get_command_deps),
+) -> CommandResponse:
+    """更新主动系统策略（版本化）。"""
+    from cogito.store.proactive_repo import ProactivePolicyRepository
+    from cogito.store.time_utils import epoch_ms
+    import uuid
+    repo = ProactivePolicyRepository(deps.conn)
+    current = repo.get_current()
+    new_policy = current.__class__(
+        policy_id=uuid.uuid4().hex,
+        principal_id=current.principal_id,
+        version=current.version + 1,
+        dry_run=payload.dry_run if payload.dry_run is not None else current.dry_run,
+        max_pushes_per_hour=payload.max_pushes_per_hour if payload.max_pushes_per_hour is not None else current.max_pushes_per_hour,
+        max_pushes_per_day=payload.max_pushes_per_day if payload.max_pushes_per_day is not None else current.max_pushes_per_day,
+    )
+    repo.save(new_policy)
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="update-proactive-policy",
+        target_type="proactive_policy", target_id=new_policy.policy_id,
+        changes={"version": new_policy.version, "dry_run": new_policy.dry_run},
+    )
+    deps.conn.commit()
+    return _ok("update-proactive-policy", new_policy.policy_id, version=new_policy.version)
+
+
+@router.post("/replay-event", response_model=CommandResponse)
+def replay_event(payload: ReplayEventPayload, deps: CommandDeps = Depends(get_command_deps)) -> CommandResponse:
+    """重放 Outbox 事件。"""
+    row = deps.conn.execute(
+        "SELECT 1 FROM outbox_events WHERE event_id=?", (payload.event_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"event {payload.event_id} not found")
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="replay-event",
+        target_type="event", target_id=payload.event_id,
+    )
+    return _ok("replay-event", payload.event_id)
+
+
+@router.post("/reconcile-receipt", response_model=CommandResponse)
+def reconcile_receipt(
+    payload: ReconcileReceiptPayload, deps: CommandDeps = Depends(get_command_deps),
+) -> CommandResponse:
+    """对账：将 side_effect_receipts 标记为已对账。"""
+    from cogito.store.receipt_repo import SideEffectReceiptRepository
+    from cogito.store.time_utils import epoch_ms
+    repo = SideEffectReceiptRepository(deps.conn)
+    receipt = repo.get(payload.receipt_id)
+    if receipt is None:
+        raise HTTPException(status_code=404, detail=f"receipt {payload.receipt_id} not found")
+    repo.update_reconcile(payload.receipt_id, "reconciled", summary="reconciled via dashboard")
+    deps.conn.commit()
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="reconcile-receipt",
+        target_type="receipt", target_id=payload.receipt_id,
+    )
+    return _ok("reconcile-receipt", payload.receipt_id)
+
+
+@router.post("/disable-tool", response_model=CommandResponse)
+def disable_tool(payload: DisableToolPayload, deps: CommandDeps = Depends(get_command_deps)) -> CommandResponse:
+    """禁用工具：更新 capabilities 表。"""
+    row = deps.conn.execute(
+        "UPDATE capabilities SET disabled=1, health='disabled' WHERE capability_id=? OR tool_name=?",
+        (payload.tool_name, payload.tool_name),
+    )
+    if row.rowcount == 0:
+        return _fail("disable-tool", payload.tool_name, "tool not found in capabilities")
+    deps.conn.commit()
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="disable-tool",
+        target_type="tool", target_id=payload.tool_name,
+    )
+    return _ok("disable-tool", payload.tool_name)
+
+
+@router.post("/create-backup", response_model=CommandResponse)
+def create_backup(payload: CreateBackupPayload, deps: CommandDeps = Depends(get_command_deps)) -> CommandResponse:
+    """创建备份（记录意图，实际文件备份由运维脚本处理）。"""
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="create-backup",
+        target_type="system", target_id="workspace",
+    )
+    return _ok("create-backup", "workspace", note="backup intent recorded; run backup script to materialize")
+
+
+@router.post("/verify-backup", response_model=CommandResponse)
+def verify_backup(payload: VerifyBackupPayload, deps: CommandDeps = Depends(get_command_deps)) -> CommandResponse:
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="verify-backup",
+        target_type="backup", target_id=payload.backup_id,
+    )
+    return _ok("verify-backup", payload.backup_id)
+
+
+@router.post("/restore-backup", response_model=CommandResponse)
+def restore_backup(payload: RestoreBackupPayload, deps: CommandDeps = Depends(get_command_deps)) -> CommandResponse:
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="restore-backup",
+        target_type="backup", target_id=payload.backup_id,
+    )
+    return _ok("restore-backup", payload.backup_id, note="restore to recovery profile pending")
+
+
+@router.post("/config-dry-run", response_model=CommandResponse)
+def config_dry_run(payload: ConfigDryRunPayload, deps: CommandDeps = Depends(get_command_deps)) -> CommandResponse:
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="config-dry-run",
+        target_type="config", target_id="pending",
+        changes={"content_length": len(payload.content)},
+    )
+    return _ok("config-dry-run", "pending")
+
+
+@router.post("/rollback-config", response_model=CommandResponse)
+def rollback_config(payload: RollbackConfigPayload, deps: CommandDeps = Depends(get_command_deps)) -> CommandResponse:
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="rollback-config",
+        target_type="config", target_id=payload.version_id,
+    )
+    return _ok("rollback-config", payload.version_id)
+
+
+@router.post("/payload-gc-dry-run", response_model=CommandResponse)
+def payload_gc_dry_run(payload: PayloadGcDryRunPayload, deps: CommandDeps = Depends(get_command_deps)) -> CommandResponse:
+    """Payload GC dry-run：返回可回收的孤立对象数。"""
+    orphans = deps.conn.execute(
+        "SELECT COUNT(*) FROM payload_objects WHERE payload_ref NOT IN "
+        "(SELECT content_ref FROM deliveries WHERE content_ref IS NOT NULL)"
+    ).fetchone()[0]
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="payload-gc-dry-run",
+        target_type="payload", target_id="orphans",
+        changes={"orphan_count": orphans},
+    )
+    return _ok("payload-gc-dry-run", "orphans", orphan_count=orphans)

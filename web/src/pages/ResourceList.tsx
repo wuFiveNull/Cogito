@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
-import { Badge, Empty, ErrorBox, Loading, Section, StatusPill } from "../components";
+import { Empty, ErrorBox, Loading, PageTitle, Section, StatusPill } from "../components";
 
 interface Col {
   key: string;
@@ -9,25 +9,41 @@ interface Col {
   render?: (row: Record<string, unknown>) => React.ReactNode;
 }
 
-function Table({ items, cols, rowKey }: { items: Record<string, unknown>[]; cols: Col[]; rowKey: string }) {
+function Table({
+  items,
+  cols,
+  rowKey,
+}: {
+  items: Record<string, unknown>[];
+  cols: Col[];
+  rowKey: string;
+}) {
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-left text-sm">
-        <thead className="text-xs text-[#8b93ad]">
-          <tr className="border-b border-[#232c45]">
+        <thead className="text-xs font-semibold text-muted">
+          <tr className="border-b border-borderc">
             {cols.map((c) => (
-              <th key={c.key} className="px-3 py-2 font-medium">{c.label}</th>
+              <th key={c.key} className="px-3 py-2.5 font-medium">
+                {c.label}
+              </th>
             ))}
+            <th className="px-3 py-2.5" />
           </tr>
         </thead>
         <tbody>
           {items.map((row) => (
             <tr key={String(row[rowKey])} className="table-row">
               {cols.map((c) => (
-                <td key={c.key} className="px-3 py-2 font-mono text-xs">
+                <td key={c.key} className="px-3 py-2.5 font-mono text-xs text-ink">
                   {c.render ? c.render(row) : String(row[c.key] ?? "")}
                 </td>
               ))}
+              <td className="px-3 py-2.5 text-right">
+                <Link to={`/${rowKey}/${row[rowKey]}`} className="text-sm font-semibold text-primary hover:text-primary-strong">
+                  查看 →
+                </Link>
+              </td>
             </tr>
           ))}
         </tbody>
@@ -73,26 +89,31 @@ export function ResourceList({ cfg }: { cfg: ResourceListConfig }) {
 
   if (id && detail) {
     return (
-      <div className="space-y-4">
-        <Link to=".." className="btn-ghost">← 返回列表</Link>
+      <div className="space-y-5">
+        <Link to=".." className="btn-ghost">
+          ← 返回列表
+        </Link>
         <Section title={`${cfg.title} #${id}`}>
-          <pre className="max-h-[60vh] overflow-auto rounded-lg bg-[#0b0f1a] p-3 text-xs text-[#e6e9f2]">
+          <pre className="max-h-[55vh] overflow-auto rounded-xl bg-surface-2 p-4 text-xs text-ink">
             {JSON.stringify(detail.item, null, 2)}
           </pre>
         </Section>
         {detail.attempts && (
-          <Section title={cfg.detailAttemptsLabel ?? "Attempts"} subtitle={`${detail.attempts.length} 次`}>
+          <Section title={cfg.detailAttemptsLabel ?? "Attempts"} subtitle={`${detail.attempts.length} 次尝试`}>
             <div className="space-y-2">
               {detail.attempts.map((a, i) => {
                 const key = String(a.attempt_id ?? a.task_attempt_id ?? i);
                 const no = String(a.attempt_no ?? "");
-                const status = String(a.status);
+                const st = String(a.status);
                 const worker = String(a.worker_id ?? "");
                 return (
-                  <div key={key} className="flex items-center justify-between rounded-lg border border-[#232c45] bg-[#0b0f1a] p-3 text-xs">
-                    <span className="font-mono">#{no}</span>
-                    <StatusPill status={status} />
-                    <span className="text-[#8b93ad]">{worker}</span>
+                  <div
+                    key={key}
+                    className="flex items-center justify-between rounded-xl border border-borderc bg-surface-2 px-4 py-3 text-xs"
+                  >
+                    <span className="font-mono text-ink">#{no}</span>
+                    <StatusPill status={st} />
+                    <span className="text-muted">{worker}</span>
                   </div>
                 );
               })}
@@ -104,48 +125,43 @@ export function ResourceList({ cfg }: { cfg: ResourceListConfig }) {
   }
 
   return (
-    <div className="space-y-4">
-      <Section
+    <div className="space-y-5">
+      <PageTitle
         title={cfg.title}
-        subtitle={`共 ${list?.total ?? 0} 条`}
+        desc={`共 ${list?.total ?? 0} 条`}
         action={
-          <div className="flex gap-1">
-            <button className={`btn-ghost ${statusFilter === "" ? "bg-[#1b2236] text-[#e6e9f2]" : ""}`} onClick={() => setStatusFilter("")}>全部</button>
+          <div className="flex flex-wrap gap-1.5">
+            <button
+              className={`btn-ghost px-3 py-1.5 ${statusFilter === "" ? "bg-primary/12 text-primary-strong" : ""}`}
+              onClick={() => setStatusFilter("")}
+            >
+              全部
+            </button>
             {cfg.statusOptions.map((s) => (
-              <button key={s} className={`btn-ghost ${statusFilter === s ? "bg-[#1b2236] text-[#e6e9f2]" : ""}`} onClick={() => setStatusFilter(s)}>
+              <button
+                key={s}
+                className={`btn-ghost px-3 py-1.5 ${statusFilter === s ? "bg-primary/12 text-primary-strong" : ""}`}
+                onClick={() => setStatusFilter(s)}
+              >
                 {s}
               </button>
             ))}
           </div>
         }
-      >
+      />
+      <div className="card">
         {loading ? (
           <Loading />
         ) : error ? (
           <ErrorBox msg={error} />
         ) : !list || list.items.length === 0 ? (
-          <Empty />
+          <Empty msg="暂无数据" />
         ) : (
-          <Table
-            items={list.items}
-            cols={[
-              ...cfg.cols,
-              {
-                key: "_action",
-                label: "",
-                render: (row) => (
-                  <Link to={`/${cfg.rowKey}/${row[cfg.rowKey]}`} className="text-accent hover:underline">
-                    查看
-                  </Link>
-                ),
-              },
-            ]}
-            rowKey={cfg.rowKey}
-          />
+          <Table items={list.items} cols={cfg.cols} rowKey={cfg.rowKey} />
         )}
-      </Section>
+      </div>
     </div>
   );
 }
 
-export const ToneBadge = Badge;
+export const ToneBadge = StatusPill;

@@ -15,6 +15,8 @@ export default defineConfig({
       "/api": {
         target: "http://127.0.0.1:8081",
         changeOrigin: true,
+        // 同时转发 WebSocket（/api/chat/ws），否则 dev 模式下聊天连不上后端
+        ws: true,
       },
     },
   },

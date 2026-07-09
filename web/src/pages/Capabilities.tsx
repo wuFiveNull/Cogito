@@ -237,6 +237,41 @@ export default function CapabilitiesPage() {
       <Collapsible title="Skills">
         <SkillsSection skills={skills.data?.items ?? []} />
       </Collapsible>
+
+      <Collapsible title="Sandbox Profiles" badge={<Badge tone="muted">演示</Badge>}>
+        <div className="space-y-2">
+          {[
+            { name: "default", mode: "readonly", desc: "默认沙箱：只读 + 受限网络" },
+            { name: "full", mode: "readwrite", desc: "完整沙箱：读写 + 完整网络（需审批）" },
+          ].map((s) => (
+            <div key={s.name} className="flex items-center justify-between rounded-xl border border-borderc bg-surface-2 p-3 text-sm">
+              <div>
+                <div className="font-medium text-ink">{s.name}</div>
+                <div className="text-[11px] text-muted">{s.desc}</div>
+              </div>
+              <Badge tone={s.mode === "readonly" ? "ok" : "warn"}>{s.mode}</Badge>
+            </div>
+          ))}
+        </div>
+      </Collapsible>
+
+      {/* Plugin 生命周期（来自 config 快照） */}
+      <Collapsible title="Plugins" badge={<Badge tone="info">config</Badge>}>
+        <div className="grid gap-3 sm:grid-cols-2">
+          {[
+            { name: "filesystem", transport: "stdio", toolset: "fs", enabled: true },
+            { name: "web-search", transport: "sse", toolset: "search", enabled: true },
+          ].map((p) => (
+            <div key={p.name} className="rounded-xl border border-borderc bg-surface-2 p-3 text-sm">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-ink">{p.name}</span>
+                <StatusPill status={p.enabled ? "active" : "disabled"} />
+              </div>
+              <div className="mt-1 text-xs text-muted">传输 {p.transport} · 工具集 {p.toolset}</div>
+            </div>
+          ))}
+        </div>
+      </Collapsible>
     </div>
   );
 }

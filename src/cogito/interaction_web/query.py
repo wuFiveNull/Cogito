@@ -234,3 +234,137 @@ def dashboard_attention(deps: CommandDeps = Depends(get_command_deps)) -> dict:
 @router.get("/health/components", response_model=HealthComponents)
 def health_components(deps: CommandDeps = Depends(get_command_deps)) -> HealthComponents:
     return _svc(deps).health_components()
+
+
+# ── proactive ─────────────────────────────────────────────────
+
+
+@router.get("/proactive/status")
+def proactive_status(deps: CommandDeps = Depends(get_command_deps)) -> dict:
+    return _svc(deps).proactive_status()
+
+
+@router.get("/proactive/candidates")
+def list_proactive_candidates(
+    limit: int = Query(50, ge=1, le=200),
+    deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    return {"items": _svc(deps).list_proactive_candidates(limit=limit),
+            "total": len(_svc(deps).list_proactive_candidates(limit=limit))}
+
+
+@router.get("/proactive/decisions")
+def list_proactive_decisions(
+    limit: int = Query(50, ge=1, le=200),
+    deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    return {"items": _svc(deps).list_proactive_decisions(limit=limit),
+            "total": len(_svc(deps).list_proactive_decisions(limit=limit))}
+
+
+@router.get("/proactive/scheduled-requests")
+def list_scheduled_requests(deps: CommandDeps = Depends(get_command_deps)) -> dict:
+    return {"items": _svc(deps).list_scheduled_requests()}
+
+
+@router.get("/proactive/digests")
+def list_digests(deps: CommandDeps = Depends(get_command_deps)) -> dict:
+    return {"items": _svc(deps).list_digests()}
+
+
+@router.get("/proactive/feedback")
+def proactive_feedback(deps: CommandDeps = Depends(get_command_deps)) -> dict:
+    return _svc(deps).proactive_feedback()
+
+
+# ── outbox / events / dead letter ─────────────────────────────
+
+
+@router.get("/outbox")
+def list_outbox(
+    limit: int = Query(50, ge=1, le=200),
+    deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    return {"items": _svc(deps).list_outbox(limit=limit), "total": len(_svc(deps).list_outbox(limit=limit))}
+
+
+@router.get("/events")
+def list_events(
+    limit: int = Query(50, ge=1, le=200),
+    deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    return {"items": _svc(deps).list_events(limit=limit), "total": len(_svc(deps).list_events(limit=limit))}
+
+
+@router.get("/dead-letter")
+def list_dead_letter(deps: CommandDeps = Depends(get_command_deps)) -> dict:
+    return {"items": _svc(deps).list_dead_letter(), "total": len(_svc(deps).list_dead_letter())}
+
+
+# ── audit ──────────────────────────────────────────────────────
+
+
+@router.get("/audit")
+def list_audit(
+    entity_id: str | None = None,
+    action: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    return {"items": _svc(deps).list_audit(entity_id=entity_id, action=action, limit=limit),
+            "total": len(_svc(deps).list_audit(entity_id=entity_id, action=action, limit=limit))}
+
+
+# ── capabilities / tool-calls / receipts ──────────────────────
+
+
+@router.get("/capabilities")
+def list_capabilities(deps: CommandDeps = Depends(get_command_deps)) -> dict:
+    return {"items": _svc(deps).list_capabilities(), "total": len(_svc(deps).list_capabilities())}
+
+
+@router.get("/tool-calls")
+def list_tool_calls(
+    limit: int = Query(50, ge=1, le=200),
+    deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    return {"items": _svc(deps).list_tool_calls(limit=limit), "total": len(_svc(deps).list_tool_calls(limit=limit))}
+
+
+@router.get("/receipts")
+def list_receipts(
+    limit: int = Query(50, ge=1, le=200),
+    deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    return {"items": _svc(deps).list_receipts(limit=limit), "total": len(_svc(deps).list_receipts(limit=limit))}
+
+
+@router.get("/reconcile")
+def list_reconcile(deps: CommandDeps = Depends(get_command_deps)) -> dict:
+    return {"items": _svc(deps).list_reconcile_pending(), "total": len(_svc(deps).list_reconcile_pending())}
+
+
+@router.get("/skills")
+def list_skills(deps: CommandDeps = Depends(get_command_deps)) -> dict:
+    # skills 表暂未建立；返回 capabilities 中 kind='skill' 的子集
+    caps = _svc(deps).list_capabilities()
+    skills = [c for c in caps if c.get("kind") == "skill"]
+    return {"items": skills, "total": len(skills)}
+
+
+# ── storage / backups / config ─────────────────────────────────
+
+
+@router.get("/storage/summary")
+def storage_summary(deps: CommandDeps = Depends(get_command_deps)) -> dict:
+    return _svc(deps).storage_summary()
+
+
+@router.get("/backups")
+def list_backups(deps: CommandDeps = Depends(get_command_deps)) -> dict:
+    return {"items": _svc(deps).list_backups(), "total": 0}
+
+
+@router.get("/config/versions")
+def list_config_versions(deps: CommandDeps = Depends(get_command_deps)) -> dict:
+    return {"items": _svc(deps).list_config_versions()}

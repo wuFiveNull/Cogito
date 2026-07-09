@@ -204,12 +204,14 @@ export default function SystemPage() {
   const storage = useAsync(() => api.storageSummary(), []);
   const backups = useAsync(() => api.backups(), []);
   const versions = useAsync(() => api.configVersions(), []);
+  const status = useAsync(() => api.status(), []);
 
   const refreshAll = () => {
     health.reload();
     storage.reload();
     backups.reload();
     versions.reload();
+    status.reload();
   };
 
   const loading = health.loading || storage.loading || backups.loading || versions.loading;
@@ -238,6 +240,38 @@ export default function SystemPage() {
       </Collapsible>
 
       <ResourceBudget />
+
+      {/* Profile 摘要 */}
+      <Section title="Profile" subtitle="当前运行时 profile 与模型配置">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          <StatTile label="Profile" value={status?.data?.profile ?? "—"} tone="text-primary" />
+          <StatTile label="模型" value={status?.data?.model ?? "—"} tone="text-accent" />
+          <StatTile label="Worker 并发" value={status?.data?.worker?.concurrency ?? "—"} tone="text-terracotta" />
+        </div>
+      </Section>
+
+      {/* Degradation 状态 */}
+      <Section title="降级状态" subtitle="Provider / Gateway / 队列降级原因">
+        <div className="space-y-2">
+          {(!health.data || health.data.components.filter((c) => c.status === "warn" || c.status === "danger").length === 0) ? (
+            <div className="rounded-xl bg-ok/10 p-3 text-sm text-ok">无降级：所有通道正常。</div>
+          ) : (
+            health.data.components.filter((c) => c.status !== "ok").map((c, i) => (
+              <div key={i} className="flex items-center justify-between rounded-xl border border-warn/30 bg-warn/5 p-3 text-sm">
+                <span className="text-ink">{c.name}：{c.detail}</span>
+                <Badge tone={c.status === "danger" ? "danger" : "warn"}>{c.status}</Badge>
+              </div>
+            ))
+          )}
+        </div>
+      </Section>
+
+      {/* 危险操作 */}
+      <Section title="危险操作" subtitle="二次确认 + Command API + Audit">
+        <div className="flex flex-wrap gap-2">
+          <CommandButton variant="ghost" onClick={() => api.payloadGcDryRun().then((r) => alert(`GC dry-run：${JSON.stringify(r.details)}`))}>Payload GC Dry-Run</CommandButton>
+        </div>
+      </Section>
 
       <Runbook />
     </div>

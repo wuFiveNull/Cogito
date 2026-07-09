@@ -118,3 +118,54 @@ class HealthComponents(BaseModel):
     generated_at: str = ""
     overall: str = "healthy"
     components: list[ComponentHealth] = Field(default_factory=list)
+
+
+# ── Plan 08 Dashboard: 新增 Command Payload ──
+
+
+class ReviewProactiveCandidatePayload(BaseModel):
+    candidate_id: str
+    action: str  # approve_send | digest | dismiss
+
+
+class UpdateProactivePolicyPayload(BaseModel):
+    energy_value: float | None = None
+    dry_run: bool | None = None
+    max_pushes_per_hour: int | None = None
+    max_pushes_per_day: int | None = None
+
+
+class ReplayEventPayload(BaseModel):
+    event_id: str
+
+
+class ReconcileReceiptPayload(BaseModel):
+    receipt_id: str
+
+
+class DisableToolPayload(BaseModel):
+    tool_name: str
+
+
+class CreateBackupPayload(BaseModel):
+    pass
+
+
+class VerifyBackupPayload(BaseModel):
+    backup_id: str
+
+
+class RestoreBackupPayload(BaseModel):
+    backup_id: str
+
+
+class ConfigDryRunPayload(BaseModel):
+    content: str
+
+
+class RollbackConfigPayload(BaseModel):
+    version_id: str
+
+
+class PayloadGcDryRunPayload(BaseModel):
+    pass

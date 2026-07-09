@@ -10,8 +10,8 @@ body,
 
 body {
   margin: 0;
-  background: #0b0f1a;
-  color: #e6e9f2;
+  background: #fbf3ea;
+  color: #3a2a1e;
   font-family: "Inter", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
@@ -21,35 +21,47 @@ body {
   height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #232c45;
+  background: #e6cdb4;
   border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #d9b896;
 }
 
 @layer components {
   .card {
-    @apply rounded-xl border border-[#232c45] bg-[#121829] p-5;
+    @apply rounded-2xl border border-borderc bg-surface p-5 shadow-warm;
   }
   .btn {
-    @apply inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition;
-  }
-  .btn-ghost {
-    @apply btn text-[#8b93ad] hover:bg-[#1b2236] hover:text-[#e6e9f2];
+    @apply inline-flex items-center justify-center gap-1.5 rounded-xl px-3.5 py-2 text-sm font-semibold transition active:scale-[0.98];
   }
   .btn-primary {
-    @apply btn bg-[#7c5cff] text-white hover:opacity-90;
+    @apply btn bg-primary text-white shadow-warm hover:bg-primary-strong;
+  }
+  .btn-ghost {
+    @apply btn border border-borderc bg-surface text-muted hover:bg-surface-2 hover:text-ink;
   }
   .pill {
-    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
+    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold;
+  }
+  .input {
+    @apply w-full rounded-xl border border-borderc bg-surface px-3.5 py-2.5 text-sm text-ink outline-none transition placeholder:text-muted/70 focus:border-primary focus:ring-2 focus:ring-primary/20;
   }
   .table-row {
-    @apply border-b border-[#232c45] hover:bg-[#1b2236]/40;
+    @apply border-b border-borderc transition hover:bg-surface-2/60;
+  }
+  .nav-link {
+    @apply flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm font-medium text-muted transition hover:bg-surface-2 hover:text-ink;
+  }
+  .nav-link-active {
+    @apply bg-primary/12 text-primary-strong hover:bg-primary/15 hover:text-primary-strong;
   }
 }
 
 @keyframes fade-in {
   from {
     opacity: 0;
-    transform: translateY(4px);
+    transform: translateY(6px);
   }
   to {
     opacity: 1;
@@ -57,18 +69,34 @@ body {
   }
 }
 .animate-fade-in {
-  animation: fade-in 0.2s ease-out;
+  animation: fade-in 0.28s ease-out;
 }
 
 @keyframes pulse-dot {
   0%,
   100% {
     opacity: 1;
+    transform: scale(1);
   }
   50% {
-    opacity: 0.4;
+    opacity: 0.45;
+    transform: scale(0.82);
   }
 }
 .animate-pulse-dot {
   animation: pulse-dot 1.6s ease-in-out infinite;
+}
+
+@keyframes float-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.animate-float-in {
+  animation: float-in 0.35s cubic-bezier(0.22, 1, 0.36, 1);
 }

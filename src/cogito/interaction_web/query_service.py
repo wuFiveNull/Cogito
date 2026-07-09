@@ -15,11 +15,18 @@ from typing import Any
 
 from cogito.config import Config
 from cogito.service.retrieval_service import RetrievalService
+from cogito.store.capability_repo import CapabilityRepository
+from cogito.store.config_version_repo import ConfigVersionRepository
 from cogito.store.connector_repo import ConnectorRepository
+from cogito.store.digest_repo import DigestRepository
 from cogito.store.model_call_repo import ModelCallRepository
+from cogito.store.proactive_repo import ProactiveCandidateRepository, ProactiveDecisionRepository, ProactivePolicyRepository
+from cogito.store.receipt_repo import SideEffectReceiptRepository
 from cogito.store.repositories import TurnRepository
+from cogito.store.schedule_repo import ScheduleRepository
 from cogito.store.task_repo import TaskAttemptRepository, TaskRepository
 from cogito.store.time_utils import epoch_ms
+from cogito.store.tool_call_repo import ToolCallRepository
 
 
 class QueryService:
@@ -34,6 +41,16 @@ class QueryService:
         self._connector_repo = ConnectorRepository(conn)
         self._model_call_repo = ModelCallRepository(conn)
         self._retrieval = RetrievalService(conn)
+        # ── Plan 08 Dashboard: 新增 repo ──
+        self._candidate_repo = ProactiveCandidateRepository(conn)
+        self._decision_repo = ProactiveDecisionRepository(conn)
+        self._policy_repo = ProactivePolicyRepository(conn)
+        self._tool_call_repo = ToolCallRepository(conn)
+        self._receipt_repo = SideEffectReceiptRepository(conn)
+        self._capability_repo = CapabilityRepository(conn)
+        self._config_version_repo = ConfigVersionRepository(conn)
+        self._digest_repo = DigestRepository(conn)
+        self._schedule_repo = ScheduleRepository(conn)
 
     # ── status / usage ─────────────────────────────────────────
 
@@ -748,3 +765,239 @@ class QueryService:
             "overall": overall,
             "components": components,
         }
+
+    # ── proactive ───────────────────────────────────────────────
+
+    def proactive_status(self) -> dict[str, Any]:
+        """主动系统当前状态。"""
+        from datetime import UTC, datetime as _dt
+        now_ms = int(_dt.now(UTC).timestamp() * 1000)
+        # 直接读 policy，避免 repo.get_current() 的 NOT NULL 约束问题
+        row = self._conn.execute(
+            "SELECT * FROM proactive_policies WHERE principal_id=? "
+            "ORDER BY version DESC LIMIT 1",
+            ("owner",),
+        ).fetchone()
+        if row is None:
+            dry_run, version, qh_json, hourly, daily = True, 1, None, 3, 10
+        else:
+            dry_run = bool(row["dry_run"])
+            version = row["version"]
+            qh_json = row["quiet_hours_json"]
+            import json
+            bud = json.loads(row["budgets_json"] or "{}") if row["budgets_json"] else {}
+            hourly = bud.get("max_pushes_per_hour", 3)
+            daily = bud.get("max_pushes_per_day", 10)
+        # quiet_hours 解析
+        import json
+        qh = json.loads(qh_json) if qh_json else {"enabled": True, "start": "23:00", "end": "08:00"}
+        quiet_active = False
+        if qh.get("enabled"):
+            try:
+                now_h = _dt.now().hour
+                s, e = int(str(qh["start"]).split(":")[0]), int(str(qh["end"]).split(":")[0])
+                quiet_active = (now_h >= s or now_h < e) if s > e else (s <= now_h < e)
+            except (ValueError, KeyError):
+                quiet_active = False
+        energy_rows = self._conn.execute(
+            "SELECT energy_value FROM proactive_ticks "
+            "ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        energy_value = float(energy_rows[0]) if energy_rows else 0.0
+        candidates_queued = self._candidate_repo.count_by_principal("owner", "queued")
+        decisions_24h = self._conn.execute(
+            "SELECT COUNT(*) FROM proactive_decisions_v2 "
+            "WHERE decided_at >= ?",
+            (now_ms - 86400000,),
+        ).fetchone()[0]
+        daily_used = self._conn.execute(
+            "SELECT COUNT(*) FROM proactive_decisions_v2 "
+            "WHERE dry_run=0 AND decided_at >= ?",
+            (now_ms - 86400000,),
+        ).fetchone()[0]
+        return {
+            "enabled": True,
+            "dry_run": dry_run,
+            "default_principal_id": "owner",
+            "quiet_hours_start": int(str(qh.get("start", "23:00")).split(":")[0]),
+            "quiet_hours_end": int(str(qh.get("end", "08:00")).split(":")[0]),
+            "hourly_budget": hourly,
+            "daily_budget": daily,
+            "energy_value": energy_value,
+            "policy_version": f"v{version}",
+            "candidates_queued": candidates_queued,
+            "decisions_24h": decisions_24h,
+            "daily_budget_used": daily_used,
+            "quiet_hours_active": quiet_active,
+        }
+
+    def list_proactive_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM proactive_candidates "
+            "ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_proactive_decisions(self, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM proactive_decisions_v2 "
+            "ORDER BY decided_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_scheduled_requests(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM scheduled_delivery_requests "
+            "ORDER BY scheduled_at ASC LIMIT 100"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_digests(self) -> list[dict[str, Any]]:
+        rows = self._digest_repo.find_all("owner", limit=30)
+        return [d.to_dict() if hasattr(d, "to_dict") else {
+            "digest_id": d.digest_id,
+            "principal_id": d.principal_id,
+            "topic": getattr(d, "topic", "general"),
+            "digest_date": d.digest_date,
+            "item_count": d.item_count,
+            "status": d.status,
+        } for d in rows]
+
+    def proactive_feedback(self) -> dict[str, Any]:
+        """反馈统计（来自 proactive_decisions_v2 的 action 分布）。"""
+        actions: dict[str, int] = {}
+        for row in self._conn.execute(
+            "SELECT action, COUNT(*) AS n FROM proactive_decisions_v2 GROUP BY action"
+        ).fetchall():
+            actions[row["action"]] = row["n"]
+        return {
+            "opened": 0, "ignored": 0, "dismissed": 0,
+            "useful": actions.get("send_now", 0),
+            "not_useful": 0,
+            "muted": actions.get("silent", 0),
+            "requested_more": 0,
+            "drift_preemption_reason": None,
+        }
+
+    # ── outbox / events / dead letter ───────────────────────────
+
+    def list_outbox(self, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM outbox_events ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_events(self, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM events ORDER BY occurred_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_dead_letter(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM outbox_events WHERE status='dead_letter' ORDER BY created_at DESC LIMIT 100"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── audit ────────────────────────────────────────────────────
+
+    def list_audit(self, entity_id: str | None = None, action: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        q = "SELECT * FROM audit_records WHERE 1=1"
+        params: list[Any] = []
+        if entity_id:
+            q += " AND target_id=?"
+            params.append(entity_id)
+        if action:
+            q += " AND action=?"
+            params.append(action)
+        q += " ORDER BY occurred_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(q, params).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── capabilities / tool-calls / receipts / skills ────────────
+
+    def list_capabilities(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute("SELECT * FROM capabilities ORDER BY discovered_at DESC LIMIT 200").fetchall()
+        return [dict(r) for r in rows]
+
+    def list_tool_calls(self, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM tool_calls ORDER BY started_at DESC LIMIT ?", (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_receipts(self, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM side_effect_receipts ORDER BY created_at DESC LIMIT ?", (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_reconcile_pending(self) -> list[dict[str, Any]]:
+        return [dict(r) for r in self._receipt_repo.find_pending_reconcile()]
+
+    # ── storage / config ─────────────────────────────────────────
+
+    def storage_summary(self) -> dict[str, Any]:
+        """SQLite + Payload 存储统计。"""
+        from pathlib import Path
+        db_path = self._config.resolve_db_path()
+        payload_dir = self._config.resolve_payload_dir()
+        db_size = Path(db_path).stat().st_size / (1024 * 1024) if Path(db_path).exists() else 0.0
+        wal_path = db_path + "-wal"
+        wal_size = Path(wal_path).stat().st_size / (1024 * 1024) if Path(wal_path).exists() else 0.0
+        payload_size = 0.0
+        payload_obj_count = 0
+        pdir = Path(payload_dir)
+        if pdir.exists():
+            for f in pdir.rglob("*"):
+                if f.is_file():
+                    payload_size += f.stat().st_size
+                    payload_obj_count += 1
+            payload_size /= 1024 * 1024
+        objects = self._conn.execute("SELECT COUNT(*) FROM payload_objects").fetchone()[0]
+        orphans = self._conn.execute(
+            "SELECT COUNT(*) FROM payload_objects p WHERE p.payload_ref NOT IN "
+            "(SELECT content_ref FROM deliveries WHERE content_ref IS NOT NULL)"
+        ).fetchone()[0]
+        return {
+            "db_path": db_path,
+            "db_size_mb": round(db_size, 2),
+            "wal_size_mb": round(wal_size, 2),
+            "payload_dir": payload_dir,
+            "payload_size_mb": round(payload_size, 2),
+            "object_count": objects,
+            "orphan_count": orphans,
+            "backup_count": self._conn.execute("SELECT COUNT(*) FROM scheduled_delivery_request").fetchone()[0] if False else 0,
+            "latest_backup_at": None,
+            "latest_restore_drill_at": None,
+        }
+
+    def list_backups(self) -> list[dict[str, Any]]:
+        """备份记录（当前使用 scheduled_delivery_requests 占位，未来有 dedicated backup 表）。"""
+        return []
+
+    def list_config_versions(self) -> list[dict[str, Any]]:
+        latest = self._config_version_repo.latest()
+        if latest is None:
+            from datetime import UTC, datetime
+            return [{
+                "version_id": "current",
+                "config_version": self._config.config_version,
+                "content_hash": self._config.content_hash or "—",
+                "active": True,
+                "created_at": datetime.now(UTC).isoformat(),
+                "source_layers": ["config.toml"],
+            }]
+        return [{
+            "version_id": latest.version_id,
+            "config_version": str(latest.applied_at),
+            "content_hash": latest.content_hash,
+            "active": True,
+            "created_at": latest.applied_at,
+            "source_layers": latest.source_layers,
+        }]
