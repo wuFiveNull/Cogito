@@ -123,49 +123,55 @@ class HealthComponents(BaseModel):
 # ── Plan 08 Dashboard: 新增 Command Payload ──
 
 
-class ReviewProactiveCandidatePayload(BaseModel):
+class BaseCommandPayload(BaseModel):
+    """命令基类：统一幂等键 + 预期版本（APPROVAL-COMMANDS §2）。"""
+    idempotency_key: str = ""
+    expected_version: int | None = None
+
+
+class ReviewProactiveCandidatePayload(BaseCommandPayload):
     candidate_id: str
     action: str  # approve_send | digest | dismiss
 
 
-class UpdateProactivePolicyPayload(BaseModel):
+class UpdateProactivePolicyPayload(BaseCommandPayload):
     energy_value: float | None = None
     dry_run: bool | None = None
     max_pushes_per_hour: int | None = None
     max_pushes_per_day: int | None = None
 
 
-class ReplayEventPayload(BaseModel):
+class ReplayEventPayload(BaseCommandPayload):
     event_id: str
 
 
-class ReconcileReceiptPayload(BaseModel):
+class ReconcileReceiptPayload(BaseCommandPayload):
     receipt_id: str
 
 
-class DisableToolPayload(BaseModel):
+class DisableToolPayload(BaseCommandPayload):
     tool_name: str
 
 
-class CreateBackupPayload(BaseModel):
+class CreateBackupPayload(BaseCommandPayload):
     pass
 
 
-class VerifyBackupPayload(BaseModel):
+class VerifyBackupPayload(BaseCommandPayload):
     backup_id: str
 
 
-class RestoreBackupPayload(BaseModel):
+class RestoreBackupPayload(BaseCommandPayload):
     backup_id: str
 
 
-class ConfigDryRunPayload(BaseModel):
+class ConfigDryRunPayload(BaseCommandPayload):
     content: str
 
 
-class RollbackConfigPayload(BaseModel):
+class RollbackConfigPayload(BaseCommandPayload):
     version_id: str
 
 
-class PayloadGcDryRunPayload(BaseModel):
+class PayloadGcDryRunPayload(BaseCommandPayload):
     pass

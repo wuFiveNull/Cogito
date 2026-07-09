@@ -646,6 +646,13 @@ class QueryService:
         ]
         return {"items": servers, "count": len(servers)}
 
+    # ── helpers ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _now_ms() -> int:
+        from datetime import UTC, datetime
+        return int(datetime.now(UTC).timestamp() * 1000)
+
     # ── dashboard summary / attention / health ──────────────────
 
     def dashboard_summary(self) -> dict[str, Any]:
@@ -694,14 +701,20 @@ class QueryService:
             },
             "proactive": {
                 "mode": "dry_run" if cfg.capability.proactive.dry_run else ("live" if cfg.capability.proactive.enabled else "disabled"),
-                "candidates_queued": 0,  # proactive_candidates 表暂缺；由 repo 接入后填充
-                "decisions_24h": 0,
-                "daily_budget_used": 0,
+                "candidates_queued": self._candidate_repo.count_by_principal("owner", "queued"),
+                "decisions_24h": self._conn.execute(
+                    "SELECT COUNT(*) FROM proactive_decisions_v2 WHERE decided_at >= ?",
+                    (self._now_ms() - 86400000,),
+                ).fetchone()[0],
+                "daily_budget_used": self._conn.execute(
+                    "SELECT COUNT(*) FROM proactive_decisions_v2 WHERE dry_run=0 AND decided_at >= ?",
+                    (self._now_ms() - 86400000,),
+                ).fetchone()[0],
                 "daily_budget_limit": cfg.capability.proactive.max_pushes_per_day,
                 "quiet_hours_active": False,
             },
             "resources": {
-                "sqlite_size_mb": 0.0,  # 由本地文件统计填充
+                "sqlite_size_mb": 0.0,
                 "payload_size_mb": 0.0,
                 "trace_retention_days": 7,
                 "backup_freshness_hours": None,
@@ -728,31 +741,88 @@ class QueryService:
         rows = self._conn.execute("SELECT COUNT(*) FROM connectors WHERE status='paused'").fetchone()[0]
         if rows:
             items.append({"kind": "connector_paused", "severity": "warn", "label": "连接器已暂停", "count": rows, "target_route": "/connectors"})
+        # Proactive dry-run 待复核
+        rows = self._conn.execute(
+            "SELECT COUNT(*) FROM proactive_decisions_v2 WHERE dry_run=1 AND decided_at >= ?",
+            (self._now_ms() - 86400000,),
+        ).fetchone()[0]
+        if rows:
+            items.append({"kind": "dry_run_review", "severity": "info", "label": "dry-run 待复核", "count": rows, "target_route": "/proactive"})
+        # Dead letter 事件
+        rows = self._conn.execute("SELECT COUNT(*) FROM outbox_events WHERE status='dead_letter'").fetchone()[0]
+        if rows:
+            items.append({"kind": "dead_letter", "severity": "danger", "label": "Dead Letter 事件", "count": rows, "target_route": "/connectors"})
         return items
 
     def health_components(self) -> dict[str, Any]:
-        """组件级健康检查。"""
+        """组件级健康检查：liveness + readiness 分级。"""
         from datetime import UTC, datetime
         now = datetime.now(UTC).isoformat()
         components: list[dict[str, Any]] = []
 
-        # SQLite
+        # ── Liveness（进程存活）──
+        components.append({"name": "Liveness", "status": "ok", "detail": "API 进程存活"})
+
+        # ── SQLite（Readiness）──
         try:
             self._conn.execute("SELECT 1").fetchone()
-            components.append({"name": "SQLite", "status": "ok", "detail": "连接正常"})
+            db_size = self._conn.execute(
+                "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()"
+            ).fetchone()[0]
+            size_mb = db_size / (1024 * 1024)
+            components.append({"name": "SQLite", "status": "ok", "detail": f"连接正常 · {size_mb:.1f} MB"})
         except Exception as e:
             components.append({"name": "SQLite", "status": "danger", "detail": str(e)})
 
-        # Worker / Scheduler（基于配置）
+        # ── Worker ──
         components.append({"name": "Worker", "status": "ok", "detail": f"并发 {self._config.worker.concurrency}"})
-        components.append({"name": "Scheduler", "status": "ok", "detail": "已启用"})
 
-        # Gateway（无法直接检测，基于配置占位）
+        # ── Scheduler ──
+        due_count = self._conn.execute(
+            "SELECT COUNT(*) FROM schedules WHERE enabled=1 AND next_fire_at IS NOT NULL AND next_fire_at <= ?",
+            (self._now_ms(),),
+        ).fetchone()[0]
+        sched_status = "ok" if due_count == 0 else "warn"
+        components.append({"name": "Scheduler", "status": sched_status,
+                           "detail": f"{'无' if due_count == 0 else due_count + ' 个'}待触发调度"})
+
+        # ── Gateway ──
         components.append({"name": "Gateway", "status": "warn", "detail": "LangBot 状态未知"})
 
-        # Provider
-        components.append({"name": "Provider", "status": "ok", "detail": self._config.model.main.model or ""})
+        # ── Provider ──
+        model = self._config.model.main.model or "(stub)"
+        configured = self._config.model.main.is_configured()
+        components.append({"name": "Provider", "status": "ok" if configured else "warn",
+                           "detail": f"{model} {'已配置' if configured else '未配置'}"})
 
+        # ── Connector Freshness ──
+        stale = self._conn.execute(
+            "SELECT COUNT(*) FROM connectors WHERE status='active' AND "
+            "(last_success_at IS NULL OR last_success_at < ?)",
+            (self._now_ms() - 86400000,),
+        ).fetchone()[0]
+        total_conn = self._conn.execute("SELECT COUNT(*) FROM connectors").fetchone()[0]
+        conn_status = "ok" if stale == 0 else "warn"
+        components.append({"name": "Connector", "status": conn_status,
+                           "detail": f"{total_conn} 个 · {stale} 个超 24h 未成功"})
+
+        # ── Delivery Backlog ──
+        pending_del = self._conn.execute(
+            "SELECT COUNT(*) FROM deliveries WHERE status IN ('pending','sending','scheduled')"
+        ).fetchone()[0]
+        del_status = "ok" if pending_del < 10 else ("warn" if pending_del < 50 else "danger")
+        components.append({"name": "Delivery", "status": del_status,
+                           "detail": f"{pending_del} 个待处理投递"})
+
+        # ── Outbox Backlog ──
+        outbox_pending = self._conn.execute(
+            "SELECT COUNT(*) FROM outbox_events WHERE status='pending'"
+        ).fetchone()[0]
+        outbox_status = "ok" if outbox_pending < 20 else ("warn" if outbox_pending < 100 else "danger")
+        components.append({"name": "Outbox", "status": outbox_status,
+                           "detail": f"{outbox_pending} 个待处理事件"})
+
+        # Overall readiness 判定
         overall = "healthy"
         if any(c["status"] == "danger" for c in components):
             overall = "blocked"
@@ -866,14 +936,22 @@ class QueryService:
         } for d in rows]
 
     def proactive_feedback(self) -> dict[str, Any]:
-        """反馈统计（来自 proactive_decisions_v2 的 action 分布）。"""
+        """反馈统计：proactive decisions 的 action 分布 + delivery_receipts 的 receipt_kind 分布。"""
         actions: dict[str, int] = {}
         for row in self._conn.execute(
             "SELECT action, COUNT(*) AS n FROM proactive_decisions_v2 GROUP BY action"
         ).fetchall():
             actions[row["action"]] = row["n"]
+        # receipt_kind 分布
+        receipt_kinds: dict[str, int] = {}
+        for row in self._conn.execute(
+            "SELECT receipt_kind, COUNT(*) AS n FROM delivery_receipts GROUP BY receipt_kind"
+        ).fetchall():
+            receipt_kinds[row["receipt_kind"]] = row["n"]
         return {
-            "opened": 0, "ignored": 0, "dismissed": 0,
+            "opened": receipt_kinds.get("confirmed", 0),
+            "ignored": 0,
+            "dismissed": 0,
             "useful": actions.get("send_now", 0),
             "not_useful": 0,
             "muted": actions.get("silent", 0),
@@ -978,8 +1056,9 @@ class QueryService:
         }
 
     def list_backups(self) -> list[dict[str, Any]]:
-        """备份记录（当前使用 scheduled_delivery_requests 占位，未来有 dedicated backup 表）。"""
-        return []
+        """备份记录（来自 backups 表）。"""
+        rows = self._conn.execute("SELECT * FROM backups ORDER BY created_at DESC LIMIT 100").fetchall()
+        return [dict(r) for r in rows]
 
     def list_config_versions(self) -> list[dict[str, Any]]:
         latest = self._config_version_repo.latest()
