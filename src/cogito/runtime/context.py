@@ -30,7 +30,10 @@ def estimate_tokens(text: str) -> int:
 
 @dataclass(frozen=True)
 class ContextItem:
-    """Snapshot 中的单个上下文条目。"""
+    """Snapshot 中的单个上下文条目。
+
+    每条 item 保留 source/score/tokens/trust_label/retrieval_path (Plan 02 M5)。
+    """
     item_type: str  # "message" | "system_policy" | "memory" | "summary"
     item_id: str
     source: str  # session_id 或 "system"
@@ -38,6 +41,8 @@ class ContextItem:
     trust_label: str = "unverified"
     content: str = ""
     role: str = ""  # "user" | "assistant" | "tool" | "system"
+    score: float = 0.0  # 相关性/重要性分数（用于可解释性）
+    retrieval_path: str = ""  # 命中路径: "keyword" | "vector" | "keyword+vector"
 
 
 @dataclass(frozen=True)
@@ -64,6 +69,7 @@ class ContextSnapshot:
     conversation_id: str = ""
     principal_id: str = ""
     message_upper_bound: int = 0
+    query_plan_version: str = "1"  # Query Plan 版本（Plan 02 M5）
     selection_policy_version: str = "1"
     items: tuple[ContextItem, ...] = ()
     memory_ids: tuple[str, ...] = ()
@@ -96,12 +102,14 @@ class ContextBuilder:
         clock: Clock | None = None,
         max_input_tokens: int = 64000,
         policy_version: str = "1",
+        query_plan_version: str = "1",
         memory_service: SqliteMemoryService | None = None,
     ) -> None:
         self._conn = conn
         self._clock = clock or ProductionClock()
         self._max_input_tokens = max_input_tokens
         self._policy_version = policy_version
+        self._query_plan_version = query_plan_version
         self._memory_service = memory_service
 
     def build(
@@ -217,6 +225,7 @@ class ContextBuilder:
             principal_id=principal_id,
             memory_ids=tuple(memory_ids),
             message_upper_bound=message_upper_bound,
+            query_plan_version=self._query_plan_version,
             selection_policy_version=self._policy_version,
             items=tuple(items),
             excluded_summary=(
