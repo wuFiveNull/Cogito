@@ -11,6 +11,7 @@ from typing import Any
 
 from cogito.config import MultimodalConfig
 from cogito.domain.multimodal import VisionAnalysis, VisionAnalysisStatus
+from cogito.infrastructure.multimodal_metrics import MultimodalMetrics, now_ms
 from cogito.infrastructure.payload_store import PayloadStore
 from cogito.model.contracts import ModelRequest
 from cogito.model.router import ModelRouter, RouterError
@@ -90,6 +91,7 @@ class VisionAnalysisService:
         config: MultimodalConfig,
         *,
         model_id: str,
+        metrics: MultimodalMetrics | None = None,
     ) -> None:
         self._conn = conn
         self._repo = MultimodalRepository(conn)
@@ -98,6 +100,11 @@ class VisionAnalysisService:
         self._config = config
         self._model_id = model_id
         self._options_hash = _options_hash({})
+        self._metrics = metrics
+
+    @property
+    def metrics(self) -> MultimodalMetrics | None:
+        return self._metrics
 
     def request_analysis(self, asset_id: str) -> VisionAnalysis:
         analysis = self._repo.get_or_create_analysis(
@@ -108,6 +115,12 @@ class VisionAnalysisService:
             result_schema_version=self._config.result_schema_version,
             options_hash=self._options_hash,
         )
+        if self._metrics is not None:
+            self._metrics.record_requested()
+            # A previously completed analysis row means the upcoming request is served
+            # from cache; record it so the dashboard can report a hit rate.
+            if analysis.status == VisionAnalysisStatus.succeeded:
+                self._metrics.record_cache_hit()
         if analysis.status == VisionAnalysisStatus.failed and analysis.retryable:
             if self._repo.retry_failed_analysis(analysis.analysis_id):
                 analysis = self._repo.get_analysis(analysis.analysis_id) or analysis
@@ -165,6 +178,9 @@ class VisionAnalysisService:
             self._repo.fail_analysis(analysis_id, category="payload_missing", retryable=False)
             raise VisionAnalysisError("asset payload missing")
 
+        if self._metrics is not None:
+            self._metrics.record_started()
+        provider_started_ms = now_ms()
         try:
             provider = self._router.get_provider("vlm")
             modalities = set(provider.capabilities().modalities)
@@ -210,6 +226,8 @@ class VisionAnalysisService:
                 document_type=parsed["document_type"],
                 metadata=metadata,
             )
+            if self._metrics is not None:
+                self._metrics.record_completed(latency_ms=now_ms() - provider_started_ms)
         except asyncio.CancelledError:
             self._repo.requeue_analysis(analysis_id)
             raise
@@ -217,6 +235,8 @@ class VisionAnalysisService:
             self._repo.fail_analysis(
                 analysis_id, category="capability", retryable=exc.retryable,
             )
+            if self._metrics is not None:
+                self._metrics.record_failed()
             raise
         except RouterError as exc:
             retryable = bool(exc.envelope and exc.envelope.retryable)
@@ -224,9 +244,13 @@ class VisionAnalysisService:
                 exc.envelope.category.value if exc.envelope else "provider_error"
             )
             self._repo.fail_analysis(analysis_id, category=category, retryable=retryable)
+            if self._metrics is not None:
+                self._metrics.record_failed()
             raise VisionAnalysisError(str(exc), retryable=retryable) from exc
         except Exception as exc:
             self._repo.fail_analysis(analysis_id, category="invalid_output", retryable=False)
+            if self._metrics is not None:
+                self._metrics.record_failed()
             raise VisionAnalysisError(f"vision result invalid: {exc}") from exc
 
         return self._repo.get_analysis(analysis_id) or analysis

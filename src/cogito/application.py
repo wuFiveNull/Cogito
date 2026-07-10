@@ -211,6 +211,11 @@ class RuntimeApplication:
 
         vision_model_id = config.model.resolve_role("vlm")[1].model or "vlm"
 
+        # Process-wide vision counters shared by the inline path and the durable
+        # Task path; exposed on the runtime so the Query API can report them.
+        from cogito.infrastructure.multimodal_metrics import MultimodalMetrics
+        multimodal_metrics = MultimodalMetrics()
+
         def _make_vision_service() -> VisionAnalysisService:
             from cogito.store.connection import get_connection as _gc
 
@@ -221,6 +226,7 @@ class RuntimeApplication:
                 llm_manager.router,
                 config.multimodal,
                 model_id=vision_model_id,
+                metrics=multimodal_metrics,
             )
 
         shared_vision_service = None
@@ -234,6 +240,7 @@ class RuntimeApplication:
                 llm_manager.router,
                 config.multimodal,
                 model_id=vision_model_id,
+                metrics=multimodal_metrics,
             )
             multimodal_reader = MultimodalContextProjection(
                 conn,
@@ -288,6 +295,7 @@ class RuntimeApplication:
         )
         app.vision_service = shared_vision_service
         app.vision_service_factory = vision_factory
+        app.multimodal_metrics = multimodal_metrics
         app._wakeup_event = wakeup_event
         app._recovery_counts = recovery_counts
 

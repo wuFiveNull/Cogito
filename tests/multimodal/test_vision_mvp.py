@@ -10,6 +10,7 @@ from cogito.capability.models import ToolContext
 from cogito.config import MultimodalConfig
 from cogito.contracts.context import ContextBuilder
 from cogito.contracts.envelope import ChannelEnvelope
+from cogito.infrastructure.multimodal_metrics import MultimodalMetrics
 from cogito.model.contracts import ModelCapabilities, ModelResponse
 from cogito.domain.task import Task, TaskStatus
 from cogito.service.asset_service import AssetIngestionService
@@ -258,3 +259,89 @@ async def test_retryable_vision_task_creates_new_attempt(in_memory_db):
     assert in_memory_db.execute(
         "SELECT COUNT(*) FROM task_attempts WHERE task_id=?", (task.task_id,),
     ).fetchone()[0] == 2
+
+
+# ── MultimodalMetrics unit tests (PLAN-12 M6) ───────────────────
+
+
+def test_multimodal_metrics_counts_and_latency():
+    metrics = MultimodalMetrics()
+    # requested() should be emitted both for cache hits and for fresh requests.
+    metrics.record_requested()
+    metrics.record_requested()
+    # One of the two requests was served from a completed analysis row.
+    metrics.record_cache_hit()
+    metrics.record_started()
+    metrics.record_started()
+    metrics.record_completed(latency_ms=100)
+    metrics.record_completed(latency_ms=200)
+    metrics.record_failed()
+
+    snapshot = metrics.snapshot()
+    assert snapshot["requested"] == 2
+    assert snapshot["cache_hit"] == 1
+    assert snapshot["started"] == 2
+    assert snapshot["completed"] == 2
+    assert snapshot["failed"] == 1
+    assert snapshot["latency_ms_total"] == 300
+    assert snapshot["latency_ms_avg"] == 150
+
+
+def test_multimodal_metrics_thread_safe():
+    import concurrent.futures
+
+    metrics = MultimodalMetrics()
+
+    def work():
+        for _ in range(50):
+            metrics.record_requested()
+            metrics.record_started()
+            metrics.record_completed(latency_ms=1)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.submit(work) for _ in range(4))
+
+    snapshot = metrics.snapshot()
+    assert snapshot["requested"] == 200
+    assert snapshot["started"] == 200
+    assert snapshot["completed"] == 200
+
+
+def test_multimodal_metrics_zero_completed_avg_is_zero():
+    metrics = MultimodalMetrics()
+    metrics.record_requested()
+    assert metrics.snapshot()["latency_ms_avg"] == 0
+
+
+@pytest.mark.asyncio
+async def test_vision_service_records_metrics(in_memory_db, tmp_path):
+    router = _FakeVisionRouter()
+    metrics = MultimodalMetrics()
+    service = VisionAnalysisService(
+        in_memory_db,
+        str(tmp_path),
+        router,
+        _config(),
+        model_id="fake-vision-1",
+        metrics=metrics,
+    )
+    result, row = _accept_image(in_memory_db, tmp_path)
+
+    # First request: records "requested" and enqueues a queued→running task.
+    analyses = service.request_message_assets(result.message_id)
+    assert metrics.snapshot()["requested"] == 1
+
+    # Running the analysis records "started" + "completed" + latency.
+    await service.analyze(analyses[0].analysis_id)
+    snapshot = metrics.snapshot()
+    assert snapshot["started"] == 1
+    assert snapshot["completed"] == 1
+    assert snapshot["failed"] == 0
+    assert snapshot["latency_ms_total"] >= 0
+
+    # Second request finds the completed row → "cache_hit", no new provider call.
+    service.request_message_assets(result.message_id)
+    snapshot = metrics.snapshot()
+    assert snapshot["requested"] == 2
+    assert snapshot["cache_hit"] == 1
+    assert router.calls == 1

@@ -385,6 +385,12 @@ class OpenAICompatProvider(ModelProvider):
             choice = data["choices"][0]
             message = choice.get("message", {})
             content = message.get("content") or ""
+            # DeepSeek-R1 / LongCat style reasoning models emit their payload in
+            # ``reasoning_content`` when the stream is collapsed into a single
+            # content string. Fall back to it only when ``content`` is empty so
+            # text-only providers are unaffected.
+            if not content:
+                content = message.get("reasoning_content") or ""
             finish_reason_str = choice.get("finish_reason", "stop")
         except (KeyError, IndexError) as e:
             raise ModelProviderError(ErrorEnvelope(

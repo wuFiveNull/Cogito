@@ -278,6 +278,21 @@ def proactive_feedback(deps: CommandDeps = Depends(get_command_deps)) -> dict:
     return _svc(deps).proactive_feedback()
 
 
+# ── multimodal metrics (PLAN-12 M6) ─────────────────────────────
+
+
+@router.get("/multimodal/metrics")
+def multimodal_metrics(request: Request) -> dict:
+    """Return process-wide vision-analysis counters and average provider latency."""
+    runtime = getattr(request.app.state, "runtime", None)
+    if runtime is None:
+        return {"available": False, "reason": "runtime not injected"}
+    metrics = getattr(runtime, "multimodal_metrics", None)
+    if metrics is None:
+        return {"available": False, "reason": "multimodal_metrics not configured"}
+    return {"available": True, **metrics.snapshot()}
+
+
 # ── outbox / events / dead letter ─────────────────────────────
 
 
