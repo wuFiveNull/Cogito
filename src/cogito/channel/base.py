@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from cogito.inbound.models import InboundHandler
+# PLAN-10 M2: 经 contracts.inbound 引入 InboundHandler Protocol
+from cogito.contracts.inbound import InboundHandler
 
 
 class AdapterStatus(StrEnum):

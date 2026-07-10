@@ -36,13 +36,8 @@ from tests.architecture._scan import cycles, forbidden_edges, scan_imports
 # ---------------------------------------------------------------------------
 
 KNOWN_VIOLATIONS: dict[str, dict[str, str]] = {
-    # Cycle: channel -> inbound -> service -> channel
-    "cogito.channel -> cogito.inbound": {
-        "reason": "channel reaches into inbound; inbound->service->channel closes the cycle",
-        "adr_link": "ADR-000 TBD",
-        "clear_by": "2026-09-30",
-        "owner": "Plan 01 M2 / inbound port extraction",
-    },
+    # PLAN-10 M1+M2: V7 + C1 已通过 contracts/model_types 与 contracts/inbound
+    # InboundHandler Port 注入清零。本注册表待 PLAN-10 M0 ADR 签核后由 Owner 清空。
 }
 
 

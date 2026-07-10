@@ -21,7 +21,7 @@ from cogito.channel.vendor.langbot.compatibility import entities as platform_ent
 from cogito.channel.vendor.langbot.compatibility import events as platform_events
 from cogito.channel.vendor.langbot.compatibility import message as platform_message
 from cogito.channel.vendor.langbot.compatibility.logger import EventLogger
-from cogito.inbound.models import InboundHandler
+from cogito.contracts.inbound import InboundHandler
 
 
 def _is_base64_data(value: str) -> bool:

@@ -52,27 +52,40 @@ def create_app(
 
     app.include_router(chat.router)
 
-    # ── Plan 05 M2: LangBot Bridge（入站/出站/健康）──
-    # Bridge Server 允许 Gateway 通过版本化 DTO 与 Core 通信
+    # ── Plan 05 M2 + PLAN-10 M2: LangBot Bridge（入站/出站/健康）──
+    # Bridge Server 允许 Gateway 通过版本化 DTO 与 Core 通信。
+    # PLAN-10: 内闭包通过 contracts.envelope.ChannelEnvelope 直接桥接，
+    # 不再在 interaction_web 运行时 import cogito.inbound.models，
+    # 破开 interaction_web → inbound 边（C1 环的关键一圈）。
     try:
         from cogito.channel.bridge_server import BridgeServer
-        # inbound_handler: 将 DTO 转给 runtime InboundService（如可用）
+        from cogito.contracts.envelope import ChannelEnvelope, ReplyRoute
+
         async def _bridge_inbound_handler(dto):
             if runtime and hasattr(runtime, 'inbound'):
-                # 复用 InboundService 的 accept 路径
-                from cogito.inbound.models import Inbound, InboundContent, InboundRoute
-                inbound = Inbound(
-                    channel=dto.channel_name,
+                # 复用 InboundService 的 accept 路径（直接构造 ChannelEnvelope，
+                # 不再经 models.Inbound 中转，避免 interaction_web → inbound 依赖）
+                reply_route = ReplyRoute(
                     channel_instance_id=dto.instance_id,
-                    conversation_id=dto.conversation_ref,
-                    sender_id=dto.sender_ref,
-                    message_id=dto.event_id,
-                    content=[InboundContent(type=p.type, data=p.data) for p in dto.content_parts],
-                    route=InboundRoute(adapter_id=dto.instance_id, channel_type=dto.channel_name,
-                                       conversation_id=dto.conversation_ref,
-                                       source_message_id=dto.event_id),
+                    platform_conversation_id=dto.conversation_ref,
+                    reply_to_platform_message_id=dto.event_id,
+                    target_endpoint_ref=f"{dto.channel_name}:{dto.sender_ref}",
                 )
-                return await runtime.inbound.accept(inbound)
+                envelope = ChannelEnvelope(
+                    channel_type=dto.channel_name,
+                    channel_instance_id=dto.instance_id,
+                    platform_sender_id=dto.sender_ref,
+                    platform_conversation_id=dto.conversation_ref,
+                    platform_message_id=dto.event_id,
+                    content_parts=[
+                        {"content_type": p.type if p.type != "at" else "text",
+                         "inline_data": p.data}
+                        for p in dto.content_parts
+                    ],
+                    reply_route=reply_route,
+                )
+                result = runtime.inbound.accept(envelope)
+                return result.message_id if result else f"dto-{dto.event_id}"
             return f"dto-{dto.event_id}"
         bridge = BridgeServer(conn=provider.conn, inbound_handler=_bridge_inbound_handler)
         app.include_router(bridge.create_router())

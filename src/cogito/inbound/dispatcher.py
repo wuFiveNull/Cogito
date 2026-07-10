@@ -11,12 +11,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from cogito.contracts.envelope import ChannelEnvelope, ReplyRoute
-from cogito.inbound.models import Inbound
+from cogito.contracts.inbound import Inbound
 from cogito.service.inbound_service import InboundService
 
 
 class InboundDispatcher:
-    """Inbound 分发器。
+    """Inbound 分发器（实现 contracts.inbound.InboundHandler Protocol）。
 
     将 Channel Adapter 的统一 Inbound 消息转换为 Cogito Core 的 ChannelEnvelope，
     然后调用 InboundService.accept() 完成入站事务。
@@ -24,6 +24,8 @@ class InboundDispatcher:
 
     def __init__(self, inbound_service: InboundService) -> None:
         self._inbound_service = inbound_service
+
+    # PLAN-10 M2: 实现 InboundHandler Protocol
 
     async def dispatch(self, inbound: Inbound) -> None:
         """分发一条 Inbound 消息到 Agent Core。"""

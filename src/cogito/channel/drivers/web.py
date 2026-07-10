@@ -32,7 +32,7 @@ from cogito.channel.base import (
     ChannelSendRequest,
     ChannelSendResult,
 )
-from cogito.inbound.models import InboundHandler
+from cogito.contracts.inbound import InboundHandler
 
 
 class WebChannelAdapter:

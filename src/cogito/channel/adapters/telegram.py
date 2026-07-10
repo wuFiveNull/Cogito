@@ -18,7 +18,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filte
 
 from cogito.channel.utils import httpclient
 from cogito.channel.vendor.langbot.compatibility import message as platform_message
-from cogito.inbound.models import Inbound, InboundContent, InboundHandler, InboundRoute
+from cogito.contracts.inbound import Inbound, InboundContent, InboundHandler, InboundRoute
 
 
 class TelegramMessageConverter:

@@ -32,7 +32,7 @@ from cogito.channel.vendor.langbot.compatibility import events as lb_events
 from cogito.channel.vendor.langbot.compatibility import message as lb_message
 from cogito.channel.vendor.langbot.compatibility.logger import EventLogger
 from cogito.config import QQOneBotConfig
-from cogito.inbound.models import InboundHandler
+from cogito.contracts.inbound import InboundHandler
 
 _LOG = logging.getLogger("cogito.channel.qq_onebot")
 

@@ -15,7 +15,9 @@ from dataclasses import dataclass, field
 
 from cogito.channel.vendor.langbot.compatibility import events as lb_events
 from cogito.channel.vendor.langbot.compatibility import message as lb_message
-from cogito.inbound.models import Inbound, InboundContent, InboundRoute
+
+# PLAN-10 M2: 经 contracts.inbound 引用
+from cogito.contracts.inbound import Inbound, InboundContent, InboundRoute
 
 _LOG = logging.getLogger("cogito.channel.onebot")
 

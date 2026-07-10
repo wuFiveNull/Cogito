@@ -7,7 +7,7 @@ from typing import Any
 
 from cogito.channel.base import ChannelAdapter
 from cogito.channel.registry import create_adapter
-from cogito.inbound.dispatcher import InboundDispatcher
+from cogito.contracts.inbound import InboundHandler
 
 
 class ChannelManager:
@@ -16,10 +16,11 @@ class ChannelManager:
     负责：
     - 按配置创建/注册适配器
     - 启动/停止适配器
-    - 将适配器的入站消息通过 InboundDispatcher 交给 Core
+    - 将适配器的入站消息通过 InboundHandler 端口交给 Core
+      （PLAN-10 M2：不再依赖 cogito.inbound.dispatcher.InboundDispatcher 实现类）
     """
 
-    def __init__(self, dispatcher: InboundDispatcher) -> None:
+    def __init__(self, dispatcher: InboundHandler) -> None:
         self._dispatcher = dispatcher
         self._adapters: dict[str, ChannelAdapter] = {}
         self._tasks: dict[str, asyncio.Task] = {}
