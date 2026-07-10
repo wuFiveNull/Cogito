@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from cogito.domain.turn import Turn, TurnStatus
-from cogito.interaction_web.command_service import (
+from cogito.service.api.command_service import (
     resume_turn_after_approval,
     set_approval_decision,
 )
