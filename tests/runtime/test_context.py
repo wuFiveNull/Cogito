@@ -363,7 +363,7 @@ class TestMemoryInjection:
         _add_message(db, message_id="m1", session_id="s1", role="user", content="Hi", sequence=1,
                      principal_id="")
         service = SqliteMemoryService(db)
-        builder = ContextBuilder(db, memory_service=service)
+        builder = ContextBuilder(db, memory_reader=service)
 
         snapshot = builder.build("t1", "s1", "m1")
 
@@ -378,7 +378,7 @@ class TestMemoryInjection:
                     importance=0.8)
 
         service = SqliteMemoryService(db)
-        builder = ContextBuilder(db, memory_service=service)
+        builder = ContextBuilder(db, memory_reader=service)
         snapshot = builder.build("t1", "s1", "m1", system_policy="You are Cogito.")
 
         # 顺序：system → memory → 历史消息 → 当前输入
@@ -397,7 +397,7 @@ class TestMemoryInjection:
                     explicitness="explicit_user_statement")
 
         service = SqliteMemoryService(db)
-        builder = ContextBuilder(db, memory_service=service)
+        builder = ContextBuilder(db, memory_reader=service)
         snapshot = builder.build("t1", "s1", "m1", system_policy="Policy.")
 
         memory_items = [i for i in snapshot.items if i.item_type == "memory"]
@@ -424,7 +424,7 @@ class TestMemoryInjection:
                     canonical_key="p1.user.lang", importance=0.8)
 
         service = SqliteMemoryService(db)
-        builder = ContextBuilder(db, memory_service=service)
+        builder = ContextBuilder(db, memory_reader=service)
         snapshot = builder.build("t1", "s1", "m1", system_policy="Policy.")
 
         memory_items = [i for i in snapshot.items if i.item_type == "memory"]
@@ -445,7 +445,7 @@ class TestMemoryInjection:
                     subject="user", predicate="lang", value="Rust")
 
         service = SqliteMemoryService(db)
-        builder = ContextBuilder(db, memory_service=service)
+        builder = ContextBuilder(db, memory_reader=service)
         snapshot = builder.build("t1", "s1", "m1")
 
         # p1 没有记忆
@@ -463,7 +463,7 @@ class TestMemoryInjection:
                         importance=0.5 if i > 0 else 1.0)
 
         service = SqliteMemoryService(db)
-        builder = ContextBuilder(db, memory_service=service)
+        builder = ContextBuilder(db, memory_reader=service)
         snapshot = builder.build("t1", "s1", "m1")
 
         # 至少部分记忆被注入，但不应超过 budget
@@ -482,7 +482,7 @@ class TestMemoryInjection:
                     subject="user", predicate="lang", value="Python")
 
         service = SqliteMemoryService(db)
-        builder = ContextBuilder(db, memory_service=service)
+        builder = ContextBuilder(db, memory_reader=service)
         snapshot = builder.build("t1", "s1", "m2", system_policy="Policy.")
 
         item_types = [i.item_type for i in snapshot.items]
@@ -502,7 +502,7 @@ class TestMemoryInjection:
                     subject="user", predicate="editor", value="VS Code")
 
         service = SqliteMemoryService(db)
-        builder = ContextBuilder(db, memory_service=service)
+        builder = ContextBuilder(db, memory_reader=service)
         snapshot = builder.build("t1", "s1", "m1")
 
         assert "mem_a" in snapshot.memory_ids
@@ -636,7 +636,7 @@ class TestContextCompression:
                     subject="user", predicate="lang", value="Python")
 
         service = SqliteMemoryService(db)
-        builder = ContextBuilder(db, memory_service=service, max_input_tokens=1500)
+        builder = ContextBuilder(db, memory_reader=service, max_input_tokens=1500)
         snapshot = builder.build("t1", "s1", "m15", system_policy="Policy.")
 
         item_types = [i.item_type for i in snapshot.items]

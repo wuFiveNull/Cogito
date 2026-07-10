@@ -32,7 +32,7 @@ from cogito.model.contracts import (
     Usage,
 )
 from cogito.model.router import ModelRouter, RouterError
-from cogito.runtime.context import ContextSnapshot
+from cogito.contracts.context import ContextSnapshot
 
 
 class LoopResultType(StrEnum):

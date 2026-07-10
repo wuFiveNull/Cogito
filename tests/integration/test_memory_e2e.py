@@ -332,7 +332,7 @@ class TestManualMemoryE2E:
         from cogito.runtime.context import ContextBuilder
 
         builder = ContextBuilder(
-            conn, max_input_tokens=64000, memory_service=service,
+            conn, max_input_tokens=64000, memory_reader=service,
         )
         snapshot = builder.build(
             turn_id="e2e_new_turn",

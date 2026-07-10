@@ -32,7 +32,7 @@ from cogito.model.llm_manager import LLMManager, create_provider
 from cogito.model.provider import ModelProvider
 from cogito.model.router import ModelRouter
 from cogito.contracts.clock import Clock, ProductionClock
-from cogito.runtime.context import ContextBuilder
+from cogito.contracts.context import ContextBuilder
 from cogito.runtime.loop import AgentLoop, LoopResultType
 from cogito.service.completion import TurnCompletionService
 from cogito.service.dispatcher import Dispatcher
@@ -114,7 +114,7 @@ class AgentRunner:
         self._dispatcher = Dispatcher(conn, clock=self._clock)
         self._context_builder = ContextBuilder(
             conn, clock=self._clock, max_input_tokens=max_input_tokens,
-            memory_service=memory_service,
+            memory_reader=memory_service,
         )
         # 记录每次 Provider 调用到 model_calls（可观察性 / 链路追踪）
         self._model_call_repo = ModelCallRepository(conn)
