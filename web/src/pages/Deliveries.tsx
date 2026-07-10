@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
+import { PAGE_SIZE } from "./ResourceList";
 import { Badge, Collapsible, CommandButton, Empty, ErrorBox, Loading, PageTitle, Section, StatusPill, useAsync } from "../components";
 
 // ── 时间格式化 ────────────────────────────────────────────────
@@ -188,7 +189,8 @@ function DeliveryDetail({ deliveryId, onBack }: { deliveryId: string; onBack: ()
 export default function DeliveriesPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
-  const deliveries = useAsync(() => api.deliveries(), []);
+  const [offset, setOffset] = useState(0);
+  const deliveries = useAsync(() => api.deliveries({ limit: PAGE_SIZE, offset }), [offset]);
 
   const replay = async (id: string) => {
     try {
@@ -201,6 +203,7 @@ export default function DeliveriesPage() {
   };
 
   const items = deliveries.data?.items ?? [];
+  const total = deliveries.data?.total ?? 0;
 
   // 详情视图
   if (selectedId) {
@@ -217,7 +220,7 @@ export default function DeliveriesPage() {
 
       {msg && <div className="rounded-lg bg-ok/10 p-2 text-xs text-ok">{msg}</div>}
 
-      <Section title="投递记录" subtitle={`${items.length} 条`}>
+      <Section title="投递记录" subtitle={`共 ${total} 条`}>
         {deliveries.loading ? (
           <Loading />
         ) : deliveries.error ? (
@@ -260,6 +263,18 @@ export default function DeliveriesPage() {
           </div>
         )}
       </Section>
+
+      {/* 分页 */}
+      {total > PAGE_SIZE && (
+        <div className="flex items-center justify-between text-xs text-muted">
+          <span>第 {offset}–{Math.min(offset + PAGE_SIZE, total)} 条 / 共 {total} 条</span>
+          <div className="flex gap-2">
+            <button className="btn-ghost px-3 py-1" disabled={offset === 0} onClick={() => setOffset(0)}>« 首页</button>
+            <button className="btn-ghost px-3 py-1" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}>‹ 上一页</button>
+            <button className="btn-ghost px-3 py-1" disabled={offset + PAGE_SIZE >= total} onClick={() => setOffset(offset + PAGE_SIZE)}>下一页 ›</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

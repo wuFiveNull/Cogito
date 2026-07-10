@@ -431,6 +431,14 @@ export const api = {
     const qs = q.toString();
     return request<PaginationResp>(`/turns${qs ? `?${qs}` : ""}`);
   },
+  deliveries: (params: { status?: string; limit?: number; offset?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (params.status) q.set("status", params.status);
+    if (params.limit) q.set("limit", String(params.limit));
+    if (params.offset) q.set("offset", String(params.offset));
+    const qs = q.toString();
+    return request<PaginationResp>(`/deliveries${qs ? `?${qs}` : ""}`);
+  },
   turn: (id: string) => request<TurnDetail>(`/turns/${id}`),
   turnAttempts: (id: string) =>
     request<{ turn_id: string; attempts: Record<string, unknown>[] }>(`/turns/${id}/attempts`),
@@ -455,10 +463,6 @@ export const api = {
   conversationMessages: (conversationId: string, limit = 200) =>
     request<{ conversation_id: string; items: ChatMessage[] }>(
       `/conversations/${conversationId}/messages?limit=${limit}`,
-    ),
-  deliveries: (status?: string) =>
-    request<{ items: Record<string, unknown>[]; total: number }>(
-      `/deliveries${status ? `?status=${status}` : ""}`,
     ),
   deliveryDetail: (id: string) =>
     request<Record<string, unknown>>(`/deliveries/${id}`),

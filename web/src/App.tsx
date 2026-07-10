@@ -1,6 +1,6 @@
 import { Link, NavLink, Route, Routes } from "react-router-dom";
 import Overview from "./pages/Overview";
-import { ResourceList, type ResourceListConfig } from "./pages/ResourceList";
+import { PAGE_SIZE, ResourceList, type ResourceListConfig } from "./pages/ResourceList";
 import { api } from "./api";
 import MemoryPage from "./pages/Memory";
 import ConnectorsPage from "./pages/Connectors";
@@ -218,12 +218,14 @@ function TopNav() {
 const turnsCfg: ResourceListConfig = {
   title: "运行 (Runs / Turns)",
   statusOptions: ["queued", "running", "completed", "failed", "cancelled"],
-  fetchList: (status?: string) => api.turns(status ? { status } : {}),
+  fetchList: ({ status, offset = 0 }: { status?: string; offset?: number }) =>
+    api.turns({ status, limit: PAGE_SIZE, offset }),
   fetchDetail: async (id: string) => {
     const d = await api.turn(id);
     return { item: d.turn, attempts: d.attempts };
   },
   rowKey: "turn_id",
+  detailBasePath: "/runs",
   detailAttemptsLabel: "RunAttempts",
   cols: [
     { key: "turn_id", label: "ID", render: (r) => <span className="text-[11px]">{String(r.turn_id).slice(0, 10)}</span> },

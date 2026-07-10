@@ -227,23 +227,25 @@ class QueryService:
 
     # ── deliveries ─────────────────────────────────────────────
 
-    def list_deliveries(self, status: str | None = None, limit: int = 100) -> dict[str, Any]:
+    def list_deliveries(
+        self, status: str | None = None, limit: int = 100, offset: int = 0,
+    ) -> dict[str, Any]:
         if status:
             rows = self._conn.execute(
                 "SELECT * FROM deliveries WHERE status=? "
-                "ORDER BY created_at DESC LIMIT ?",
-                (status, limit),
+                "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (status, limit, offset),
             ).fetchall()
             total = self._conn.execute(
                 "SELECT COUNT(*) FROM deliveries WHERE status=?", (status,),
             ).fetchone()[0]
         else:
             rows = self._conn.execute(
-                "SELECT * FROM deliveries ORDER BY created_at DESC LIMIT ?",
-                (limit,),
+                "SELECT * FROM deliveries ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
             ).fetchall()
             total = self._conn.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0]
-        return {"items": [dict(r) for r in rows], "total": total}
+        return {"items": [dict(r) for r in rows], "total": total, "limit": limit, "offset": offset}
 
     # ── traces ─────────────────────────────────────────────────
 

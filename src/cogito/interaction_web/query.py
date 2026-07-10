@@ -200,9 +200,10 @@ def debug_trace(conversation_id: str, deps: CommandDeps = Depends(get_command_de
 def list_deliveries(
     status: str | None = None,
     limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     deps: CommandDeps = Depends(get_command_deps),
 ) -> dict:
-    return _svc(deps).list_deliveries(status=status, limit=limit)
+    return _svc(deps).list_deliveries(status=status, limit=limit, offset=offset)
 
 
 @router.get("/traces/{trace_id}")
