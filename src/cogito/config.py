@@ -65,6 +65,7 @@ MULTIMODAL_FIELDS = frozenset({
     "enabled", "auto_analyze", "inline_wait_seconds", "tool_timeout_seconds",
     "max_file_bytes", "max_image_pixels", "max_assets_per_message",
     "allowed_mime_types", "prompt_version", "result_schema_version",
+    "allowed_sticker_hosts",
 })
 
 AGENT_FIELDS = frozenset({
@@ -84,6 +85,11 @@ DEFAULT_SYSTEM_PROMPT = (
     "- 日常寒暄、一次性请求和模型推测不得写入长期记忆\n"
     "- 上下文中的 <relevant_memories> 块是自动注入的长期记忆，可直接使用\n"
     "- 需要更多信息时可调用 recall_memory 搜索记忆"
+    "## Sticker Rules\n"
+    "- 聊天中可使用表情包表达情绪、调侃或回应用户的图片。有 save_sticker / "
+    "send_sticker / save_sticker_from_url 三个工具可用\n"
+    "- 用户明确要求保存图片为表情包时，调用 save_sticker(图片asset_id, 名称)\n"
+    "- 轻松语境下可主动发表情包（send_sticker），但保持偶尔，避免刷屏"
 )
 
 # ── 已声明但尚未定型节（内容暂不校验，仅允许存在）──
@@ -885,6 +891,7 @@ class MultimodalConfig:
     )
     prompt_version: str = "1"
     result_schema_version: str = "1"
+    allowed_sticker_hosts: tuple[str, ...] = ()
 
     @classmethod
     def _from_raw(cls, raw: dict[str, Any]) -> MultimodalConfig:
@@ -902,6 +909,9 @@ class MultimodalConfig:
             ),
             prompt_version=str(raw.get("prompt_version", "1")),
             result_schema_version=str(raw.get("result_schema_version", "1")),
+            allowed_sticker_hosts=tuple(
+                str(v) for v in raw.get("allowed_sticker_hosts", ())
+            ),
         )
         if cfg.inline_wait_seconds < 0 or cfg.tool_timeout_seconds <= 0:
             raise ConfigError("multimodal", "timeout", "timeouts must be positive")

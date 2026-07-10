@@ -31,6 +31,8 @@ class MultimodalMetrics:
     _completed: int = 0
     _failed: int = 0
     _latency_ms: int = 0
+    _stickers_saved: int = 0
+    _stickers_sent: int = 0
 
     def record_requested(self) -> None:
         with self._lock:
@@ -53,6 +55,14 @@ class MultimodalMetrics:
         with self._lock:
             self._failed += 1
 
+    def record_sticker_saved(self) -> None:
+        with self._lock:
+            self._stickers_saved += 1
+
+    def record_sticker_sent(self) -> None:
+        with self._lock:
+            self._stickers_sent += 1
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             avg = (self._latency_ms // self._completed) if self._completed else 0
@@ -64,6 +74,8 @@ class MultimodalMetrics:
                 "failed": self._failed,
                 "latency_ms_total": self._latency_ms,
                 "latency_ms_avg": avg,
+                "stickers_saved": self._stickers_saved,
+                "stickers_sent": self._stickers_sent,
             }
 
 

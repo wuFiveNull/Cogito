@@ -12,7 +12,7 @@ from collections.abc import Callable
 
 from cogito.capability.registry import CapabilityRegistry
 from cogito.contracts.memory import MemoryReader, MemoryWriter
-from cogito.contracts.multimodal import VisionToolService
+from cogito.contracts.multimodal import StickerService, VisionToolService
 
 # 全局默认注册表
 registry: CapabilityRegistry = CapabilityRegistry()
@@ -26,6 +26,7 @@ def discover_builtin_tools(
     make_memory_writer: Callable[[], MemoryWriter] | None = None,
     make_memory_reader: Callable[[], MemoryReader] | None = None,
     make_vision_service: Callable[[], VisionToolService] | None = None,
+    make_sticker_service: Callable[[], StickerService] | None = None,
 ) -> CapabilityRegistry:
     """发现并注册所有内置工具。
 
@@ -70,6 +71,21 @@ def discover_builtin_tools(
 
         r.register(_create_vision(make_service=make_vision_service))
 
+    if make_sticker_service is not None:
+        from cogito.tools.sticker import (
+            create_save_sticker_def as _create_save,
+        )
+        from cogito.tools.sticker import (
+            create_save_sticker_from_url_def as _create_save_url,
+        )
+        from cogito.tools.sticker import (
+            create_send_sticker_def as _create_send,
+        )
+
+        r.register(_create_save(make_service=make_sticker_service))
+        r.register(_create_save_url(make_service=make_sticker_service))
+        r.register(_create_send(make_service=make_sticker_service))
+
     return r
 
 
@@ -80,6 +96,7 @@ def assemble_default_registry(
     make_memory_writer: Callable[[], MemoryWriter] | None = None,
     make_memory_reader: Callable[[], MemoryReader] | None = None,
     make_vision_service: Callable[[], VisionToolService] | None = None,
+    make_sticker_service: Callable[[], StickerService] | None = None,
 ) -> CapabilityRegistry:
     """创建 CapabilityRegistry 并注册所有内置工具。
 
@@ -95,5 +112,6 @@ def assemble_default_registry(
         make_memory_writer=make_memory_writer,
         make_memory_reader=make_memory_reader,
         make_vision_service=make_vision_service,
+        make_sticker_service=make_sticker_service,
     )
     return registry

@@ -79,6 +79,66 @@ class MultimodalRepository:
             (message_id, part_id, asset_id, ordinal, original_filename, now_ms()),
         )
 
+    # ── Sticker semantics (migration 1005) ─────────────────────────────────
+
+    def mark_as_sticker(
+        self,
+        asset_id: str,
+        *,
+        name: str,
+        tags: tuple[str, ...] = (),
+    ) -> bool:
+        """Tag an asset as a reusable sticker. Caller must verify accessibility."""
+        self._conn.execute(
+            "UPDATE multimodal_assets SET is_sticker=1, sticker_name=?, tags_json=? "
+            "WHERE asset_id=? AND is_sticker=0",
+            (name[:200], json.dumps(list(tags), ensure_ascii=False)[:2000], asset_id),
+        )
+        self._conn.commit()
+        return True
+
+    def record_sticker_usage(self, asset_id: str) -> None:
+        self._conn.execute(
+            "UPDATE multimodal_assets SET usage_count = usage_count + 1 "
+            "WHERE asset_id=?",
+            (asset_id,),
+        )
+        self._conn.commit()
+
+    def list_stickers(
+        self,
+        *,
+        principal_id: str,
+        tag: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        if tag:
+            # LIKE on the JSON array; tags are short tokens so substring is adequate.
+            pattern = f'%"{tag}"%'
+            rows = self._conn.execute(
+                "SELECT * FROM multimodal_assets "
+                "WHERE is_sticker=1 AND created_by_principal_id=? "
+                "AND status='available' AND tags_json LIKE ? "
+                "ORDER BY usage_count DESC, created_at DESC LIMIT ?",
+                (principal_id, pattern, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM multimodal_assets "
+                "WHERE is_sticker=1 AND created_by_principal_id=? "
+                "AND status='available' "
+                "ORDER BY usage_count DESC, created_at DESC LIMIT ?",
+                (principal_id, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_sticker(self, sticker_id: str) -> MultimodalAsset | None:
+        row = self._conn.execute(
+            "SELECT * FROM multimodal_assets WHERE asset_id=? AND is_sticker=1",
+            (sticker_id,),
+        ).fetchone()
+        return self._asset_from_row(row) if row else None
+
     def list_message_assets(self, message_id: str) -> list[dict[str, Any]]:
         rows = self._conn.execute(
             "SELECT a.*, l.ordinal, l.original_filename "
@@ -281,6 +341,14 @@ class MultimodalRepository:
 
     @staticmethod
     def _asset_from_row(row: sqlite3.Row) -> MultimodalAsset:
+        # Migration 1005 adds sticker columns; tolerate older schemas by reading
+        # with defaults when the columns are not present in the result set.
+        def _col(key: str, default: Any) -> Any:
+            try:
+                return row[key]
+            except (IndexError, KeyError):
+                return default
+
         return MultimodalAsset(
             asset_id=row["asset_id"],
             payload_ref=row["payload_ref"],
@@ -295,6 +363,10 @@ class MultimodalRepository:
             version=row["version"],
             created_at=row["created_at"],
             deleted_at=row["deleted_at"],
+            is_sticker=bool(_col("is_sticker", 0)),
+            sticker_name=_col("sticker_name", ""),
+            tags=tuple(json.loads(_col("tags_json", "[]") or "[]")),
+            usage_count=_col("usage_count", 0),
         )
 
     @staticmethod

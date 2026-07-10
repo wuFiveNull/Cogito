@@ -25,6 +25,19 @@ class AdapterStatus(StrEnum):
 
 
 @dataclass(frozen=True)
+class ChannelAttachment:
+    """Outbound image / file the adapter should render natively.
+
+    ``payload_ref`` points inside the Core-owned Payload Store; the gateway
+    materialises the bytes and the adapter uploads them via its native API.
+    """
+
+    payload_ref: str
+    mime: str
+    name: str = ""
+
+
+@dataclass(frozen=True)
 class ChannelSendRequest:
     """Delivery 发送请求 —— 从 DeliveryWorker 到 Adapter 的结构化契约。"""
     delivery_id: str
@@ -35,6 +48,9 @@ class ChannelSendRequest:
     platform_conversation_id: str
     reply_to_platform_message_id: str | None
     text: str
+    # When non-empty the adapter should render this image natively (and may
+    # append ``text`` as caption). Empty list preserves text-only semantics.
+    attachments: tuple[ChannelAttachment, ...] = ()
 
 
 @dataclass(frozen=True)

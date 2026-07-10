@@ -36,6 +36,11 @@ class MultimodalAsset:
     version: int = 1
     created_at: int = 0
     deleted_at: int | None = None
+    # Sticker semantics (migration 1005): an asset the Agent can resend.
+    is_sticker: bool = False
+    sticker_name: str = ""
+    tags: tuple[str, ...] = ()
+    usage_count: int = 0
 
 
 @dataclass(frozen=True)

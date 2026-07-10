@@ -199,8 +199,12 @@ class TestWebDeliveryRouting:
         manager._adapters["web"] = adapter  # 直接注册，避免启动真实 dispatcher
         gateway = ChannelGateway(in_memory_db, manager)
 
-        # 聚焦路由：stub 掉从 DB 读文本（避免依赖 messages/content_parts 外键行）
-        gateway._read_message_text = lambda ref: "Hi, I am Cogito."
+        # 聚焦路由：stub 掉从 DB 读内容（避免依赖 messages/content_parts 外键行）
+        class _StubContent:
+            def __init__(self, text=""):
+                self.text = text
+                self.attachments = ()
+        gateway._read_message_content = lambda ref: _StubContent("Hi, I am Cogito.")
         msg_id = "assistant-msg-1"
 
         target_snapshot = json.dumps({

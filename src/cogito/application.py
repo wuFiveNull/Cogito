@@ -233,7 +233,13 @@ class RuntimeApplication:
         multimodal_reader = None
         asset_service = None
         vision_factory = None
+        sticker_factory = None
         if config.multimodal.enabled:
+            from cogito.infrastructure.payload_store import PayloadStore
+            from cogito.service.sticker_service import SqliteStickerService
+            from cogito.store.connection import get_connection as _gc_sticker
+            from cogito.store.multimodal_repo import MultimodalRepository
+
             shared_vision_service = VisionAnalysisService(
                 conn,
                 config.resolve_payload_dir(),
@@ -254,12 +260,39 @@ class RuntimeApplication:
             )
             vision_factory = _make_vision_service
 
+            multimodal_repo = MultimodalRepository(conn)
+            payload_store = PayloadStore(config.resolve_payload_dir(), conn)
+            _shared_sticker_service = SqliteStickerService(
+                conn,
+                multimodal_repo=multimodal_repo,
+                payload_store=payload_store,
+                config=config.multimodal,
+                asset_service=asset_service,
+                metrics=multimodal_metrics,
+            )
+
+            def _make_sticker_service() -> SqliteStickerService:
+                sticker_conn = _gc_sticker(config.resolve_db_path())
+                return SqliteStickerService(
+                    sticker_conn,
+                    multimodal_repo=MultimodalRepository(sticker_conn),
+                    payload_store=PayloadStore(config.resolve_payload_dir(), sticker_conn),
+                    config=config.multimodal,
+                    asset_service=AssetIngestionService(
+                        sticker_conn, config.resolve_payload_dir(), config.multimodal,
+                    ),
+                    metrics=multimodal_metrics,
+                )
+
+            sticker_factory = _make_sticker_service
+
         pre_assembled_registry = assemble_default_registry(
             memory_reader=memory_service,
             memory_writer=memory_service,
             make_memory_writer=_make_memory_writer,
             make_memory_reader=_make_memory_reader,
             make_vision_service=vision_factory,
+            make_sticker_service=sticker_factory,
         )
 
         runner = build_agent_runner(

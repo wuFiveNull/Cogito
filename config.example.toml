@@ -112,6 +112,10 @@ recovery_grace_period_seconds = 30
 # prompt_version = "1"
 # result_schema_version = "1"
 #
+# 表情包（sticker）功能：save_sticker_from_url 的域名白名单。
+# 私有地址（10./192.168./127./169.254. 等）始终被拦截，即使在此白名单中。
+# allowed_sticker_hosts = []  # 例：["i.imgur.com", "picsum.photos"]
+#
 # ── 离线调试：Echo Provider（零 Token 消耗）──
 # 将用户最后一条消息原样返回，用于调试 Agent Loop / 工具调用链 / Trace 记录。
 # 配置方式：仅设置 provider = "echo"（无需 api_key / base_url）

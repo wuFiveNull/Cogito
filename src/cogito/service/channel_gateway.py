@@ -19,8 +19,10 @@ import asyncio
 import json
 import logging
 import sqlite3
+from dataclasses import dataclass
 
 from cogito.channel.base import (
+    ChannelAttachment,
     ChannelDeleteRequest,
     ChannelEditRequest,
     ChannelSendRequest,
@@ -30,6 +32,18 @@ from cogito.channel.manager import ChannelManager
 from cogito.service.delivery_worker import Gateway
 
 _LOG = logging.getLogger("cogito.channel.gateway")
+
+
+@dataclass(frozen=True)
+class _TextContent:
+    """Resolved message content — text plus any image attachments."""
+
+    text: str = ""
+    attachments: tuple[ChannelAttachment, ...] = ()
+
+
+# Alias kept private: today the gateway only ever resolves text + attachments.
+_Content = _TextContent
 
 
 class ChannelGateway(Gateway):
@@ -66,9 +80,9 @@ class ChannelGateway(Gateway):
         if adapter_id is None or conversation_id is None:
             return ChannelSendResult(status="permanent", error_code="missing_target")
 
-        # 读取消息内容
-        text = self._read_message_text(content_ref)
-        if text is None:
+        # 读取消息内容（文本 + 可能的图片附件）
+        content = self._read_message_content(content_ref)
+        if content is None:
             return ChannelSendResult(
                 status="permanent",
                 error_code="content_not_found",
@@ -79,7 +93,7 @@ class ChannelGateway(Gateway):
             return ChannelSendResult(status="temporary", error_code="adapter_not_running")
 
         request = self._build_send_request(
-            target, text,
+            target, content,
             delivery_id=target.get("delivery_id", ""),
             attempt_id=target.get("attempt_id", ""),
         )
@@ -94,7 +108,7 @@ class ChannelGateway(Gateway):
         if adapter is None:
             return ChannelSendResult(status="temporary", error_code="adapter_not_running")
         request = self._build_send_request(
-            target, text,
+            target, _TextContent(text=text),
             delivery_id=target.get("delivery_id", ""),
             attempt_id=target.get("attempt_id", ""),
         )
@@ -177,7 +191,7 @@ class ChannelGateway(Gateway):
         return target, adapter_id, conversation_id
 
     def _build_send_request(
-        self, target: dict, text: str, *, delivery_id: str, attempt_id: str,
+        self, target: dict, content: _Content, *, delivery_id: str, attempt_id: str,
     ) -> ChannelSendRequest:
         adapter_id = target.get("adapter_id")
         reply_route = target.get("reply_route", {})
@@ -192,7 +206,8 @@ class ChannelGateway(Gateway):
             target_endpoint_ref=target.get("target_endpoint_ref", ""),
             platform_conversation_id=str(conversation_id),
             reply_to_platform_message_id=reply_route.get("reply_to_platform_message_id"),
-            text=text,
+            text=content.text,
+            attachments=content.attachments,
         )
 
     def _call_adapter_sync(self, adapter, request: ChannelSendRequest) -> ChannelSendResult:
@@ -229,14 +244,33 @@ class ChannelGateway(Gateway):
             _LOG.exception("ChannelGateway edit_request_sync failed: %s", e)
             return ChannelSendResult(status="unknown", error_code=type(e).__name__)
 
-    def _read_message_text(self, content_ref: str) -> str | None:
-        """从 content_ref (message_id) 读取消息文本。"""
+    def _read_message_content(self, content_ref: str) -> _Content | None:
+        """从 content_ref (message_id) 读取内容：文本 + 图片附件（按 ordinal）。"""
         if not content_ref:
-            return ""
-        row = self._conn.execute(
+            return _TextContent(text="")
+        text_row = self._conn.execute(
             "SELECT cp.inline_data FROM content_parts cp "
-            "WHERE cp.message_id=? AND cp.content_type='text' "
-            "LIMIT 1",
+            "WHERE cp.message_id=? AND cp.content_type IN ('text','markdown') "
+            "ORDER BY cp.ordinal ASC LIMIT 1",
             (content_ref,),
         ).fetchone()
-        return row["inline_data"] if row else ""
+        text = text_row["inline_data"] if text_row else ""
+
+        image_rows = self._conn.execute(
+            "SELECT cp.payload_ref, cp.metadata FROM content_parts cp "
+            "WHERE cp.message_id=? AND (cp.content_type='image' "
+            "OR cp.content_type LIKE 'image/%') "
+            "ORDER BY cp.ordinal ASC",
+            (content_ref,),
+        ).fetchall()
+        attachments: list[ChannelAttachment] = []
+        for r in image_rows:
+            if not r["payload_ref"]:
+                continue
+            meta = json.loads(r["metadata"] or "{}")
+            attachments.append(ChannelAttachment(
+                payload_ref=r["payload_ref"],
+                mime=str(meta.get("mime") or "image/png"),
+                name=str(meta.get("name") or meta.get("filename") or ""),
+            ))
+        return _TextContent(text=text, attachments=tuple(attachments))
