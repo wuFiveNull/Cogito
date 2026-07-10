@@ -36,12 +36,6 @@ from tests.architecture._scan import cycles, forbidden_edges, scan_imports
 # ---------------------------------------------------------------------------
 
 KNOWN_VIOLATIONS: dict[str, dict[str, str]] = {
-    "cogito.capability -> cogito.store": {
-        "reason": "capability layer imports store repos directly",
-        "adr_link": "ADR-000 TBD",
-        "clear_by": "2026-09-30",
-        "owner": "Plan 01 M2 / capability port extraction",
-    },
     "cogito.store -> cogito.model": {
         "reason": "store layer aware of model adapter types",
         "adr_link": "ADR-000 TBD",

@@ -57,12 +57,12 @@ class ToolExecutor:
         self,
         registry: CapabilityRegistry,
         policy: ToolPolicy | None = None,
-        repo: Any | None = None,
+        sink: Any | None = None,  # ToolCallSink (PLAN-09 M4a)
         on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._registry = registry
         self._policy = policy or ToolPolicy()
-        self._repo = repo  # ToolCallRepository
+        self._sink = sink  # ToolCallSink — 由组合根注入
         self._on_event = on_event  # DomainEvent 回调（D8）
 
     async def execute(
@@ -194,20 +194,19 @@ class ToolExecutor:
         tool_name: str,
         arguments: dict[str, Any],
     ) -> None:
-        if not self._repo:
+        if not self._sink:
             return
-        from cogito.store.tool_call_repo import ToolCallRecord
 
         try:
-            self._repo.insert(ToolCallRecord(
-                tool_call_id=tool_call_id,
-                attempt_id=attempt_id,
-                attempt_type="run",
-                tool_name=tool_name,
-                arguments=json.dumps(arguments, ensure_ascii=False),
-                status="executing",
-                started_at=epoch_ms(datetime.now(UTC)),
-            ))
+            self._sink.insert({
+                "tool_call_id": tool_call_id,
+                "attempt_id": attempt_id,
+                "attempt_type": "run",
+                "tool_name": tool_name,
+                "arguments": json.dumps(arguments, ensure_ascii=False),
+                "status": "executing",
+                "started_at": epoch_ms(datetime.now(UTC)),
+            })
         except Exception:
             pass  # 持久化失败不阻断主流程
 
@@ -215,14 +214,15 @@ class ToolExecutor:
         self, tool_call_id: str, status: str,
         result: str = "", request_hash: str = "",
     ) -> None:
-        if not self._repo:
+        if not self._sink:
             return
         try:
-            self._repo.update_status(
-                tool_call_id,
-                status,
-                completed_at=epoch_ms(datetime.now(UTC)),
-            )
+            self._sink.insert({
+                "tool_call_id": tool_call_id,
+                "status": status,
+                "result_summary": result[:500] if result else "",
+                "completed_at": epoch_ms(datetime.now(UTC)),
+            })
         except Exception:
             pass
 
