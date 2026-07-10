@@ -525,7 +525,7 @@ class RuntimeApplication:
         from cogito.capability.mcp.manager import MCPServerManager
         from cogito.service.agent_runner import start_mcp_servers
 
-        mcp_registry = self._runner.registry if self._runner else None
+        mcp_registry = self.runner._registry if self.runner else None
         self.mcp_manager = None
         if mcp_registry is not None:
             self.mcp_manager = MCPServerManager(mcp_registry)

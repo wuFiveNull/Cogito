@@ -106,9 +106,7 @@ INTERACTION_SERVER_HELP = (
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
-    """前台运行 interaction-web 服务器。"""
-    import uvicorn
-
+    """前台运行 interaction-web 服务器（路由到异步实现）。"""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -124,8 +122,18 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     if args.host is not None:
         config.interaction.bind_host = args.host
 
+    try:
+        return asyncio.run(_serve_async(config, args))
+    except KeyboardInterrupt:
+        print("\n[ok] Server stopped (Ctrl+C).")
+        return 0
+
+
+async def _serve_async(config: Config, args: argparse.Namespace) -> int:
+    """Serve 异步实现：所有 async 操作在同一 event loop 内完成。"""
     from cogito.application import RuntimeApplication
     from cogito.interaction_web.server import create_app
+    import uvicorn
 
     print("=" * 50)
     print("  Cogito — interaction-web")
@@ -136,61 +144,45 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
     rt: RuntimeApplication | None = None
     try:
-        try:
-            rt = RuntimeApplication.build(config)
-        except (RuntimeError, ValueError) as e:
-            print(f"[ERROR] Startup error: {e}", file=sys.stderr)
-            return 3
+        rt = RuntimeApplication.build(config)
+    except (RuntimeError, ValueError) as e:
+        print(f"[ERROR] Startup error: {e}", file=sys.stderr)
+        return 3
 
-        asyncio.run(rt.start_web_channel())
+    await rt.start_web_channel()
 
-        static_dir = Path(config.workspace_path) / "web" / "dist"
-        app = create_app(
-            config,
-            recovery_counts=rt.recovery_counts(),
-            static_dir=static_dir if static_dir.is_dir() else None,
-            runtime=rt,
+    static_dir = Path(config.workspace_path) / "web" / "dist"
+    app = create_app(
+        config,
+        recovery_counts=rt.recovery_counts(),
+        static_dir=static_dir if static_dir.is_dir() else None,
+        runtime=rt,
+    )
+
+    tasks: list[asyncio.Task[None]] = []
+
+    if not args.no_worker:
+        worker_task = asyncio.create_task(
+            rt.run_worker(
+                worker_id="web-worker",
+                poll_interval=config.worker.heartbeat_interval_seconds,
+            ),
+            name="cogito-web-worker",
         )
-
-        worker_task = None
-        if not args.no_worker:
-            worker_task = asyncio.create_task(
-                rt.run_worker(
-                    worker_id="web-worker",
-                    poll_interval=config.worker.heartbeat_interval_seconds,
-                ),
-                name="cogito-web-worker",
-            )
-            print("[ok] background agent worker started (web-worker)")
-
-        print(f"[ok] interaction-web: http://{config.interaction.bind_host}:{config.interaction.port}/")
-        if not static_dir.is_dir():
-            print("[!] no frontend found (run `npm run build` in web/, or place dist under web/dist)")
-        print("[ok] Web channel enabled — chat via WebSocket at /api/chat/ws")
-
-        server = uvicorn.Server(
-            uvicorn.Config(app, host=config.interaction.bind_host,
-                           port=config.interaction.port, log_level="info")
-        )
-        try:
-            asyncio.run(_run_server_and_worker(server, worker_task))
-        except KeyboardInterrupt:
-            print("\n[ok] Server stopped (Ctrl+C).")
-    finally:
-        if rt is not None:
-            rt.close()
-    return 0
-
-
-async def _run_server_and_worker(
-    server: "uvicorn.Server",
-    worker_task: asyncio.Task[None] | None,
-) -> None:
-    """并发运行 uvicorn + worker；任一退出则整体停止。"""
-    server_task = asyncio.create_task(server.serve(), name="uvicorn-server")
-    tasks: list[asyncio.Task[None]] = [server_task]
-    if worker_task is not None:
         tasks.append(worker_task)
+        print("[ok] background agent worker started (web-worker)")
+
+    print(f"[ok] interaction-web: http://{config.interaction.bind_host}:{config.interaction.port}/")
+    if not static_dir.is_dir():
+        print("[!] no frontend found (run `npm run build` in web/, or place dist under web/dist)")
+    print("[ok] Web channel enabled — chat via WebSocket at /api/chat/ws")
+
+    server = uvicorn.Server(
+        uvicorn.Config(app, host=config.interaction.bind_host,
+                       port=config.interaction.port, log_level="info")
+    )
+    server_task = asyncio.create_task(server.serve(), name="uvicorn-server")
+    tasks.append(server_task)
 
     try:
         done, pending = await asyncio.wait(
@@ -204,12 +196,14 @@ async def _run_server_and_worker(
                 except (asyncio.CancelledError, Exception):
                     pass
         for t in done:
-            if t.exception() is not None and not isinstance(t.exception(), asyncio.CancelledError):
-                raise t.exception()
+            exc = t.exception()
+            if exc is not None and not isinstance(exc, asyncio.CancelledError):
+                raise exc
     finally:
         server.should_exit = True
-        if worker_task is not None and not worker_task.done():
-            worker_task.cancel()
+        if rt is not None:
+            rt.close()
+    return 0
 
 
 def main() -> None:
