@@ -12,10 +12,6 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import uuid
-from datetime import UTC, datetime
-
-from cogito.model.contracts import ModelResponse, Usage
-from cogito.contracts.clock import epoch_ms
 
 
 class ModelCallRecord:
@@ -166,43 +162,6 @@ class ModelCallRepository:
         if hasattr(request, "request_id"):
             raw += request.request_id  # type: ignore[union-attr]
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
-
-    @staticmethod
-    def build_from_response(
-        *,
-        request_id: str,
-        provider_id: str,
-        model_id: str,
-        status: str,
-        response: ModelResponse | None = None,
-        usage: Usage | None = None,
-        latency_ms: int = 0,
-        error_category: str | None = None,
-        attempt_id: str = "",
-        trace_id: str = "",
-        retry_count: int = 0,
-        started_at: int | None = None,
-    ) -> ModelCallRecord:
-        """从 ModelResponse 构建 ModelCallRecord。"""
-        now = epoch_ms(datetime.now(UTC))
-        return ModelCallRecord(
-            attempt_id=attempt_id,
-            request_id=request_id,
-            provider_id=provider_id,
-            model_id=model_id,
-            status=status,
-            request_hash=request_id[:16],
-            finish_reason=response.finish_reason.value if response else None,
-            input_tokens=(usage or response.usage if response else Usage()).input_tokens,
-            output_tokens=(usage or response.usage if response else Usage()).output_tokens,
-            cached_tokens=(usage or response.usage if response else Usage()).cached_tokens,
-            latency_ms=latency_ms,
-            error_category=error_category,
-            retry_count=retry_count,
-            started_at=started_at or now,
-            completed_at=now,
-            trace_id=trace_id,
-        )
 
     def _row_to_record(self, row: sqlite3.Row) -> ModelCallRecord:
         return ModelCallRecord(

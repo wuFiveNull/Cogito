@@ -14,6 +14,13 @@ from typing import Any
 _LOGGER = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class QueryRewriteRequest:
+    """轻型改写请求 (PLAN-10 M1: 隔离 store 对 model.contracts.ModelRequest 的依赖)。"""
+    messages: tuple[dict[str, Any], ...] = ()
+    response_format: str | None = "json"
+
+
 @dataclass
 class QueryPlan:
     """检索查询计划。"""
@@ -73,9 +80,7 @@ async def _call_rewriter(
 ) -> QueryPlan:
     """调用轻量模型改写 query（E2, 可选）。"""
     try:
-        from cogito.model.contracts import ModelRequest
-
-        messages = [
+        messages = (
             {"role": "system", "content": (
                 "Rewrite the user's query for memory retrieval. "
                 "Return JSON: {\"query\": \"rewritten query\", "
@@ -83,8 +88,8 @@ async def _call_rewriter(
                 "\"needs_episodic\": bool, \"needs_procedure\": bool}"
             )},
             {"role": "user", "content": query},
-        ]
-        request = ModelRequest(messages=messages, response_format="json")
+        )
+        request = QueryRewriteRequest(messages=messages, response_format="json")
         response = await model_router.generate(request, model_role="query_rewriter")
 
         import json
