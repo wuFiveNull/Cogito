@@ -8,15 +8,15 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from cogito.bench.timing import get_last
+from cogito.contracts.models import AttentionItem, ComponentHealth, DashboardSummary, HealthComponents, Pagination
 from cogito.interaction_web.deps import CommandDeps, get_command_deps
-from cogito.interaction_web.models import AttentionItem, ComponentHealth, DashboardSummary, HealthComponents, Pagination
-from cogito.interaction_web.query_service import QueryService
+from cogito.service.api.query_service import SqliteQueryService
 
 router = APIRouter(prefix="/api", tags=["query"])
 
 
-def _svc(deps: CommandDeps) -> QueryService:
-    return QueryService(deps.conn, deps.config)
+def _svc(deps: CommandDeps) -> SqliteQueryService:
+    return SqliteQueryService(deps.conn, deps.config)
 
 
 # ── status / usage ────────────────────────────────────────────

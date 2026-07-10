@@ -1261,3 +1261,8 @@ class QueryService:
             "created_at": latest.applied_at,
             "source_layers": latest.source_layers,
         }]
+
+
+# ── PLAN-09 M4b 兼容别名：保留 QueryService 类名，同时暴露
+#    SqliteQueryService 以便 interaction_web.query.py 引用 ──
+SqliteQueryService = QueryService

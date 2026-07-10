@@ -42,12 +42,6 @@ KNOWN_VIOLATIONS: dict[str, dict[str, str]] = {
         "clear_by": "2026-09-30",
         "owner": "Plan 01 M5 / store cleanup",
     },
-    "cogito.interaction_web -> cogito.store": {
-        "reason": "interaction_web imports store repositories to serve queries",
-        "adr_link": "ADR-000 TBD",
-        "clear_by": "2026-09-30",
-        "owner": "Plan 01 M2 / interaction web port extraction",
-    },
     # Cycle: channel -> inbound -> service -> channel
     "cogito.channel -> cogito.inbound": {
         "reason": "channel reaches into inbound; inbound->service->channel closes the cycle",
