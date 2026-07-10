@@ -431,6 +431,7 @@ class SqlitePluginRuntime:
             self._persist(s)
             return s
         s.status = "enabled"
+        s.started_at = datetime.now(UTC).isoformat()
         self._persist(s)
         self._audit(plugin_id, "enable", "success")
         return s

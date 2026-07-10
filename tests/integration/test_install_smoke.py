@@ -46,11 +46,11 @@ class TestPublicApiImport:
         import cogito
         assert hasattr(cogito, "__version__")
 
-    def test_main_cli_module_removed(self) -> None:
-        """PLAN-09 M0: cogito.__main__ must NOT exist anymore."""
+    def test_main_cli_module_exists(self) -> None:
+        """轻薄 CLI 启动器应可被 `python -m cogito` 调用。"""
         import importlib
         spec = importlib.util.find_spec("cogito.__main__")
-        assert spec is None, "cogito.__main__ still exists — M0 not complete"
+        assert spec is not None, "cogito.__main__ 轻薄启动器应存在"
 
     def test_runtime_public_api_exposed(self) -> None:
         from cogito.application import RuntimeApplication
