@@ -80,6 +80,7 @@ recovery_grace_period_seconds = 30
 # provider = "openai_compat"
 # api_key = "${OPENAI_API_KEY}"
 # base_url = "https://api.aihubmix.com/v1"
+# modalities = ["text", "image"]
 #
 # [model.providers.anthropic]
 # provider = "anthropic"
@@ -97,6 +98,19 @@ recovery_grace_period_seconds = 30
 # [model.roles.vlm]
 # provider = "openai"
 # model = "gpt-4o"
+
+# ── 多模态感知层（默认关闭）──
+# [multimodal]
+# enabled = true
+# auto_analyze = true
+# inline_wait_seconds = 5.0
+# tool_timeout_seconds = 20.0
+# max_file_bytes = 20971520
+# max_image_pixels = 40000000
+# max_assets_per_message = 4
+# allowed_mime_types = ["image/jpeg", "image/png", "image/gif", "image/webp"]
+# prompt_version = "1"
+# result_schema_version = "1"
 #
 # ── 离线调试：Echo Provider（零 Token 消耗）──
 # 将用户最后一条消息原样返回，用于调试 Agent Loop / 工具调用链 / Trace 记录。

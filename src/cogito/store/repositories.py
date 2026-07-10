@@ -12,6 +12,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from cogito.contracts.clock import Clock, ProductionClock, epoch_ms, from_epoch_ms
 from cogito.domain.conversation import (
     ContextPartitionPolicy,
     Conversation,
@@ -30,8 +31,6 @@ from cogito.domain.principal import (
     PrincipalType,
 )
 from cogito.domain.turn import RunAttempt, RunAttemptStatus, Turn, TurnStatus
-from cogito.contracts.clock import Clock, ProductionClock
-from cogito.contracts.clock import epoch_ms, from_epoch_ms
 
 # =============================================================================
 # InboxRepository
@@ -411,11 +410,11 @@ class MessageRepository:
     def insert_content_part(self, part: ContentPart, message_id: str) -> None:
         self._conn.execute(
             "INSERT INTO content_parts (part_id, message_id, content_type, inline_data, "
-            "payload_ref, size, sha256, metadata, trust_label) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "payload_ref, size, sha256, metadata, trust_label, ordinal) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (part.part_id, message_id, part.content_type, part.inline_data,
              part.payload_ref, part.size, part.sha256,
-             str(part.metadata), part.trust_label),
+             json.dumps(part.metadata), part.trust_label, part.ordinal),
         )
 
 

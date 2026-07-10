@@ -354,12 +354,17 @@ class OpenAICompatProvider(ModelProvider):
 
         # 结构化输出：优先 response_schema（JSON Schema），其次 response_format
         if request.response_schema:
+            schema = {
+                key: value
+                for key, value in request.response_schema.items()
+                if key != "name"
+            }
             payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
                     "name": request.response_schema.get("name", "response"),
                     "strict": True,
-                    "schema": request.response_schema,
+                    "schema": schema,
                 },
             }
         elif request.response_format == "json":

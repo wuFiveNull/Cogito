@@ -61,6 +61,7 @@
     {"file":"plan/07_剩余任务收尾计划.md","plan_id":"PLAN-07","status":"completed","version":"1.0","covers":["Plan 04 M2","Plan 05 M2","Plan 06 M2/M5/M6"]},
     {"file":"plan/09_架构收敛与可发布闭环开发计划.md","plan_id":"PLAN-09","status":"completed","version":"1.0","covers":["Plan 09 M0-M2/M4a"]},
     {"file":"plan/10_残余违规清零与可发布闭环开发计划.md","plan_id":"PLAN-10","status":"completed","version":"1.0","covers":["Plan 10 M0-M6 (由 PLAN-11 修正 Delivery/Gateway/Plugin 收口)"]},
-    {"file":"plan/11_DeliveryGatewayPlugin与入站契约收口计划.md","plan_id":"PLAN-11","status":"in_progress","version":"1.0","covers":["Plan 11 M1-M4"]}
+    {"file":"plan/11_DeliveryGatewayPlugin与入站契约收口计划.md","plan_id":"PLAN-11","status":"in_progress","version":"1.0","covers":["Plan 11 M1-M4"]},
+    {"file":"plan/12_vision.md","plan_id":"PLAN-12","status":"in_progress","version":"1.1","covers":["Plan 12 image MVP; PDF/OCR follow-up"]}
   ]
 }

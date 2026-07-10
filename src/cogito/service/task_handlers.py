@@ -89,6 +89,7 @@ class TaskHandlerContext:
     """
     connection_factory: Callable[[], sqlite3.Connection] | None = None
     model_router: Any = None  # ModelRouter
+    vision_service_factory: Callable[[], Any] | None = None
     memory_service_factory: Callable[[sqlite3.Connection], Any] | None = None
     workspace_path: str = ""
     logger: logging.Logger = field(default_factory=lambda: _LOGGER)
@@ -138,7 +139,27 @@ def _build_registry(ctx: TaskHandlerContext) -> TaskHandlerRegistry:
     registry.register("proactive.delivery.ready", _handle_proactive_delivery_ready)
     registry.register("proactive.digest.publish", _handle_proactive_digest_publish)
     registry.register("proactive.evaluate", _handle_proactive_evaluate)
+    registry.register("vision.analyze", _handle_vision_analyze)
     return registry
+
+
+def _handle_vision_analyze(task: Task, ctx: TaskHandlerContext) -> str:
+    """Execute one durable vision analysis attempt through the shared cache service."""
+    if ctx.vision_service_factory is None:
+        raise RuntimeError("vision service is not configured")
+    try:
+        payload = json.loads(task.payload_ref or "{}")
+    except json.JSONDecodeError as exc:
+        raise ValueError("invalid vision.analyze payload") from exc
+    analysis_id = str(payload.get("analysis_id", ""))
+    if not analysis_id:
+        raise ValueError("vision.analyze payload missing analysis_id")
+
+    import asyncio
+
+    service = ctx.vision_service_factory()
+    result = asyncio.run(service.analyze(analysis_id))
+    return f"vision analysis {result.analysis_id}: {result.status.value}"
 
 
 def _handle_connector_poll(task: Task, ctx: TaskHandlerContext) -> str:

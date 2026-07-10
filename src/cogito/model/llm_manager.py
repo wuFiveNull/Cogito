@@ -60,6 +60,7 @@ def create_provider(
         api_key=endpoint.api_key,
         base_url=effective_base_url,
         timeout_seconds=endpoint.timeout_seconds,
+        modalities=endpoint.modalities,
     )
 
 

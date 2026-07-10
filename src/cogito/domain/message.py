@@ -34,6 +34,7 @@ class ContentPart:
         sha256: str = "",
         metadata: dict[str, Any] | None = None,
         trust_label: str = "unverified",
+        ordinal: int = 0,
     ) -> None:
         self.part_id = part_id or uuid.uuid4().hex
         self.content_type = content_type
@@ -43,6 +44,7 @@ class ContentPart:
         self.sha256 = sha256
         self.metadata = metadata or {}
         self.trust_label = trust_label
+        self.ordinal = ordinal
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -54,6 +56,7 @@ class ContentPart:
             "sha256": self.sha256,
             "metadata": self.metadata,
             "trust_label": self.trust_label,
+            "ordinal": self.ordinal,
         }
 
     @classmethod
@@ -67,6 +70,7 @@ class ContentPart:
             sha256=data.get("sha256", ""),
             metadata=data.get("metadata", {}),
             trust_label=data.get("trust_label", "unverified"),
+            ordinal=data.get("ordinal", 0),
         )
 
     def __repr__(self) -> str:

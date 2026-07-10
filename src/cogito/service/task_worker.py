@@ -111,7 +111,22 @@ class TaskWorker:
             _LOGGER.exception("Task handler failed: %s", e)
             heartbeat_task.cancel()
             try:
-                self._dispatcher.fail(task, attempt, worker_id)
+                policy = task.retry_policy or {}
+                max_attempts = int(policy.get("max_attempts", 1))
+                retryable = bool(getattr(e, "retryable", True))
+                if retryable and attempt.attempt_no < max_attempts:
+                    backoffs = policy.get("backoff_seconds", [5])
+                    if not isinstance(backoffs, list) or not backoffs:
+                        backoffs = [5]
+                    index = min(attempt.attempt_no - 1, len(backoffs) - 1)
+                    self._dispatcher.retry(
+                        task,
+                        attempt,
+                        worker_id,
+                        delay_seconds=int(backoffs[index]),
+                    )
+                else:
+                    self._dispatcher.fail(task, attempt, worker_id)
             except Exception:
                 pass
             return TaskRunOutcome.failed

@@ -23,6 +23,8 @@ cogito = "cogito.__main__:main"
 qq = ["aiocqhttp==1.4.4"]
 # interaction-web 前端重写（Vite + React + TS）构建工具链。
 frontend = ["vite"]
+# PLAN-12：图片校验与感知哈希。代码使用惰性导入，未安装时仍可运行文本模式。
+multimodal = ["Pillow>=10", "ImageHash>=4"]
 
 [build-system]
 requires = ["setuptools>=75"]

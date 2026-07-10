@@ -28,7 +28,7 @@ KNOWN_SECTIONS = frozenset({
     "capability", "sandbox", "worker", "scheduler",
     "connector", "proactive", "security",
     "observability", "retention", "backup", "plugins",
-    "embedding",
+    "embedding", "multimodal",
 })
 
 # ── Channel 子节已知字段（[channel.*] 定型节） ──
@@ -57,9 +57,15 @@ WORKER_FIELDS = frozenset({
 
 MODEL_TOP_FIELDS = frozenset({"provider", "main", "providers", "roles"})
 MODEL_FIELDS = frozenset({
-    "model", "provider", "api_key", "base_url", "timeout_seconds",
+    "model", "provider", "api_key", "base_url", "timeout_seconds", "modalities",
 })
 ROLE_FIELDS = frozenset({"provider", "model"})
+
+MULTIMODAL_FIELDS = frozenset({
+    "enabled", "auto_analyze", "inline_wait_seconds", "tool_timeout_seconds",
+    "max_file_bytes", "max_image_pixels", "max_assets_per_message",
+    "allowed_mime_types", "prompt_version", "result_schema_version",
+})
 
 AGENT_FIELDS = frozenset({
     "system_prompt", "system_prompt_mode", "max_output_tokens",
@@ -330,6 +336,7 @@ class ModelEndpointConfig:
     api_key: str = ""
     base_url: str = ""
     timeout_seconds: int = 60
+    modalities: tuple[str, ...] = ("text",)
 
     def __repr__(self) -> str:
         masked_key = _mask_sensitive("api_key", self.api_key)
@@ -349,6 +356,7 @@ class ModelEndpointConfig:
             api_key=str(raw.get("api_key", "")),
             base_url=str(raw.get("base_url", "")),
             timeout_seconds=int(raw.get("timeout_seconds", 60)),
+            modalities=tuple(str(v) for v in raw.get("modalities", ["text"])),
         )
 
     def is_configured(self) -> bool:
@@ -449,6 +457,7 @@ class ModelConfig:
                 api_key=base.api_key,
                 base_url=base.base_url,
                 timeout_seconds=base.timeout_seconds,
+                modalities=base.modalities,
             ))
 
         return (provider_key, base)
@@ -850,6 +859,62 @@ class ChannelConfig:
 
 
 # =============================================================================
+# Multimodal 配置（PLAN-12）
+# =============================================================================
+
+
+@dataclass
+class MultimodalConfig:
+    """独立多模态感知层配置。
+
+    默认关闭，确保升级后不会在未配置 VLM 时产生外部模型调用。
+    """
+
+    enabled: bool = False
+    auto_analyze: bool = True
+    inline_wait_seconds: float = 5.0
+    tool_timeout_seconds: float = 20.0
+    max_file_bytes: int = 20 * 1024 * 1024
+    max_image_pixels: int = 40_000_000
+    max_assets_per_message: int = 4
+    allowed_mime_types: tuple[str, ...] = (
+        "image/jpeg",
+        "image/png",
+        "image/gif",
+        "image/webp",
+    )
+    prompt_version: str = "1"
+    result_schema_version: str = "1"
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> MultimodalConfig:
+        _check_unknown(raw, MULTIMODAL_FIELDS, "multimodal")
+        cfg = cls(
+            enabled=bool(raw.get("enabled", False)),
+            auto_analyze=bool(raw.get("auto_analyze", True)),
+            inline_wait_seconds=float(raw.get("inline_wait_seconds", 5.0)),
+            tool_timeout_seconds=float(raw.get("tool_timeout_seconds", 20.0)),
+            max_file_bytes=int(raw.get("max_file_bytes", 20 * 1024 * 1024)),
+            max_image_pixels=int(raw.get("max_image_pixels", 40_000_000)),
+            max_assets_per_message=int(raw.get("max_assets_per_message", 4)),
+            allowed_mime_types=tuple(
+                str(v) for v in raw.get("allowed_mime_types", cls().allowed_mime_types)
+            ),
+            prompt_version=str(raw.get("prompt_version", "1")),
+            result_schema_version=str(raw.get("result_schema_version", "1")),
+        )
+        if cfg.inline_wait_seconds < 0 or cfg.tool_timeout_seconds <= 0:
+            raise ConfigError("multimodal", "timeout", "timeouts must be positive")
+        if cfg.max_file_bytes <= 0 or cfg.max_image_pixels <= 0:
+            raise ConfigError("multimodal", "limits", "file and pixel limits must be positive")
+        if cfg.max_assets_per_message <= 0:
+            raise ConfigError(
+                "multimodal", "max_assets_per_message", "must be greater than zero",
+            )
+        return cfg
+
+
+# =============================================================================
 # 顶层配置
 # =============================================================================
 
@@ -868,6 +933,7 @@ class Config:
     capability: CapabilityConfig = field(default_factory=CapabilityConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     channel: ChannelConfig = field(default_factory=ChannelConfig)
+    multimodal: MultimodalConfig = field(default_factory=MultimodalConfig)
 
     # ── Plan 06 M2: 配置版本元数据（load() 时计算）──
     content_hash: str = ""
@@ -1025,6 +1091,12 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
         channel_raw = resolved.get("channel", {})
         channel = ChannelConfig._from_raw(channel_raw) if channel_raw else ChannelConfig()
 
+        multimodal_raw = resolved.get("multimodal", {})
+        multimodal = (
+            MultimodalConfig._from_raw(multimodal_raw)
+            if multimodal_raw else MultimodalConfig()
+        )
+
         # Plan 06 M2: 跨字段校验（在构建前执行，失败则 ConfigError）
         from cogito.infrastructure.config_version import validate_cross_fields
         cross_errors = validate_cross_fields(resolved)
@@ -1051,6 +1123,7 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
             capability=capability,
             embedding=embedding,
             channel=channel,
+            multimodal=multimodal,
             content_hash=version_meta.get("content_hash", ""),
             schema_version=version_meta.get("schema_version", "1"),
             config_version=version_meta.get("config_version", "1"),

@@ -98,6 +98,8 @@ class AgentRunner:
         channel_manager: Any | None = None,
         streaming_enabled: bool = True,
         stream_policy: StreamPolicy | None = None,
+        vision_service: Any | None = None,
+        multimodal_reader: Any | None = None,
     ) -> None:
         self._conn = conn
         self._router = router
@@ -114,7 +116,9 @@ class AgentRunner:
         self._context_builder = ContextBuilder(
             conn, clock=self._clock, max_input_tokens=max_input_tokens,
             memory_reader=memory_service,
+            multimodal_reader=multimodal_reader,
         )
+        self._vision_service = vision_service
         # 记录每次 Provider 调用到 model_calls（可观察性 / 链路追踪）
         self._model_call_repo = ModelCallRepository(conn)
         router._on_call_completed = self._record_model_call
@@ -162,7 +166,16 @@ class AgentRunner:
             _bench_timing.finalize()
             return RunOutcome.cancelled
 
-        # ── 2. 构建 Context（短暂读库，不持网络锁）──
+        # ── 2. 有界等待自动视觉分析（失败/超时不阻断主 Turn）──
+        if self._vision_service is not None:
+            try:
+                await self._vision_service.ensure_message_analyses(
+                    turn.input_message_id,
+                )
+            except Exception:
+                _LOGGER.warning("inline vision analysis failed open", exc_info=True)
+
+        # ── 2a. 构建 Context（短暂读库，不持网络锁）──
         context = self._context_builder.build(
             turn_id=turn.turn_id,
             session_id=turn.session_id,
@@ -585,6 +598,9 @@ def build_agent_runner(
     channel_manager: Any | None = None,
     streaming_enabled: bool = True,
     stream_policy: StreamPolicy | None = None,
+    llm_manager: LLMManager | None = None,
+    vision_service: Any | None = None,
+    multimodal_reader: Any | None = None,
 ) -> AgentRunner:
     """构建 AgentRunner。
 
@@ -602,10 +618,11 @@ def build_agent_runner(
 
     # 创建 LLMManager（多 Provider 角色路由门面）
     # 传入显式 provider 时（测试/自定义），退化到单 Provider 行为
-    if provider is not None:
-        llm_manager = LLMManager.from_provider(provider)
-    else:
-        llm_manager = LLMManager.build(config.model)
+    if llm_manager is None:
+        if provider is not None:
+            llm_manager = LLMManager.from_provider(provider)
+        else:
+            llm_manager = LLMManager.build(config.model)
 
     router = llm_manager.router
 
@@ -645,6 +662,8 @@ def build_agent_runner(
         channel_manager=channel_manager,
         streaming_enabled=streaming_enabled,
         stream_policy=stream_policy,
+        vision_service=vision_service,
+        multimodal_reader=multimodal_reader,
     )
 
 

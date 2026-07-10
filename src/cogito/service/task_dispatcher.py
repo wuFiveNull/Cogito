@@ -15,16 +15,15 @@ import sqlite3
 from datetime import datetime
 from typing import NamedTuple
 
+from cogito.contracts.clock import Clock, ProductionClock, epoch_ms, from_epoch_ms
 from cogito.domain.task import (
     Task,
     TaskAttempt,
     TaskAttemptStatus,
     TaskStatus,
 )
-from cogito.contracts.clock import Clock, ProductionClock
 from cogito.service.unit_of_work import UnitOfWork
 from cogito.store.task_repo import TaskAttemptRepository, TaskRepository
-from cogito.contracts.clock import epoch_ms, from_epoch_ms
 
 TASK_LEASE_TTL_S = 120
 
@@ -74,6 +73,11 @@ class TaskDispatcher:
             if not ok:
                 return None
 
+            lease_version = self._conn.execute(
+                "SELECT lease_version FROM tasks WHERE task_id=?",
+                (task.task_id,),
+            ).fetchone()[0]
+
             # 计算 attempt_no
             max_no = self._conn.execute(
                 "SELECT COALESCE(MAX(attempt_no), 0) + 1 FROM task_attempts WHERE task_id=?",
@@ -86,7 +90,7 @@ class TaskDispatcher:
                 attempt_no=max_no,
                 status=TaskAttemptStatus.created,
                 lease_owner=worker_id,
-                lease_version=1,
+                lease_version=lease_version,
                 lease_expires_at=from_epoch_ms(lease_expires),
                 started_at=now,
             )
@@ -153,6 +157,37 @@ class TaskDispatcher:
             if not ok:
                 return False
 
+            ok = self._attempt_repo.fail(attempt.task_attempt_id, finished_at=now_ms)
+            uow.commit()
+            return ok
+
+    def retry(
+        self,
+        task: Task,
+        attempt: TaskAttempt,
+        worker_id: str,
+        *,
+        delay_seconds: int,
+        clock: datetime | None = None,
+    ) -> bool:
+        """Finish the current attempt and schedule a new attempt after backoff."""
+        now_ms = epoch_ms(self._now(clock))
+        scheduled_at = now_ms + max(0, delay_seconds) * 1000
+        with UnitOfWork(self._conn) as uow:
+            cur = self._conn.execute(
+                "UPDATE tasks SET status='scheduled',scheduled_at=?,lease_owner=NULL,"
+                "lease_expires_at=NULL WHERE task_id=? AND lease_owner=? "
+                "AND lease_version=? AND status='running' AND lease_expires_at>?",
+                (
+                    scheduled_at,
+                    task.task_id,
+                    worker_id,
+                    attempt.lease_version,
+                    now_ms,
+                ),
+            )
+            if cur.rowcount != 1:
+                return False
             ok = self._attempt_repo.fail(attempt.task_attempt_id, finished_at=now_ms)
             uow.commit()
             return ok

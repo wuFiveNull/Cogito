@@ -24,6 +24,7 @@ from typing import Any
 
 from cogito.config import Config
 from cogito.contracts.envelope import ChannelEnvelope
+from cogito.model.llm_manager import LLMManager
 from cogito.model.provider import ModelProvider
 from cogito.service.agent_runner import RunOutcome, build_agent_runner
 from cogito.service.inbound_service import InboundService
@@ -88,12 +89,16 @@ class RuntimeApplication:
         provider: ModelProvider,
         runner: Any,
         inbound: InboundService,
+        llm_manager: LLMManager | None = None,
     ) -> None:
         self.config = config
         self.conn = conn
         self.provider = provider
         self.runner = runner
         self.inbound = inbound
+        self.llm_manager = llm_manager
+        self.vision_service: Any = None
+        self.vision_service_factory: Any = None
         self._terminal_seq = 0
         self._instance_id = uuid.uuid4().hex
         self._closed = False
@@ -168,13 +173,18 @@ class RuntimeApplication:
             raise
 
         from cogito.contracts.memory import MemoryReader, MemoryWriter
-        from cogito.service.agent_runner import _create_provider
+        from cogito.service.asset_service import AssetIngestionService
         from cogito.service.memory_service import SqliteMemoryService
         from cogito.service.unit_of_work import make_unit_of_work_memory_writer
+        from cogito.service.vision_service import (
+            MultimodalContextProjection,
+            VisionAnalysisService,
+        )
         from cogito.store.memory_repo import MemoryRepository
         from cogito.tools.registry import assemble_default_registry
 
-        provider = _create_provider(config.model)
+        llm_manager = LLMManager.build(config.model)
+        provider = llm_manager.get("main")
         if config.model.provider == "echo":
             logger.info("Using echo provider — user messages will be echoed back")
             print("[echo] 使用回显 Provider（用户消息原样返回，不调用真实模型）")
@@ -199,26 +209,74 @@ class RuntimeApplication:
             reader_conn = _gc(config.resolve_db_path())
             return SqliteMemoryService(repo=MemoryRepository(reader_conn))
 
+        vision_model_id = config.model.resolve_role("vlm")[1].model or "vlm"
+
+        def _make_vision_service() -> VisionAnalysisService:
+            from cogito.store.connection import get_connection as _gc
+
+            vision_conn = _gc(config.resolve_db_path())
+            return VisionAnalysisService(
+                vision_conn,
+                config.resolve_payload_dir(),
+                llm_manager.router,
+                config.multimodal,
+                model_id=vision_model_id,
+            )
+
+        shared_vision_service = None
+        multimodal_reader = None
+        asset_service = None
+        vision_factory = None
+        if config.multimodal.enabled:
+            shared_vision_service = VisionAnalysisService(
+                conn,
+                config.resolve_payload_dir(),
+                llm_manager.router,
+                config.multimodal,
+                model_id=vision_model_id,
+            )
+            multimodal_reader = MultimodalContextProjection(
+                conn,
+                model_id=vision_model_id,
+                config=config.multimodal,
+            )
+            asset_service = AssetIngestionService(
+                conn,
+                config.resolve_payload_dir(),
+                config.multimodal,
+            )
+            vision_factory = _make_vision_service
+
         pre_assembled_registry = assemble_default_registry(
             memory_reader=memory_service,
             memory_writer=memory_service,
             make_memory_writer=_make_memory_writer,
             make_memory_reader=_make_memory_reader,
+            make_vision_service=vision_factory,
         )
 
         runner = build_agent_runner(
             config=config,
             connection=conn,
             provider=provider,
+            llm_manager=llm_manager,
             registry=pre_assembled_registry,
             memory_service=memory_service,
             streaming_enabled=config.agent.streaming_enabled,
+            vision_service=shared_vision_service,
+            multimodal_reader=multimodal_reader,
         )
 
         # 唤醒事件：入站新建 Turn 时置位，worker idle 睡眠改为等待该事件，
         # 消除最长 heartbeat_interval_seconds 的轮询延迟。
         wakeup_event = asyncio.Event()
-        inbound = InboundService(conn, notify=wakeup_event.set)
+        inbound = InboundService(
+            conn,
+            notify=wakeup_event.set,
+            asset_service=asset_service,
+            vision_service=shared_vision_service,
+            max_assets_per_message=config.multimodal.max_assets_per_message,
+        )
 
         app = cls(
             config=config,
@@ -226,7 +284,10 @@ class RuntimeApplication:
             provider=provider,
             runner=runner,
             inbound=inbound,
+            llm_manager=llm_manager,
         )
+        app.vision_service = shared_vision_service
+        app.vision_service_factory = vision_factory
         app._wakeup_event = wakeup_event
         app._recovery_counts = recovery_counts
 
@@ -546,6 +607,8 @@ class RuntimeApplication:
 
         task_handler_ctx = TaskHandlerContext(
             connection_factory=lambda p=self.config.resolve_db_path(): get_connection(p),
+            model_router=self.llm_manager.router if self.llm_manager else None,
+            vision_service_factory=self.vision_service_factory,
             workspace_path=self.config.workspace_path,
             mcp_manager=self.mcp_manager,
             delivery_service=self.delivery_service,

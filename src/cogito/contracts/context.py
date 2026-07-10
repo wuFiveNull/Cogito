@@ -15,6 +15,7 @@ from typing import Any
 
 from cogito.contracts.clock import Clock, ProductionClock, epoch_ms
 from cogito.contracts.memory import MemoryReader
+from cogito.contracts.multimodal import MultimodalContextReader
 
 # 简单 Token 估算器：每字符约 0.25 token
 _CHARS_PER_TOKEN = 4.0
@@ -118,6 +119,7 @@ class ContextBuilder:
         policy_version: str = "1",
         query_plan_version: str = "1",
         memory_reader: MemoryReader | None = None,
+        multimodal_reader: MultimodalContextReader | None = None,
     ) -> None:
         self._conn = conn
         self._clock = clock or ProductionClock()
@@ -125,6 +127,7 @@ class ContextBuilder:
         self._policy_version = policy_version
         self._query_plan_version = query_plan_version
         self._memory_reader = memory_reader
+        self._multimodal_reader = multimodal_reader
 
     def build(
         self,
@@ -413,11 +416,11 @@ class ContextBuilder:
         rows = self._conn.execute(
             "SELECT m.message_id, m.role, m.direction, m.receive_sequence, "
             "  m.trust_label, m.session_id, m.sender_principal_id, "
-            "  cp.inline_data, cp.content_type "
+            "  cp.inline_data, cp.content_type, cp.ordinal "
             "FROM messages m "
             "LEFT JOIN content_parts cp ON cp.message_id = m.message_id "
             "WHERE m.session_id=? "
-            "ORDER BY m.receive_sequence ASC, cp.part_id ASC",
+            "ORDER BY m.receive_sequence ASC, cp.ordinal ASC, cp.part_id ASC",
             (session_id,),
         ).fetchall()
 
@@ -435,11 +438,35 @@ class ContextBuilder:
                     "sender_principal_id": row["sender_principal_id"],
                     "content_parts": [],
                 }
-            if row["inline_data"]:
+            if (
+                row["inline_data"]
+                and row["content_type"] in ("text", "markdown")
+            ):
                 message_map[mid]["content_parts"].append(row["inline_data"])
 
         result = []
         for msg in message_map.values():
+            content_parts = list(msg["content_parts"])
+            if self._multimodal_reader is not None:
+                for asset in self._multimodal_reader.list_for_message(msg["message_id"]):
+                    status = asset.get("status", "queued")
+                    description = asset.get("short_description", "")
+                    if status == "succeeded" and description:
+                        external = description
+                    elif status == "failed":
+                        external = "Visual analysis failed; continue using text-only context."
+                    else:
+                        external = "Visual analysis is pending."
+                    content_parts.append(
+                        "<multimodal_asset "
+                        f"asset_id=\"{asset.get('asset_id', '')}\" "
+                        f"mime_type=\"{asset.get('mime_type', '')}\" "
+                        f"status=\"{status}\">\n"
+                        "<external_data trust=\"unverified\">\n"
+                        f"{external}\n"
+                        "</external_data>\n"
+                        "</multimodal_asset>"
+                    )
             result.append({
                 "message_id": msg["message_id"],
                 "role": msg["role"],
@@ -449,8 +476,8 @@ class ContextBuilder:
                 "session_id": msg["session_id"],
                 "sender_principal_id": msg.get("sender_principal_id", ""),
                 "content": (
-                    "\n".join(msg["content_parts"])
-                    if msg["content_parts"] else ""
+                    "\n".join(content_parts)
+                    if content_parts else ""
                 ),
             })
         result.sort(key=lambda m: m["sequence"])

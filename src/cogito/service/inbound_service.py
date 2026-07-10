@@ -16,6 +16,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 from cogito.bench import timing as _bench_timing
 from cogito.contracts.envelope import ChannelEnvelope
@@ -57,10 +58,21 @@ class InboundService:
     不创建 RunAttempt。
     """
 
-    def __init__(self, conn: sqlite3.Connection, notify: callable | None = None) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        notify: callable | None = None,
+        *,
+        asset_service: Any | None = None,
+        vision_service: Any | None = None,
+        max_assets_per_message: int = 4,
+    ) -> None:
         self._conn = conn
         # 入站新建 Turn 后的唤醒回调（用于即时唤醒后台 worker，消除轮询睡眠）
         self._notify = notify
+        self._asset_service = asset_service
+        self._vision_service = vision_service
+        self._max_assets_per_message = max_assets_per_message
 
     def accept(self, envelope: ChannelEnvelope) -> AcceptInboundResult:
         """接受入站消息并创建 Turn。
@@ -164,18 +176,43 @@ class InboundService:
             seq = uow.message.next_receive_sequence(conversation.conversation_id)
 
             # ── 7. 创建 Message ──
-            content_parts = [
-                ContentPart(
+            content_parts = []
+            asset_count = 0
+            for ordinal, cp in enumerate(envelope.content_parts):
+                part = ContentPart(
                     content_type=cp.get("content_type", "text"),
                     inline_data=cp.get("inline_data", ""),
                     payload_ref=cp.get("payload_ref"),
                     size=cp.get("size", 0),
                     sha256=cp.get("sha256", ""),
-                    metadata=cp.get("metadata", {}),
+                    metadata={
+                        **cp.get("metadata", {}),
+                        **({"mime": cp.get("mime")} if cp.get("mime") else {}),
+                        **({"name": cp.get("name")} if cp.get("name") else {}),
+                    },
                     trust_label=cp.get("trust_label", "unverified"),
+                    ordinal=ordinal,
                 )
-                for cp in envelope.content_parts
-            ]
+                is_image = part.content_type == "image" or part.content_type.startswith("image/")
+                if self._asset_service is not None and is_image:
+                    if asset_count >= self._max_assets_per_message:
+                        part.inline_data = ""
+                        part.metadata = {**part.metadata, "asset_error": "too_many_assets"}
+                    else:
+                        try:
+                            asset = self._asset_service.materialize_part(
+                                part, principal_id=principal.principal_id,
+                            )
+                            if asset is not None:
+                                asset_count += 1
+                        except Exception as exc:
+                            # Invalid binary input must not block the text-only Turn.
+                            part.inline_data = ""
+                            part.metadata = {
+                                **part.metadata,
+                                "asset_error": type(exc).__name__,
+                            }
+                content_parts.append(part)
 
             message = Message(
                 conversation_id=conversation.conversation_id,
@@ -195,6 +232,8 @@ class InboundService:
             uow.message.insert(message)
             for part in content_parts:
                 uow.message.insert_content_part(part, message.message_id)
+                if self._asset_service is not None:
+                    self._asset_service.link_part(message.message_id, part)
 
             # ── 8. 创建 Turn（accepted → queued）──
             turn = Turn(
@@ -247,6 +286,13 @@ class InboundService:
 
             uow.commit()
         _bench_timing.checkpoint("inbound:commit_done", extra={"turn_id": turn.turn_id})
+
+        if self._vision_service is not None:
+            try:
+                self._vision_service.request_message_assets(message.message_id)
+            except Exception:
+                # Vision scheduling is fail-open for the user Turn.
+                pass
 
         # 唤醒后台 worker（若存在）——即时处理新 Turn，无需等待轮询间隔
         if self._notify is not None:

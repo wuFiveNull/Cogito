@@ -45,6 +45,10 @@ class InboundDispatcher:
                 # explicit SQL NULL.
                 "size": int(c.size or 0),
                 "trust_label": "unverified",
+                "metadata": {
+                    "mime": c.mime or "",
+                    "name": c.name or "",
+                },
             }
             for c in inbound.content
         ]

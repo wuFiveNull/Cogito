@@ -33,6 +33,7 @@ capability: tool_calls,side_effect_receipts,approvals,commands
 cognition: memory_items,memory_relations,memory_embeddings,summaries
 connector: connectors,connector_cursors,raw_items,normalized_items
 ops: payload_objects,traces,spans,audit_records,config_versions
+multimodal: multimodal_assets,message_asset_links,asset_derivatives,vision_analyses
 ```
 
 不创建 `runs` 表。
@@ -54,6 +55,8 @@ ops: payload_objects,traces,spans,audit_records,config_versions
 - Delivery → Message 可空（provisional），最终化后非空；
 - Memory source 使用受约束 source_type/source_id 或关系表；
 - Payload 引用统一指向 payload_objects。
+- MultimodalAsset → PayloadObject；MessageAssetLink → Message/ContentPart/Asset；
+  VisionAnalysis → MultimodalAsset，完整模型原始响应仍使用受限 Payload 引用。
 
 ## 5. 唯一约束
 

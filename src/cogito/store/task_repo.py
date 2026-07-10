@@ -6,11 +6,13 @@ tasks 表和 task_attempts 表已在 0001_initial.sql 中定义。
 
 from __future__ import annotations
 
+import ast
+import json
 import sqlite3
 from datetime import UTC, datetime
 
-from cogito.domain.task import Task, TaskAttempt, TaskStatus
 from cogito.contracts.clock import epoch_ms, from_epoch_ms
+from cogito.domain.task import Task, TaskAttempt, TaskStatus
 
 
 class TaskRepository:
@@ -157,7 +159,7 @@ class TaskRepository:
             "UPDATE tasks SET status='running', "
             "  lease_owner=?, lease_expires_at=?, "
             "  lease_version=lease_version+1, attempt_count=attempt_count+1 "
-            "WHERE task_id=? AND status='queued' "
+            "WHERE task_id=? AND status IN ('queued','scheduled') "
             "AND (scheduled_at IS NULL OR scheduled_at <= ?)",
             (worker_id, expires, task_id, now_ms),
         )
@@ -219,6 +221,15 @@ class TaskRepository:
 
     @staticmethod
     def _row_to_task(row: sqlite3.Row) -> Task:
+        raw_retry = row["retry_policy"] or "{}"
+        try:
+            retry_policy = json.loads(raw_retry)
+        except (json.JSONDecodeError, TypeError):
+            try:
+                parsed = ast.literal_eval(raw_retry)
+                retry_policy = parsed if isinstance(parsed, dict) else {}
+            except (ValueError, SyntaxError):
+                retry_policy = {}
         return Task(
             task_id=row["task_id"],
             task_type=row["task_type"],
@@ -226,7 +237,7 @@ class TaskRepository:
             status=TaskStatus(row["status"]),
             priority=row["priority"],
             scheduled_at=from_epoch_ms(row["scheduled_at"]),
-            retry_policy={},
+            retry_policy=retry_policy,
             lease_owner=row["lease_owner"],
             lease_expires_at=from_epoch_ms(row["lease_expires_at"]),
             checkpoint_ref=row["checkpoint_ref"],
