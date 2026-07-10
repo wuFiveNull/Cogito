@@ -160,7 +160,12 @@ class RuntimeApplication:
             conn.close()
             raise
 
+        from cogito.contracts.memory import MemoryReader, MemoryWriter
         from cogito.service.agent_runner import _create_provider
+        from cogito.service.memory_service import SqliteMemoryService
+        from cogito.service.unit_of_work import make_unit_of_work_memory_writer
+        from cogito.store.memory_repo import MemoryRepository
+        from cogito.tools.registry import assemble_default_registry
 
         provider = _create_provider(config.model)
         if config.model.provider == "echo":
@@ -176,10 +181,30 @@ class RuntimeApplication:
             logger.warning("No model configured — using stub provider")
             print("[stub] 未配置模型，使用 Stub Provider（固定回复）")
 
+        # ── PLAN-09 M4a/C2 破环：注册表在组合根预装配（service→tools 切断）──
+        memory_service = SqliteMemoryService(conn=conn)
+
+        def _make_memory_writer() -> MemoryWriter:
+            return make_unit_of_work_memory_writer(config.resolve_db_path())
+
+        def _make_memory_reader() -> MemoryReader:
+            from cogito.store.connection import get_connection as _gc
+            reader_conn = _gc(config.resolve_db_path())
+            return SqliteMemoryService(repo=MemoryRepository(reader_conn))
+
+        pre_assembled_registry = assemble_default_registry(
+            memory_reader=memory_service,
+            memory_writer=memory_service,
+            make_memory_writer=_make_memory_writer,
+            make_memory_reader=_make_memory_reader,
+        )
+
         runner = build_agent_runner(
             config=config,
             connection=conn,
             provider=provider,
+            registry=pre_assembled_registry,
+            memory_service=memory_service,
             streaming_enabled=config.agent.streaming_enabled,
         )
 

@@ -3,36 +3,28 @@
 支持：
 1. 按 memory_id 精确删除
 2. 按 subject + predicate 模糊删除
-3. 存在歧义时返回候选，不直接批量删除
+3. 自然语言搜索 → 返回候选让用户确认
 
-事务边界：
-- 写操作使用独立连接 + UoW
-- 删除前校验 Principal 所有权
-- 成功返回前必须完成 commit
+边界（PLAN-09 M4a）：工具通过 MemoryReader / MemoryWriter 端口操作，
+不直接依赖 SqliteMemoryService。组合根注入具体实现。
 """
-
 from __future__ import annotations
 
-import sqlite3
-from collections.abc import Callable
-
 from cogito.capability.models import ToolContext, ToolDef
-from cogito.service.memory_service import SqliteMemoryService
-from cogito.service.unit_of_work import UnitOfWork
-from cogito.store.connection import get_connection
+from cogito.contracts.memory import MemoryReader, MemoryWriter
 
 TOOL_NAME = "forget_memory"
 
 
 def _make_handler(
-    service: SqliteMemoryService | None = None,
-    get_db_path: Callable[[], str] | None = None,
+    reader: MemoryReader | None = None,
+    writer: MemoryWriter | None = None,
 ):
     """创建 handler 闭包。
 
     Args:
-        service: 共享 MemoryService（不推荐）
-        get_db_path: 获取数据库路径的回调（推荐）
+        reader: MemoryReader 端口（用于读取候选 / 校验所有权）。
+        writer: MemoryWriter 端口（用于 forget / forget_by_canonical_key）。
     """
     async def handler(args: dict, ctx: ToolContext) -> str:
         """从长期记忆中删除条目。"""
@@ -48,116 +40,66 @@ def _make_handler(
                 "principal not available in current context."
             )
 
-        # 使用独立连接 + UoW 写入
-        if get_db_path and (memory_id or (subject and predicate)):
-            conn: sqlite3.Connection | None = None
-            try:
-                conn = get_connection(get_db_path())
-                with UnitOfWork(conn) as uow:
-                    svc = uow.memory_service
+        # ── 按 memory_id 精确删除 ──
+        if memory_id:
+            if writer is None:
+                return "[forget_memory] Cannot forget: memory writer not available."
 
-                    if memory_id:
-                        # 校验所有权
-                        mem = svc.get(memory_id)
-                        if mem is None:
-                            return (
-                                f"[forget_memory] No memory found with id '{memory_id}'."
-                            )
-                        if mem.principal_id != principal_id:
-                            return (
-                                f"[forget_memory] Memory '{memory_id}' does not "
-                                f"belong to current principal."
-                            )
-                        ok = svc.forget(memory_id)
-                        if not ok:
-                            return (
-                                f"[forget_memory] Failed to forget memory "
-                                f"'{memory_id}'."
-                            )
-                        uow.commit()
-                        return (
-                            f"Forgot memory: [{mem.kind}] {mem.subject}/"
-                            f"{mem.predicate} = '{mem.value}' "
-                            f"(memory_id={memory_id})"
-                        )
+            # 校验所有权（reader 存在时预检查）
+            if reader is not None:
+                mem = reader.get(memory_id)
+                if mem is None:
+                    return (
+                        f"[forget_memory] No memory found with id '{memory_id}'."
+                    )
+                if mem.principal_id and mem.principal_id != principal_id:
+                    return (
+                        f"[forget_memory] Memory '{memory_id}' does not "
+                        f"belong to current principal."
+                    )
 
-                    if subject and predicate:
-                        ok = svc.forget_by_canonical_key(principal_id, subject, predicate)
-                        if not ok:
-                            return (
-                                f"[forget_memory] No active memory found for "
-                                f"subject='{subject}', predicate='{predicate}'."
-                            )
-                        uow.commit()
-                        return (
-                            f"Forgot memory: subject='{subject}', "
-                            f"predicate='{predicate}'."
-                        )
-
-            except Exception as e:
-                if conn:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-                return f"[forget_memory] Error forgetting memory: {e}"
-            finally:
-                if conn:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-
-        # ── 降级：使用共享 service ──
-        if service is None and not get_db_path:
+            ok = writer.forget(memory_id, principal_id=principal_id)
+            if ok:
+                return f"Forgot memory with id='{memory_id}'."
+            # forget 返回 False 时可能是已不存在（并发或已删除）
             return (
-                "[forget_memory] Cannot forget: "
-                "memory service not available."
+                f"[forget_memory] No memory found with id '{memory_id}'."
+                if reader is None else
+                f"[forget_memory] Failed to forget memory '{memory_id}'."
             )
 
-        if service is not None:
-            # ── 按 memory_id 精确删除（共享 service 路径）──
-            if memory_id:
-                memory = service.get(memory_id)
-                if memory is None:
-                    return f"[forget_memory] No memory found with id '{memory_id}'."
+        # ── 按 subject + predicate 删除 ──
+        if subject and predicate:
+            if writer is None:
+                return "[forget_memory] Cannot forget: memory writer not available."
 
-                ok = service.forget(memory_id, principal_id=principal_id)
-                if ok:
-                    return (
-                        f"Forgot memory: [{memory.kind}] {memory.subject}/"
-                        f"{memory.predicate} = '{memory.value}' (memory_id={memory_id})"
-                    )
-                return f"[forget_memory] Failed to forget memory '{memory_id}'."
-
-            # ── 按 subject + predicate 删除 ──
-            if subject and predicate:
-                ok = service.forget_by_canonical_key(principal_id, subject, predicate)
-                if ok:
-                    return (
-                        f"Forgot memory: subject='{subject}', predicate='{predicate}'."
-                    )
+            ok = writer.forget_by_canonical_key(principal_id, subject, predicate)
+            if ok:
                 return (
-                    f"[forget_memory] No active memory found for "
-                    f"subject='{subject}', predicate='{predicate}'."
+                    f"Forgot memory: subject='{subject}', "
+                    f"predicate='{predicate}'."
                 )
+            return (
+                f"[forget_memory] No active memory found for "
+                f"subject='{subject}', predicate='{predicate}'."
+            )
 
         # ── 按自然语言搜索后提示 ──
         if query:
-            target_svc = None
-            if get_db_path:
-                try:
-                    conn2 = get_connection(get_db_path())
-                    from cogito.store.memory_repo import MemoryRepository
-                    target_svc = SqliteMemoryService(repo=MemoryRepository(conn2))
-                except Exception:
-                    pass
+            if reader is None:
+                return (
+                    f"[forget_memory] Search for '{query}': "
+                    "memory reader not available."
+                )
+            try:
+                candidates = reader.retrieve(
+                    principal_id=principal_id,
+                    query=query,
+                    limit=10,
+                )
+            except Exception as e:
+                return f"[forget_memory] Error searching memory: {e}"
 
-            candidates = (target_svc or service).retrieve(
-                principal_id=principal_id,
-                query=query,
-                limit=10,
-            )
             if not candidates:
                 return (
                     f"[forget_memory] No memories found matching '{query}'."
@@ -184,14 +126,14 @@ def _make_handler(
 
 
 def create_tool_def(
-    service: SqliteMemoryService | None = None,
-    get_db_path: Callable[[], str] | None = None,
+    reader: MemoryReader | None = None,
+    writer: MemoryWriter | None = None,
 ) -> ToolDef:
     """创建 forget_memory 工具定义。
 
     Args:
-        service: 可选的 MemoryService 实例。
-        get_db_path: 获取数据库路径的回调（推荐，每次写入独立连接）。
+        reader: MemoryReader 端口实例。
+        writer: MemoryWriter 端口实例。
     """
     return ToolDef(
         name=TOOL_NAME,
@@ -227,6 +169,6 @@ def create_tool_def(
             ],
         },
         toolset=("core", "memory"),
-        handler=_make_handler(service=service, get_db_path=get_db_path),
+        handler=_make_handler(reader=reader, writer=writer),
         risk_level="low",
     )

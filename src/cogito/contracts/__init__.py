@@ -16,7 +16,7 @@ from .context import (
     ContextSnapshot,
     estimate_tokens,
 )
-from .memory import MemoryReader
+from .memory import MemoryReader, MemoryWriter
 from .envelope import (
     AgentReply,
     AgentRequest,

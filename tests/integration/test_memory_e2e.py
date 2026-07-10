@@ -73,7 +73,7 @@ class TestManualMemoryE2E:
 
         from cogito.tools.remember_memory import create_tool_def
 
-        tool = create_tool_def(service=service)
+        tool = create_tool_def(writer=service)
 
         # ── 1. 写入 ──
         result = tool.handler({
@@ -130,7 +130,7 @@ class TestManualMemoryE2E:
 
         from cogito.tools.remember_memory import create_tool_def
 
-        tool = create_tool_def(service=service)
+        tool = create_tool_def(writer=service)
 
         # ── 1. 写入初始值 ──
         r1 = asyncio.run(tool.handler({
@@ -195,9 +195,9 @@ class TestManualMemoryE2E:
         from cogito.tools.recall_memory import create_tool_def as create_recall
         from cogito.tools.remember_memory import create_tool_def as create_remember
 
-        remember = create_remember(service=service)
-        forget = create_forget(service=service)
-        recall = create_recall(service=service)
+        remember = create_remember(writer=service)
+        forget = create_forget(reader=None, writer=service)
+        recall = create_recall(reader=service)
 
         # ── 1. 写入 ──
         result = asyncio.run(remember.handler({
@@ -247,7 +247,7 @@ class TestManualMemoryE2E:
         from cogito.tools.remember_memory import create_tool_def
         ctx_a = _ctx(principal_id="p_a")
 
-        remember = create_tool_def(service=service)
+        remember = create_tool_def(writer=service)
 
         # ── 1. A 写入记忆 ──
         result_a = asyncio.run(remember.handler({
@@ -279,7 +279,7 @@ class TestManualMemoryE2E:
 
         from cogito.tools.remember_memory import create_tool_def
 
-        remember = create_tool_def(service=service)
+        remember = create_tool_def(writer=service)
 
         # ── 1. 写入几条记忆 ──
         asyncio.run(remember.handler({

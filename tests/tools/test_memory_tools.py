@@ -1,15 +1,15 @@
-"""Tests for remember_memory and forget_memory tools.
+"""Tests for remember / recall / forget memory tools.
+
+PLAN-09 M4a: 工具签名改为 MemoryReader / MemoryWriter 端口而非
+SqliteMemoryService 具体实现；测试使用协议类型传入。
 
 覆盖场景：
-- remember_memory 无 service 时返回提示
+- remember_memory 无 writer 时返回提示
 - remember_memory 缺少必填参数时返回提示
-- remember_memory Schema 定义完整
-- forget_memory 无 service 时返回提示
-- forget_memory 缺少参数时返回提示
-- forget_memory 各模式（memory_id, subject+predicate, query）
-- forget_memory Schema 定义完整
+- remember_memory 幂等同值返回同一 memory_id
+- forget_memory 无 writer / 无参数 / 各删除模式
+- recall_memory 检索相关记忆
 """
-
 from __future__ import annotations
 
 import sqlite3
@@ -17,6 +17,7 @@ import sqlite3
 import pytest
 
 from cogito.capability.models import ToolContext
+from cogito.contracts.memory import MemoryReader, MemoryWriter
 from cogito.service.memory_service import SqliteMemoryService
 from cogito.store.migration import migrate
 
@@ -57,6 +58,16 @@ def service(db) -> SqliteMemoryService:
     return SqliteMemoryService(db)
 
 
+@pytest.fixture
+def memory_writer(service) -> MemoryWriter:
+    return service
+
+
+@pytest.fixture
+def memory_reader(service) -> MemoryReader:
+    return service
+
+
 # ──────────────────────────────────────────────
 # remember_memory
 # ──────────────────────────────────────────────
@@ -64,20 +75,20 @@ def service(db) -> SqliteMemoryService:
 
 class TestRememberMemoryTool:
     @pytest.mark.asyncio
-    async def test_remember_no_service(self, ctx):
+    async def test_remember_no_writer(self, ctx):
         from cogito.tools.remember_memory import create_tool_def
 
-        tool_def = create_tool_def(service=None)
+        tool_def = create_tool_def(writer=None)
         result = await tool_def.handler(
             {"subject": "user", "predicate": "lang", "value": "Python"}, ctx,
         )
-        assert "memory service not available" in result.lower()
+        assert "memory writer not available" in result.lower()
 
     @pytest.mark.asyncio
     async def test_remember_no_principal(self, ctx_no_principal):
         from cogito.tools.remember_memory import create_tool_def
 
-        tool_def = create_tool_def(service=None)
+        tool_def = create_tool_def(writer=None)
         result = await tool_def.handler(
             {"subject": "user", "predicate": "lang", "value": "Python"},
             ctx_no_principal,
@@ -88,15 +99,15 @@ class TestRememberMemoryTool:
     async def test_remember_empty_input(self, ctx):
         from cogito.tools.remember_memory import create_tool_def
 
-        tool_def = create_tool_def(service=None)
+        tool_def = create_tool_def(writer=None)
         result = await tool_def.handler({"subject": "", "predicate": "", "value": ""}, ctx)
         assert "at least one" in result.lower()
 
     @pytest.mark.asyncio
-    async def test_remember_saves_memory(self, ctx, service):
+    async def test_remember_saves_memory(self, ctx, memory_writer):
         from cogito.tools.remember_memory import create_tool_def
 
-        tool_def = create_tool_def(service=service)
+        tool_def = create_tool_def(writer=memory_writer)
         result = await tool_def.handler(
             {
                 "subject": "user",
@@ -111,11 +122,11 @@ class TestRememberMemoryTool:
         assert "Python" in result
 
     @pytest.mark.asyncio
-    async def test_remember_idempotent(self, ctx, service):
+    async def test_remember_idempotent(self, ctx, memory_writer):
         """同值重复调用返回同一 memory_id。"""
         from cogito.tools.remember_memory import create_tool_def
 
-        tool_def = create_tool_def(service=service)
+        tool_def = create_tool_def(writer=memory_writer)
         r1 = await tool_def.handler(
             {"subject": "user", "predicate": "lang", "value": "Python"}, ctx,
         )
@@ -150,47 +161,45 @@ class TestRememberMemoryTool:
 
 class TestForgetMemoryTool:
     @pytest.mark.asyncio
-    async def test_forget_no_service(self, ctx):
+    async def test_forget_no_writer(self, ctx):
         from cogito.tools.forget_memory import create_tool_def
 
-        tool_def = create_tool_def(service=None)
+        tool_def = create_tool_def(reader=None, writer=None)
         result = await tool_def.handler({"memory_id": "abc"}, ctx)
-        assert "memory service not available" in result.lower()
+        assert "memory writer not available" in result.lower()
 
     @pytest.mark.asyncio
     async def test_forget_no_principal(self, ctx_no_principal):
         from cogito.tools.forget_memory import create_tool_def
 
-        tool_def = create_tool_def(service=None)
+        tool_def = create_tool_def(reader=None, writer=None)
         result = await tool_def.handler({"memory_id": "abc"}, ctx_no_principal)
         assert "principal not available" in result.lower()
 
     @pytest.mark.asyncio
-    async def test_forget_no_params(self, ctx, service):
-        """提供 service 但无参数时，返回用法提示。"""
+    async def test_forget_no_params(self, ctx, memory_writer):
+        """提供 writer 但无参数时，返回用法提示。"""
         from cogito.tools.forget_memory import create_tool_def
 
-        tool_def = create_tool_def(service=service)
+        tool_def = create_tool_def(reader=None, writer=memory_writer)
         result = await tool_def.handler({}, ctx)
         assert "specify one of" in result.lower()
         assert "memory_id" in result
 
     @pytest.mark.asyncio
-    async def test_forget_by_id(self, ctx, service):
-        # 先创建一条记忆
+    async def test_forget_by_id(self, ctx, memory_writer, memory_reader):
         from cogito.tools.remember_memory import create_tool_def as create_remember
 
         # 先创建一条记忆
-        remember = create_remember(service=service)
+        remember = create_remember(writer=memory_writer)
         saved = await remember.handler(
             {"subject": "user", "predicate": "lang", "value": "Python"}, ctx,
         )
         memory_id = saved.split("memory_id=")[-1].strip(")")
 
-        # 用 ID 删除
         from cogito.tools.forget_memory import create_tool_def as create_forget
 
-        forget = create_forget(service=service)
+        forget = create_forget(reader=memory_reader, writer=memory_writer)
         result = await forget.handler({"memory_id": memory_id}, ctx)
         assert "Forgot memory" in result
         assert memory_id in result
@@ -198,30 +207,30 @@ class TestForgetMemoryTool:
         # 验证已删除
         from cogito.tools.recall_memory import create_tool_def as create_recall
 
-        recall = create_recall(service=service)
+        recall = create_recall(reader=memory_reader)
         found = await recall.handler({"query": "Python"}, ctx)
         assert "No memories found" in found
 
     @pytest.mark.asyncio
-    async def test_forget_by_subject_predicate(self, ctx, service):
-        from cogito.tools.forget_memory import create_tool_def as create_forget
+    async def test_forget_by_subject_predicate(self, ctx, memory_writer):
         from cogito.tools.remember_memory import create_tool_def as create_remember
 
-        remember = create_remember(service=service)
+        remember = create_remember(writer=memory_writer)
         await remember.handler(
             {"subject": "user", "predicate": "lang", "value": "Python"}, ctx,
         )
 
-        forget = create_forget(service=service)
+        from cogito.tools.forget_memory import create_tool_def as create_forget
+
+        forget = create_forget(reader=None, writer=memory_writer)
         result = await forget.handler({"subject": "user", "predicate": "lang"}, ctx)
         assert "Forgot memory" in result
 
     @pytest.mark.asyncio
-    async def test_forget_by_query_finds_candidates(self, ctx, service):
-        from cogito.tools.forget_memory import create_tool_def as create_forget
+    async def test_forget_by_query_finds_candidates(self, ctx, memory_writer, memory_reader):
         from cogito.tools.remember_memory import create_tool_def as create_remember
 
-        remember = create_remember(service=service)
+        remember = create_remember(writer=memory_writer)
         await remember.handler(
             {"subject": "user", "predicate": "lang", "value": "Python"}, ctx,
         )
@@ -229,18 +238,19 @@ class TestForgetMemoryTool:
             {"subject": "user", "predicate": "editor", "value": "VS Code"}, ctx,
         )
 
-        forget = create_forget(service=service)
+        from cogito.tools.forget_memory import create_tool_def as create_forget
+
+        forget = create_forget(reader=memory_reader, writer=memory_writer)
         result = await forget.handler({"query": "editor"}, ctx)
         assert "Found" in result
         assert "VS Code" in result
-        # 只返回候选，不删除
         assert "memory_id=" in result
 
     @pytest.mark.asyncio
-    async def test_forget_nonexistent_id(self, ctx, service):
+    async def test_forget_nonexistent_id(self, ctx, memory_writer):
         from cogito.tools.forget_memory import create_tool_def as create_forget
 
-        forget = create_forget(service=service)
+        forget = create_forget(writer=memory_writer)
         result = await forget.handler({"memory_id": "nonexistent"}, ctx)
         assert "No memory found" in result
 

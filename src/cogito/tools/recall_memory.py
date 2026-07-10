@@ -1,23 +1,21 @@
 """Recall memory tool — 检索长期记忆。
 
-使用 MemoryService 的 search_scored 方法，
+使用 MemoryReader.retrieve 检索相关记忆。
 返回带评分的结果，让模型和用户了解可信度。
-"""
 
+边界（PLAN-09 M4a）：工具文件不直接依赖 SqliteMemoryService 或
+MemoryRepository，只依赖 contracts.memory.MemoryReader 端口。
+"""
 from __future__ import annotations
 
 from cogito.capability.models import ToolContext, ToolDef
-from cogito.service.memory_service import SqliteMemoryService
-from cogito.store.memory_repo import MemoryRepository
+from cogito.contracts.memory import MemoryReader
 
 TOOL_NAME = "recall_memory"
 
 
-def _make_handler(
-    service: SqliteMemoryService | None = None,
-    repo: MemoryRepository | None = None,
-):
-    """创建 handler 闭包，捕获 service/repo 依赖。"""
+def _make_handler(reader: MemoryReader | None = None):
+    """创建 handler 闭包，捕获 reader 依赖。"""
     async def handler(args: dict, ctx: ToolContext) -> str:
         """搜索记忆存储中的条目，返回带评分的结果。"""
         query = args.get("query", "")
@@ -30,58 +28,41 @@ def _make_handler(
         if not principal_id:
             return f"[recall_memory] Search for '{query}': principal not available."
 
-        # 优先使用 service (search_scored)，其次 repo (search)
-        if service:
-            try:
-                scored = service._repo.search_scored(
-                    principal_id=principal_id,
-                    query=query,
-                    limit=min(limit, 20),
-                )
-            except AttributeError:
-                items = service.retrieve(
-                    principal_id=principal_id,
-                    query=query,
-                    limit=min(limit, 20),
-                )
-                scored = [(item, 0.0) for item in items]
-        elif repo:
-            items = repo.search(
+        if reader is None:
+            return (
+                f"[recall_memory] Search for '{query}': "
+                "memory reader not available."
+            )
+
+        try:
+            items = reader.retrieve(
                 principal_id=principal_id,
                 query=query,
                 limit=min(limit, 20),
             )
-            scored = [(item, 0.0) for item in items]
-        else:
-            return (
-                f"[recall_memory] Search for '{query}': "
-                "memory service not available."
-            )
+        except Exception as e:
+            return f"[recall_memory] Error searching memory: {e}"
 
-        if not scored:
+        if not items:
             return f"No memories found matching '{query}'."
 
-        lines = [f"Found {len(scored)} memory result(s) for '{query}':"]
-        for i, (item, score) in enumerate(scored, 1):
+        lines = [f"Found {len(items)} memory result(s) for '{query}':"]
+        for i, item in enumerate(items, 1):
             lines.append(
                 f"{i}. [{item.kind}] {item.subject}/{item.predicate} = "
                 f"'{item.value}' "
-                f"(score: {score:.2f}, confidence: {item.confidence:.1f})"
+                f"(confidence: {item.confidence:.1f})"
             )
         return "\n".join(lines)
 
     return handler
 
 
-def create_tool_def(
-    repo: MemoryRepository | None = None,
-    service: SqliteMemoryService | None = None,
-) -> ToolDef:
+def create_tool_def(reader: MemoryReader | None = None) -> ToolDef:
     """创建 recall_memory 工具定义。
 
     Args:
-        repo: 可选的 MemoryRepository。
-        service: 可选的 MemoryService（优先于 repo）。
+        reader: MemoryReader 端口实例。
     """
     return ToolDef(
         name=TOOL_NAME,
@@ -105,6 +86,6 @@ def create_tool_def(
             "required": ["query"],
         },
         toolset=("core", "memory"),
-        handler=_make_handler(service=service, repo=repo),
+        handler=_make_handler(reader=reader),
         risk_level="low",
     )

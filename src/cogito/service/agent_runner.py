@@ -28,11 +28,11 @@ from cogito.bench import timing as _bench_timing
 from cogito.capability import CapabilityRegistry
 from cogito.capability.executor import ToolExecutor
 from cogito.config import Config, ModelConfig
+from cogito.contracts.clock import Clock, ProductionClock, epoch_ms
+from cogito.contracts.context import ContextBuilder
 from cogito.model.llm_manager import LLMManager, create_provider
 from cogito.model.provider import ModelProvider
 from cogito.model.router import ModelRouter
-from cogito.contracts.clock import Clock, ProductionClock
-from cogito.contracts.context import ContextBuilder
 from cogito.runtime.loop import AgentLoop, LoopResultType
 from cogito.service.completion import TurnCompletionService
 from cogito.service.dispatcher import Dispatcher
@@ -44,7 +44,6 @@ from cogito.service.streaming_delivery import (
     StreamPolicy,
 )
 from cogito.store.model_call_repo import ModelCallRecord, ModelCallRepository
-from cogito.contracts.clock import epoch_ms
 
 # ── 默认模式-Toolset 映射 (AGENT-COGNITION / 2.2) ──
 
@@ -581,6 +580,7 @@ def build_agent_runner(
     clock: Clock | None = None,
     registry: CapabilityRegistry | None = None,
     toolsets: set[str] | None = None,
+    memory_service: SqliteMemoryService | None = None,
     channel_gateway: Any | None = None,
     channel_manager: Any | None = None,
     streaming_enabled: bool = True,
@@ -609,21 +609,9 @@ def build_agent_runner(
 
     router = llm_manager.router
 
-    # 创建 Registry 并发现内置工具
+    # ── PLAN-09 M4a/C2 破环：registry 由组合根预装配后传入，
+    #    service.agent_runner 不再反向 import cogito.tools ──
     resolved_registry = registry
-    memory_service: SqliteMemoryService | None = None
-    if resolved_registry is None:
-        from cogito.capability import CapabilityRegistry
-
-        memory_service = SqliteMemoryService(conn=connection)
-        from cogito.tools.registry import discover_builtin_tools
-
-        resolved_registry = CapabilityRegistry()
-        discover_builtin_tools(
-            resolved_registry,
-            memory_service=memory_service,
-            get_db_path=lambda: config.resolve_db_path(),
-        )
 
     # 创建 Executor
     executor = ToolExecutor(resolved_registry)
@@ -667,6 +655,7 @@ async def build_and_start_agent_runner(
     clock: Clock | None = None,
     registry: CapabilityRegistry | None = None,
     toolsets: set[str] | None = None,
+    memory_service: SqliteMemoryService | None = None,
 ) -> AgentRunner:
     """异步构建 AgentRunner 并启动 MCP Server。
 
@@ -679,6 +668,7 @@ async def build_and_start_agent_runner(
         clock=clock,
         registry=registry,
         toolsets=toolsets,
+        memory_service=memory_service,
     )
 
     # 启动 MCP Server

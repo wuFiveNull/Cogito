@@ -2,14 +2,16 @@
 
 CAPABILITY-PLUGINS / 4.1 路径 A — 自动发现（内置 Tool）：
 启动时通过 discover_builtin_tools() 扫描 tools/*.py 并注册。
-"""
 
+PLAN-09 M4a: registry 不再依赖 SqliteMemoryService；记忆工具
+由组合根通过 MemoryReader / MemoryWriter 端口注入（工厂或实例）。
+"""
 from __future__ import annotations
 
 from collections.abc import Callable
 
 from cogito.capability.registry import CapabilityRegistry
-from cogito.service.memory_service import SqliteMemoryService
+from cogito.contracts.memory import MemoryReader, MemoryWriter
 
 # 全局默认注册表
 registry: CapabilityRegistry = CapabilityRegistry()
@@ -17,8 +19,11 @@ registry: CapabilityRegistry = CapabilityRegistry()
 
 def discover_builtin_tools(
     target: CapabilityRegistry | None = None,
-    memory_service: SqliteMemoryService | None = None,
-    get_db_path: Callable[[], str] | None = None,
+    *,
+    memory_reader: MemoryReader | None = None,
+    memory_writer: MemoryWriter | None = None,
+    make_memory_writer: Callable[[], MemoryWriter] | None = None,
+    make_memory_reader: Callable[[], MemoryReader] | None = None,
 ) -> CapabilityRegistry:
     """发现并注册所有内置工具。
 
@@ -27,8 +32,10 @@ def discover_builtin_tools(
 
     Args:
         target: 目标注册表，未传时使用全局默认。
-        memory_service: 可选的 MemoryService，供记忆工具使用。
-        get_db_path: 获取数据库路径的回调，供记忆工具独立事务使用。
+        memory_reader: MemoryReader 端口实例（供 recall_memory）。
+        memory_writer: MemoryWriter 端口实例（供 remember/forget_memory）。
+        make_memory_writer: 按需创建 MemoryWriter 的工厂（推荐，独立事务）。
+        make_memory_reader: 按需创建 MemoryReader 的工厂（兜底）。
     """
     r = target if target is not None else registry
 
@@ -39,21 +46,45 @@ def discover_builtin_tools(
     for tool in [echo.tool_def, now.tool_def]:
         r.register(tool)
 
-    # ── 记忆工具（依赖 MemoryService 或 get_db_path）──
+    # ── 记忆工具（依赖 MemoryReader / MemoryWriter 端口）──
     from cogito.tools.forget_memory import create_tool_def as _create_forget
     from cogito.tools.recall_memory import create_tool_def as _create_recall
     from cogito.tools.remember_memory import create_tool_def as _create_remember
 
-    # 写工具优先使用 get_db_path（独立事务）
+    # 优先用 make_writer 工厂（独立事务），其次用共享 writer 实例
     r.register(_create_remember(
-        service=memory_service,
-        get_db_path=get_db_path,
+        writer=memory_writer,
+        make_writer=make_memory_writer,
     ))
     r.register(_create_forget(
-        service=memory_service,
-        get_db_path=get_db_path,
+        reader=memory_reader,
+        writer=memory_writer,
     ))
-    # 读工具使用共享 service（不需要事务）
-    r.register(_create_recall(service=memory_service))
+    # 读工具使用共享 reader 或工厂
+    r.register(_create_recall(reader=memory_reader))
 
     return r
+
+
+def assemble_default_registry(
+    *,
+    memory_reader: MemoryReader | None = None,
+    memory_writer: MemoryWriter | None = None,
+    make_memory_writer: Callable[[], MemoryWriter] | None = None,
+    make_memory_reader: Callable[[], MemoryReader] | None = None,
+) -> CapabilityRegistry:
+    """创建 CapabilityRegistry 并注册所有内置工具。
+
+    组合根（application.py / 测试）在调用
+    service.agent_runner.build_agent_runner 之前，先调用此函数拿到
+    CapabilityRegistry，再传入。避免 service 反向依赖 cogito.tools。
+    """
+    registry = CapabilityRegistry()
+    discover_builtin_tools(
+        registry,
+        memory_reader=memory_reader,
+        memory_writer=memory_writer,
+        make_memory_writer=make_memory_writer,
+        make_memory_reader=make_memory_reader,
+    )
+    return registry

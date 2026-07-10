@@ -138,7 +138,6 @@ class ContextBuilder:
         装配顺序（RETRIEVAL-CONTEXT / 10）：
         system policy → memory → summary → 历史消息 → 当前用户输入
         """
-        import sqlite3 as _sq3  # 延迟导入，避免在 contracts 顶层依赖 sqlite3
 
         messages = self._load_session_messages(session_id)
         input_seq = self._find_input_sequence(input_message_id)

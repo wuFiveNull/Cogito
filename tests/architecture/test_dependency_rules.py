@@ -42,12 +42,6 @@ KNOWN_VIOLATIONS: dict[str, dict[str, str]] = {
         "clear_by": "2026-09-30",
         "owner": "Plan 01 M2 / capability port extraction",
     },
-    "cogito.tools -> cogito.store": {
-        "reason": "built-in tools reach into store repositories",
-        "adr_link": "ADR-000 TBD",
-        "clear_by": "2026-09-30",
-        "owner": "Plan 01 M2 / tool port extraction",
-    },
     "cogito.store -> cogito.model": {
         "reason": "store layer aware of model adapter types",
         "adr_link": "ADR-000 TBD",
@@ -66,13 +60,6 @@ KNOWN_VIOLATIONS: dict[str, dict[str, str]] = {
         "adr_link": "ADR-000 TBD",
         "clear_by": "2026-09-30",
         "owner": "Plan 01 M2 / inbound port extraction",
-    },
-    # Cycle: service -> tools -> service
-    "cogito.service -> cogito.tools": {
-        "reason": "service imports tools while tools import service (cycle)",
-        "adr_link": "ADR-000 TBD",
-        "clear_by": "2026-09-30",
-        "owner": "Plan 01 M2 / tools port extraction",
     },
 }
 
