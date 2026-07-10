@@ -55,8 +55,12 @@ multimodal: multimodal_assets,message_asset_links,asset_derivatives,vision_analy
 - Delivery → Message 可空（provisional），最终化后非空；
 - Memory source 使用受约束 source_type/source_id 或关系表；
 - Payload 引用统一指向 payload_objects。
-- MultimodalAsset → PayloadObject；MessageAssetLink → Message/ContentPart/Asset；
-  VisionAnalysis → MultimodalAsset，完整模型原始响应仍使用受限 Payload 引用。
+- `multimodal_assets.payload_ref`、`asset_derivatives.payload_ref`、
+  `vision_analyses.result_payload_ref` 均引用 `payload_objects(payload_ref)`；
+  `message_asset_links` 引用 `messages`/`content_parts`/`multimodal_assets`；
+  `vision_analyses.asset_id` 引用 `multimodal_assets`。
+- migration 1004 同时向 `message` 组的 `content_parts` 追加
+  `ordinal INTEGER NOT NULL DEFAULT 0`，供 multimodal 顺序引用。
 
 ## 5. 唯一约束
 
@@ -75,11 +79,20 @@ multimodal: multimodal_assets,message_asset_links,asset_derivatives,vision_analy
 (actor_principal_id,command_type,idempotency_key)
 (tool_id,idempotency_key)
 (delivery_target_key,idempotency_key)
+(multimodal_assets.sha256) — 资产二进制去重
+(message_asset_links.part_id) — 单 part 不重复绑资产
+(asset_derivatives.(asset_id, kind, page_no))
+(vision_analyses.(asset_id, analysis_kind, model_id, prompt_version,
+result_schema_version, options_hash)) — VisionAnalysis 缓存键
 ```
+
+`message_asset_links` 的主键为 `(message_id, part_id)`。
 
 ## 6. 索引
 
 按队列条件建立部分索引：queued Task、pending Outbox、ready Delivery、pending Approval。历史查询索引 Conversation+sequence；Memory 索引 Principal+scope+status+kind；Trace 索引 correlation/turn/task。
+
+多模态层索引（migration 1004）：`multimodal_assets` 部分索引 `idx_multimodal_assets_phash` on `perceptual_hash WHERE perceptual_hash <> ''`；`message_asset_links` 索引 `idx_message_asset_links_asset(asset_id)`；`vision_analyses` 索引 `idx_vision_analyses_status(status, created_at)`、`idx_vision_analyses_asset(asset_id, completed_at DESC)`。
 
 ## 7. 事务
 

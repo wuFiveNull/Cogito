@@ -75,13 +75,20 @@ delete
 reconcile
 ```
 
-每次请求包含 delivery_id、attempt_id、operation_seq、幂等键、目标快照和内容。返回平台 Message ID、状态、Receipt、限流和安全错误。Gateway 不直接接收模型 Delta。
+每次请求包含 delivery_id、attempt_id、operation_seq、idempotency_key、
+target_snapshot 和 content。Gateway 收到的 `idempotency_key` 缺失时退化为
+`f"{delivery_id}:{attempt_id}:{operation_seq}:{action}"`。
 
-Core 的 `DeliveryService` 在调用前持久化发送意图；Bridge 只调用
-`GatewayClient` 执行平台操作，不创建或修改 Core Delivery。Gateway 按
-`idempotency_key`（缺失时退化为 delivery/attempt/operation_seq/action）保存
-操作 Receipt，重复请求返回原结果。合并进程使用 Loopback 实现，独立进程
-使用 HTTP 实现，两者共享同一操作集合。
+Gateway 对每个 `operation_key` 在 `gateway_operation_receipts` 表中：
+`INSERT OR IGNORE` 锁定（claim）→ 执行 → `UPDATE` 写回 Receipt。
+命中已存在 Receipt 时附带 `duplicate=true` 直接返回原结果；
+claim 失败（并发重复）返回 `{status: "unknown", error_code: "operation_in_progress"}`。
+返回：platform_message_id / status / receipt / rate-limit / reconcile 结果 /
+安全错误。Gateway 不直接接收模型 Delta。
+
+Core 的 `SqliteDeliveryService` 在调用前持久化发送意图；Bridge 只调用
+`GatewayClient`（合并进程 Loopback，独立进程 HTTP）执行平台操作，不创建或
+修改 Core Delivery。
 
 ## 7. Capability Snapshot
 
@@ -92,7 +99,9 @@ reply_token_ttl
 rate_limit_hint
 ```
 
-Core 在创建 Delivery 时保存 Snapshot；能力变化可导致降级，但不能使已批准目标发生变化。
+Core 在 `enqueue` 时将 `target` 序列化并写入 `deliveries.target_snapshot`；
+`TargetSnapshot` 为不可变值对象，创建后不受能力变化影响；能力变化只影响
+降级/渲染路径，不会修改已固定的投递目标。
 
 ## 8. 附件
 

@@ -104,10 +104,11 @@ Fail(error)
 
 RetryPolicy 定义次数、错误码、指数退避、上限和 jitter。Attempt 数和预算跨重启累计。副作用 unknown 不进入普通 Retry，先对账。
 
-`vision.analyze` 使用 `retry_policy.max_attempts` 与 `backoff_seconds`。Provider
-明确声明 retryable 时，当前 TaskAttempt 结束为 failed，Task 转为带
-`scheduled_at` 的 `scheduled` 并在下一次领取时创建新 Attempt；非 retryable
-错误直接终止。重试沿用同一 analysis_id 和 Cache Key。
+`vision.analyze` 在创建 Task 时写入固定
+`retry_policy = {max_attempts: 3, backoff_seconds: [5, 30, 120]}`
+（`multimodal_repo.enqueue_analysis_task`）。Provider 明确声明 retryable
+时，当前 Attempt 结束为 failed，Task 按 backoff 重新排队，领取时创建新
+Attempt，沿用同一 `analysis_id` 与 Cache Key；非 retryable 错误直接终止。
 
 ## 7. Schedule
 
