@@ -56,6 +56,8 @@
     {"file":"plan/04_后台任务Connector事件与主动系统下一步开发计划.md","plan_id":"PLAN-04","status":"completed","version":"1.0","covers":["Plan 04 M0-M9"]},
     {"file":"plan/05_交互身份消息与投递下一步开发计划.md","plan_id":"PLAN-05","status":"completed","version":"1.0","covers":["Plan 05 M1-M9"]},
     {"file":"plan/06_存储配置部署与数据治理下一步开发计划.md","plan_id":"PLAN-06","status":"completed","version":"1.0","covers":["Plan 06 M0-M10"]},
-    {"file":"plan/07_剩余任务收尾计划.md","plan_id":"PLAN-07","status":"completed","version":"1.0","covers":["Plan 04 M2","Plan 05 M2","Plan 06 M2/M5/M6"]}
+    {"file":"plan/07_剩余任务收尾计划.md","plan_id":"PLAN-07","status":"completed","version":"1.0","covers":["Plan 04 M2","Plan 05 M2","Plan 06 M2/M5/M6"]},
+    {"file":"plan/09_架构收敛与可发布闭环开发计划.md","plan_id":"PLAN-09","status":"completed","version":"1.0","covers":["Plan 09 M0-M2/M4a"]},
+    {"file":"plan/10_残余违规清零与可发布闭环开发计划.md","plan_id":"PLAN-10","status":"completed","version":"1.0","covers":["Plan 10 M0-M6 (待定 ADR 签核/M7 Legacy Adapter)"]}
   ]
 }
