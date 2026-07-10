@@ -25,7 +25,7 @@ from typing import Any
 from cogito.capability.models import ToolCallState, ToolContext, ToolDef, ToolResult
 from cogito.capability.policy import ToolPolicy
 from cogito.capability.registry import CapabilityRegistry
-from cogito.store.time_utils import epoch_ms
+from cogito.contracts.clock import epoch_ms
 
 # 最大输出字符数
 MAX_TOOL_OUTPUT_CHARS = 100_000

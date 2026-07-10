@@ -31,7 +31,7 @@ from cogito.config import Config, ModelConfig
 from cogito.model.llm_manager import LLMManager, create_provider
 from cogito.model.provider import ModelProvider
 from cogito.model.router import ModelRouter
-from cogito.runtime.clock import Clock, ProductionClock
+from cogito.contracts.clock import Clock, ProductionClock
 from cogito.runtime.context import ContextBuilder
 from cogito.runtime.loop import AgentLoop, LoopResultType
 from cogito.service.completion import TurnCompletionService
@@ -44,7 +44,7 @@ from cogito.service.streaming_delivery import (
     StreamPolicy,
 )
 from cogito.store.model_call_repo import ModelCallRecord, ModelCallRepository
-from cogito.store.time_utils import epoch_ms
+from cogito.contracts.clock import epoch_ms
 
 # ── 默认模式-Toolset 映射 (AGENT-COGNITION / 2.2) ──
 

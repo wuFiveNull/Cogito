@@ -9,7 +9,7 @@ import sqlite3
 from typing import Any
 
 from cogito.domain.mcp_connector import MCPConnectorConfig
-from cogito.store.time_utils import now_ms
+from cogito.contracts.clock import now_ms
 
 
 class MCPConnectorConfigRepository:

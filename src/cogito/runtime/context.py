@@ -15,9 +15,9 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from cogito.runtime.clock import Clock, ProductionClock
+from cogito.contracts.clock import Clock, ProductionClock
 from cogito.service.memory_service import SqliteMemoryService
-from cogito.store.time_utils import epoch_ms
+from cogito.contracts.clock import epoch_ms
 
 # 简单 Token 估算器：每字符约 0.25 token
 _CHARS_PER_TOKEN = 4.0

@@ -16,13 +16,13 @@ import sqlite3
 from cogito.capability import CapabilityRegistry
 from cogito.capability.executor import ToolExecutor
 from cogito.model.router import ModelRouter
-from cogito.runtime.clock import Clock, ProductionClock
+from cogito.contracts.clock import Clock, ProductionClock
 from cogito.runtime.context import ContextBuilder
 from cogito.runtime.loop import AgentLoop, LoopResult
 from cogito.service.completion import TurnCompletionService
 from cogito.service.dispatcher import Dispatcher
 from cogito.store.model_call_repo import ModelCallRecord, ModelCallRepository
-from cogito.store.time_utils import epoch_ms
+from cogito.contracts.clock import epoch_ms
 
 
 class OrchestratorError(Exception):

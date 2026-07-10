@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from cogito.store.time_utils import epoch_ms
+from cogito.contracts.clock import epoch_ms
 
 # ── 数据类（frozen 不可变）──────────────────────────────────────────────────
 

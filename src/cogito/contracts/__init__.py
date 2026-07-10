@@ -1,5 +1,15 @@
 """Contracts — 跨模块/跨进程契约。"""
 
+from .clock import (
+    EPOCH,
+    Clock,
+    FakeClock,
+    ProductionClock,
+    epoch_ms,
+    from_epoch_ms,
+    iso_to_epoch_ms,
+    now_ms,
+)
 from .envelope import (
     AgentReply,
     AgentRequest,
@@ -24,4 +34,7 @@ __all__ = [
     "ErrorEnvelope", "ErrorCategory",
     "CommandEnvelope",
     "EventEnvelope",
+    # PLAN-09 M2: shared time contract
+    "Clock", "ProductionClock", "FakeClock",
+    "epoch_ms", "from_epoch_ms", "now_ms", "iso_to_epoch_ms", "EPOCH",
 ]

@@ -17,10 +17,10 @@ from typing import Any
 from cogito.domain.events import DomainEvent
 from cogito.domain.message import ContentPart, Message, MessageDirection, MessageRole
 from cogito.domain.turn import RunAttempt, Turn
-from cogito.runtime.clock import Clock, ProductionClock
+from cogito.contracts.clock import Clock, ProductionClock
 from cogito.service.dispatcher import Dispatcher
 from cogito.service.unit_of_work import UnitOfWork
-from cogito.store.time_utils import epoch_ms
+from cogito.contracts.clock import epoch_ms
 
 
 class TurnCompletionService:

@@ -20,7 +20,7 @@ from enum import StrEnum
 
 _LOGGER = logging.getLogger("cogito.task_worker")
 
-from cogito.runtime.clock import Clock, ProductionClock
+from cogito.contracts.clock import Clock, ProductionClock
 from cogito.service.task_dispatcher import TaskDispatcher
 from cogito.service.task_handlers import TaskHandlerContext, TaskHandlerRegistry
 

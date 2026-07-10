@@ -25,7 +25,7 @@ from cogito.model.contracts import (
 )
 from cogito.model.errors import ModelProviderError
 from cogito.model.provider import ModelProvider
-from cogito.store.time_utils import epoch_ms
+from cogito.contracts.clock import epoch_ms
 
 _LOGGER = logging.getLogger(__name__)
 

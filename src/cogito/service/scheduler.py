@@ -22,11 +22,11 @@ from cogito.domain.schedule import (
     next_fire_at,
 )
 from cogito.domain.task import Task, TaskStatus
-from cogito.runtime.clock import Clock, ProductionClock
+from cogito.contracts.clock import Clock, ProductionClock
 from cogito.service.unit_of_work import UnitOfWork
 from cogito.store.schedule_repo import ScheduledFireRepository, ScheduleRepository
 from cogito.store.task_repo import TaskRepository
-from cogito.store.time_utils import epoch_ms
+from cogito.contracts.clock import epoch_ms
 
 _LOGGER = logging.getLogger(__name__)
 

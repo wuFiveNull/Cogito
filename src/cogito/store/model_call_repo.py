@@ -15,7 +15,7 @@ import uuid
 from datetime import UTC, datetime
 
 from cogito.model.contracts import ModelResponse, Usage
-from cogito.store.time_utils import epoch_ms
+from cogito.contracts.clock import epoch_ms
 
 
 class ModelCallRecord:

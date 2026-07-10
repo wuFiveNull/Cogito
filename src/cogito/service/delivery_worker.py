@@ -26,9 +26,9 @@ import uuid
 from datetime import UTC, datetime
 from typing import NamedTuple, Protocol
 
-from cogito.runtime.clock import Clock, ProductionClock
+from cogito.contracts.clock import Clock, ProductionClock
 from cogito.service.unit_of_work import UnitOfWork
-from cogito.store.time_utils import epoch_ms
+from cogito.contracts.clock import epoch_ms
 
 # ── Gateway Protocol ──
 

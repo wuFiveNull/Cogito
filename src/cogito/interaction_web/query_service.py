@@ -25,7 +25,7 @@ from cogito.store.receipt_repo import SideEffectReceiptRepository
 from cogito.store.repositories import TurnRepository
 from cogito.store.schedule_repo import ScheduleRepository
 from cogito.store.task_repo import TaskAttemptRepository, TaskRepository
-from cogito.store.time_utils import epoch_ms
+from cogito.contracts.clock import epoch_ms
 from cogito.store.tool_call_repo import ToolCallRepository
 
 

@@ -23,9 +23,9 @@ import sqlite3
 from datetime import datetime
 
 from cogito.domain.turn import RunAttemptStatus, TurnStatus
-from cogito.runtime.clock import Clock, ProductionClock
+from cogito.contracts.clock import Clock, ProductionClock
 from cogito.service.unit_of_work import UnitOfWork
-from cogito.store.time_utils import epoch_ms
+from cogito.contracts.clock import epoch_ms
 
 _LOG = logging.getLogger("cogito.recovery")
 

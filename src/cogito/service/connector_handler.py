@@ -38,7 +38,7 @@ from cogito.store.connector_repo import (
     ConnectorRawRepository,
     ConnectorRepository,
 )
-from cogito.store.time_utils import epoch_ms
+from cogito.contracts.clock import epoch_ms
 
 _LOGGER = logging.getLogger(__name__)
 

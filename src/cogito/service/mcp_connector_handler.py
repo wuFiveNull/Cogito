@@ -47,7 +47,7 @@ from cogito.store.connector_repo import (
 )
 from cogito.store.mcp_connector_repo import MCPConnectorConfigRepository
 from cogito.store.repositories import OutboxRepository
-from cogito.store.time_utils import now_ms
+from cogito.contracts.clock import now_ms
 
 _LOGGER = logging.getLogger(__name__)
 

@@ -42,11 +42,11 @@ def _persist_config_version(
     try:
         from datetime import datetime
 
+        from cogito.contracts.clock import epoch_ms
         from cogito.store.config_version_repo import (
             ConfigVersionRecord,
             ConfigVersionRepository,
         )
-        from cogito.store.time_utils import epoch_ms
 
         cfg_repo = ConfigVersionRepository(conn)
         if cfg_repo.get_by_hash(config.content_hash) is not None:

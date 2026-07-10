@@ -48,18 +48,6 @@ KNOWN_VIOLATIONS: dict[str, dict[str, str]] = {
         "clear_by": "2026-09-30",
         "owner": "Plan 01 M2 / runtime port extraction",
     },
-    "cogito.store -> cogito.runtime": {
-        "reason": "store layer aware of runtime types (cycle with runtime)",
-        "adr_link": "ADR-000 TBD",
-        "clear_by": "2026-09-30",
-        "owner": "Plan 01 M5 / store cleanup",
-    },
-    "cogito.model -> cogito.store": {
-        "reason": "model adapters convenience-import store repositories",
-        "adr_link": "ADR-000 TBD",
-        "clear_by": "2026-09-30",
-        "owner": "Plan 01 M2 / model port extraction",
-    },
     "cogito.capability -> cogito.store": {
         "reason": "capability layer imports store repos directly",
         "adr_link": "ADR-000 TBD",

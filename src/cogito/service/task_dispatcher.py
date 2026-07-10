@@ -21,10 +21,10 @@ from cogito.domain.task import (
     TaskAttemptStatus,
     TaskStatus,
 )
-from cogito.runtime.clock import Clock, ProductionClock
+from cogito.contracts.clock import Clock, ProductionClock
 from cogito.service.unit_of_work import UnitOfWork
 from cogito.store.task_repo import TaskAttemptRepository, TaskRepository
-from cogito.store.time_utils import epoch_ms, from_epoch_ms
+from cogito.contracts.clock import epoch_ms, from_epoch_ms
 
 TASK_LEASE_TTL_S = 120
 

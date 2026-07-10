@@ -30,8 +30,8 @@ from cogito.domain.principal import (
     PrincipalType,
 )
 from cogito.domain.turn import RunAttempt, RunAttemptStatus, Turn, TurnStatus
-from cogito.runtime.clock import Clock, ProductionClock
-from cogito.store.time_utils import epoch_ms, from_epoch_ms
+from cogito.contracts.clock import Clock, ProductionClock
+from cogito.contracts.clock import epoch_ms, from_epoch_ms
 
 # =============================================================================
 # InboxRepository

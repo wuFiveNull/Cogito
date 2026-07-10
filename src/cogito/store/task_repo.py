@@ -10,7 +10,7 @@ import sqlite3
 from datetime import UTC, datetime
 
 from cogito.domain.task import Task, TaskAttempt, TaskStatus
-from cogito.store.time_utils import epoch_ms, from_epoch_ms
+from cogito.contracts.clock import epoch_ms, from_epoch_ms
 
 
 class TaskRepository:

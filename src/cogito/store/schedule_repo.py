@@ -13,7 +13,7 @@ from cogito.domain.schedule import (
     Schedule,
     ScheduledFire,
 )
-from cogito.store.time_utils import epoch_ms, from_epoch_ms
+from cogito.contracts.clock import epoch_ms, from_epoch_ms
 
 
 class ScheduleRepository:

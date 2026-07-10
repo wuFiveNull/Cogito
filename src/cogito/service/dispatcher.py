@@ -22,9 +22,9 @@ from typing import NamedTuple
 
 from cogito.domain.state_machines import validate_transition_turn
 from cogito.domain.turn import RunAttempt, RunAttemptStatus, Turn, TurnStatus
-from cogito.runtime.clock import Clock, ProductionClock
+from cogito.contracts.clock import Clock, ProductionClock
 from cogito.service.unit_of_work import UnitOfWork
-from cogito.store.time_utils import epoch_ms, from_epoch_ms
+from cogito.contracts.clock import epoch_ms, from_epoch_ms
 
 DEFAULT_LEASE_TTL_S = 120
 

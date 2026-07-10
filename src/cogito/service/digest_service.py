@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 
 from cogito.domain.digest import Digest, DigestStatus
 from cogito.store.digest_repo import DigestRepository
-from cogito.store.time_utils import epoch_ms
+from cogito.contracts.clock import epoch_ms
 
 _LOGGER = logging.getLogger(__name__)
 
