@@ -9,7 +9,7 @@ import json
 import logging
 from typing import Any
 
-from cogito.service.sqlite_delivery_service import GatewayResult
+from cogito.service.gateway_client import GatewayResult
 
 _LOGGER = logging.getLogger("cogito.loopback_gateway")
 
@@ -21,13 +21,21 @@ class LoopbackGatewayClient:
     测试部署时可注入 FakeGateway。
     """
 
-    def __init__(self, channel_manager: Any) -> None:
-        self._manager = channel_manager
+    def __init__(self, channel_gateway: Any) -> None:
+        self._gateway = channel_gateway
+        self._manager = getattr(channel_gateway, "_channel_manager", channel_gateway)
 
     def send(
-        self, target_snapshot: str, content_ref: str, idempotency_key: str,
+        self, target_snapshot: str, content: str, idempotency_key: str,
     ) -> GatewayResult:
-        """解析 target_snapshot, 经 ChannelManager 找 adapter 并 send_request。"""
+        """Send resolved text through the in-process ChannelGateway."""
+        if hasattr(self._gateway, "send_text"):
+            try:
+                return _from_channel_result(self._gateway.send_text(target_snapshot, content))
+            except Exception as exc:
+                _LOGGER.warning("LoopbackGateway send_text failed: %s", exc)
+                return GatewayResult(status="temporary", error_code=type(exc).__name__)
+
         try:
             target = json.loads(target_snapshot)
         except (json.JSONDecodeError, TypeError):
@@ -51,7 +59,7 @@ class LoopbackGatewayClient:
 
         try:
             if hasattr(adapter, "send_request"):
-                result = adapter.send_request(target, content_ref)
+                result = adapter.send_request(target, content)
                 status = getattr(result, "status", "unknown")
                 pmid = getattr(result, "platform_message_id", None)
                 err = getattr(result, "error_code", None)
@@ -67,7 +75,7 @@ class LoopbackGatewayClient:
             if legacy is True:
                 return GatewayResult(
                     status="success",
-                    platform_message_id=f"fake-{content_ref[:12]}",
+                    platform_message_id=f"fake-{content[:12]}",
                 )
             if legacy is False:
                 return GatewayResult(status="permanent", error_code="legacy_false")
@@ -75,6 +83,91 @@ class LoopbackGatewayClient:
         except Exception as e:
             _LOGGER.warning("LoopbackGateway send failed: %s", e)
             return GatewayResult(status="temporary", error_code="exception")
+
+    def start_placeholder(
+        self, target_snapshot: str, content: str, idempotency_key: str,
+    ) -> GatewayResult:
+        return self.send(target_snapshot, content, idempotency_key)
+
+    def edit(
+        self,
+        target_snapshot: str,
+        platform_message_id: str,
+        content: str,
+        operation_seq: int,
+        idempotency_key: str,
+        *,
+        is_final: bool = False,
+    ) -> GatewayResult:
+        if not hasattr(self._gateway, "edit"):
+            return GatewayResult(status="unsupported", error_code="adapter_no_edit_support")
+        try:
+            result = self._gateway.edit(
+                target_snapshot, platform_message_id, content, operation_seq,
+                is_final=is_final,
+            )
+            return _from_channel_result(result)
+        except Exception as exc:
+            _LOGGER.warning("LoopbackGateway edit failed: %s", exc)
+            return GatewayResult(status="unknown", error_code=type(exc).__name__)
+
+    def finish(
+        self,
+        target_snapshot: str,
+        platform_message_id: str,
+        content: str,
+        operation_seq: int,
+        idempotency_key: str,
+    ) -> GatewayResult:
+        return self.edit(
+            target_snapshot, platform_message_id, content, operation_seq,
+            idempotency_key, is_final=True,
+        )
+
+    def delete(
+        self,
+        target_snapshot: str,
+        platform_message_id: str,
+        operation_seq: int,
+        idempotency_key: str,
+    ) -> GatewayResult:
+        if not hasattr(self._gateway, "delete"):
+            return GatewayResult(status="unsupported", error_code="adapter_no_delete_support")
+        try:
+            self._gateway.delete(target_snapshot, platform_message_id)
+            return GatewayResult(status="success", platform_message_id=platform_message_id)
+        except Exception as exc:
+            _LOGGER.warning("LoopbackGateway delete failed: %s", exc)
+            return GatewayResult(status="unknown", error_code=type(exc).__name__)
+
+    def reconcile(
+        self,
+        target_snapshot: str,
+        platform_message_id: str | None,
+        idempotency_key: str,
+    ) -> GatewayResult:
+        # Most legacy adapters do not expose platform lookup. A known platform
+        # id is durable evidence; otherwise remain unknown for manual review.
+        if platform_message_id:
+            return GatewayResult(status="success", platform_message_id=platform_message_id)
+        return GatewayResult(status="unknown", error_code="reconcile_unsupported")
+
+    def health(self) -> dict[str, Any]:
+        adapters = getattr(self._manager, "_adapters", {})
+        instances = []
+        for name, adapter in adapters.items():
+            status = str(getattr(adapter, "status", "unknown"))
+            instances.append({
+                "instance_id": getattr(adapter, "adapter_id", name),
+                "channel_type": getattr(adapter, "channel_type", name),
+                "connected": status.endswith("running"),
+                "auth_ok": status not in ("error", "AdapterStatus.error"),
+                "rate_limited": False,
+            })
+        return {
+            "status": "healthy" if all(i["connected"] for i in instances) else "degraded",
+            "instances": instances,
+        }
 
 
 def _map_adapter_status(status: str, error_code: str | None) -> str:
@@ -99,3 +192,15 @@ def _map_adapter_status(status: str, error_code: str | None) -> str:
     if error_code in ("too_large", "payload_too_large"):
         return "too_large"
     return status if status else "unknown"
+
+
+def _from_channel_result(result: Any) -> GatewayResult:
+    return GatewayResult(
+        status=_map_adapter_status(
+            str(getattr(result, "status", "unknown")),
+            getattr(result, "error_code", None),
+        ),
+        platform_message_id=getattr(result, "platform_message_id", None),
+        error_code=getattr(result, "error_code", None),
+        retry_after_seconds=getattr(result, "retry_after_seconds", None),
+    )

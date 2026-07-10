@@ -16,6 +16,8 @@
     {"file":"00_guides/00_文档索引与Agent阅读指南.md","doc_id":"DOCSET-INDEX","title":"文档索引与 Agent 阅读指南","version":"2.0","status":"active","layer":"guide","domain":"documentation","authority":"document-index"},
     {"file":"00_guides/01_术语表.md","doc_id":"GLOSSARY","title":"统一术语表","version":"1.0","status":"active","layer":"guide","domain":"documentation","authority":"shared-vocabulary"},
     {"file":"00_guides/02_架构决策记录指南.md","doc_id":"ADR-GUIDE","title":"架构决策记录指南","version":"1.0","status":"active","layer":"guide","domain":"documentation","authority":"decision-process"},
+    {"file":"00_guides/adr/ADR-001_Runtime与Application边界.md","doc_id":"ADR-001","title":"Runtime 与 Application 组合边界","version":"1.0","status":"accepted","layer":"architecture-decision","domain":"system","authority":"accepted-decision"},
+    {"file":"00_guides/adr/ADR-002_ChannelGateway进程边界.md","doc_id":"ADR-002","title":"Channel Gateway 进程与协议边界","version":"1.0","status":"accepted","layer":"architecture-decision","domain":"interaction","authority":"accepted-decision"},
     {"file":"01_architecture/00_总体架构设计.md","doc_id":"ARCH-OVERVIEW","title":"主动式个人 Agent 总体架构设计","version":"1.2","status":"active","layer":"architecture","domain":"system","authority":"system-overview"},
     {"file":"01_architecture/01_核心领域模型与数据契约.md","doc_id":"DOMAIN-CONTRACTS","title":"核心领域模型与数据契约","version":"1.2","status":"active","layer":"architecture","domain":"system","authority":"domain-contracts"},
     {"file":"01_architecture/02_全局不变量.md","doc_id":"GLOBAL-INVARIANTS","title":"全局不变量","version":"1.1","status":"active","layer":"architecture","domain":"system","authority":"global-invariants"},
@@ -58,6 +60,7 @@
     {"file":"plan/06_存储配置部署与数据治理下一步开发计划.md","plan_id":"PLAN-06","status":"completed","version":"1.0","covers":["Plan 06 M0-M10"]},
     {"file":"plan/07_剩余任务收尾计划.md","plan_id":"PLAN-07","status":"completed","version":"1.0","covers":["Plan 04 M2","Plan 05 M2","Plan 06 M2/M5/M6"]},
     {"file":"plan/09_架构收敛与可发布闭环开发计划.md","plan_id":"PLAN-09","status":"completed","version":"1.0","covers":["Plan 09 M0-M2/M4a"]},
-    {"file":"plan/10_残余违规清零与可发布闭环开发计划.md","plan_id":"PLAN-10","status":"completed","version":"1.0","covers":["Plan 10 M0-M6 (待定 ADR 签核/M7 Legacy Adapter)"]}
+    {"file":"plan/10_残余违规清零与可发布闭环开发计划.md","plan_id":"PLAN-10","status":"completed","version":"1.0","covers":["Plan 10 M0-M6 (由 PLAN-11 修正 Delivery/Gateway/Plugin 收口)"]},
+    {"file":"plan/11_DeliveryGatewayPlugin与入站契约收口计划.md","plan_id":"PLAN-11","status":"in_progress","version":"1.0","covers":["Plan 11 M1-M4"]}
   ]
 }

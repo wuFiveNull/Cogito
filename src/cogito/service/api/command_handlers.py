@@ -345,12 +345,18 @@ def pause_connector(payload: PauseConnectorPayload, deps: CommandDeps = Depends(
 
 @router.post("/disable-plugin", response_model=CommandResponse)
 def disable_plugin(payload: DisablePluginPayload, deps: CommandDeps = Depends(get_command_deps)) -> CommandResponse:
-    """禁用插件：写入审计 (运行时配置修改由 config 管理，仅记录意图)。"""
+    """Disable through PluginRuntime, the unique plugin-state writer."""
+    runtime = getattr(deps.runtime, "plugin_runtime", None)
+    if runtime is None:
+        raise HTTPException(status_code=503, detail="Plugin Runtime is not available")
+    state = runtime.disable(payload.name)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"plugin {payload.name} not found")
     write_audit(
         deps.conn, actor_id=ACTOR, action="disable-plugin",
         target_type="plugin", target_id=payload.name,
     )
-    return _ok("disable-plugin", payload.name)
+    return _ok("disable-plugin", payload.name, status=state.status)
 
 
 # ── replay-delivery ───────────────────────────────────────────

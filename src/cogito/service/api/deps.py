@@ -35,6 +35,7 @@ class CommandDeps:
     conn: sqlite3.Connection
     config: Config
     recovery_counts: dict[str, int]
+    runtime: Any | None = None
 
 
 def get_conn_provider(request: Request) -> ConnProvider:
@@ -59,7 +60,10 @@ def get_command_deps(request: Request) -> Iterator[CommandDeps]:
     provider = get_conn_provider(request)
     conn = provider.open_conn()
     deps = CommandDeps(
-        conn=conn, config=provider.config, recovery_counts=provider.recovery_counts,
+        conn=conn,
+        config=provider.config,
+        recovery_counts=provider.recovery_counts,
+        runtime=getattr(request.app.state, "runtime", None),
     )
     try:
         yield deps

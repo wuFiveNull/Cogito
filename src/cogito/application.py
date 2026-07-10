@@ -100,12 +100,19 @@ class RuntimeApplication:
         self._ready = False
         self._recovery_counts: dict[str, int] = {}
 
+        # MCP Manager —— run_worker() 填充；提前声明避免 close() 属性缺失
+        self.mcp_manager: Any = None
+
         # PR 2: 后台组件（start_background() 创建）
         self.outbox_worker: Any = None
         self.delivery_worker: Any = None
         self.task_worker: Any = None
         self.channel_manager: Any = None
         self.channel_gateway: Any = None
+        self.local_gateway_client: Any = None
+        self.gateway_client: Any = None
+        self.delivery_service: Any = None
+        self.plugin_runtime: Any = None
 
         # Web Dashboard 自带的内置 Channel（浏览器 WebSocket）
         self.web_channel_adapter: Any = None
@@ -223,6 +230,7 @@ class RuntimeApplication:
         app._wakeup_event = wakeup_event
         app._recovery_counts = recovery_counts
 
+        app.build_plugin_runtime()
         # 构建 Channel 组件（Manager + Gateway），QQ 等渠道在 run_worker 中启动
         app.build_channel_components()
         # Plan 05 M4：把 Channel 组件注入 AgentRunner，使其能走流式投递分支
@@ -230,6 +238,29 @@ class RuntimeApplication:
         app.runner.channel_manager = app.channel_manager
 
         return app
+
+    def build_plugin_runtime(self) -> None:
+        """Build the unique Plugin Runtime and optionally discover/start plugins."""
+        from cogito.capability.plugin_runtime import SqlitePluginRuntime
+
+        cfg = self.config.capability.plugins
+        self.plugin_runtime = SqlitePluginRuntime(
+            self.conn,
+            builtin_paths=cfg.builtin_paths,
+            granted_permissions=set(cfg.granted_permissions),
+        )
+        if not cfg.enabled:
+            return
+        for manifest in self.plugin_runtime.discover(*cfg.project_paths):
+            state = self.plugin_runtime.get(manifest.plugin_id)
+            if state is None:
+                state = self.plugin_runtime.install(manifest)
+            if not cfg.auto_start:
+                continue
+            if state.status in ("installed", "configured", "disabled", "degraded", "stopped"):
+                state = self.plugin_runtime.enable(manifest.plugin_id) or state
+            if state.status == "enabled":
+                self.plugin_runtime.start(manifest.plugin_id)
 
     # ── PR 2: Channel / Gateway 组装 ───────────────────────────────────────
 
@@ -241,10 +272,17 @@ class RuntimeApplication:
         from cogito.channel.manager import ChannelManager
         from cogito.inbound.dispatcher import InboundDispatcher
         from cogito.service.channel_gateway import ChannelGateway
+        from cogito.service.http_gateway_client import HttpGatewayClient
+        from cogito.service.loopback_gateway_client import LoopbackGatewayClient
 
         inbound_dispatcher = InboundDispatcher(self.inbound)
         self.channel_manager = ChannelManager(inbound_dispatcher)
         self.channel_gateway = ChannelGateway(self.conn, self.channel_manager)
+        self.local_gateway_client = LoopbackGatewayClient(self.channel_gateway)
+        gateway_url = self.config.channel.gateway_url.strip()
+        self.gateway_client = (
+            HttpGatewayClient(gateway_url) if gateway_url else self.local_gateway_client
+        )
 
     async def _start_enabled_channels(self) -> None:
         """启动配置中 enabled 的 Channel Adapter。
@@ -282,9 +320,9 @@ class RuntimeApplication:
 
     def build_workers(self) -> None:
         """构建 OutboxWorker / DeliveryWorker / TaskWorker / EventConsumers。"""
-        from cogito.service.delivery_worker import DeliveryWorker
         from cogito.service.event_consumers import build_default_registry
         from cogito.service.outbox_worker import OutboxWorker
+        from cogito.service.sqlite_delivery_service import SqliteDeliveryService
 
         self.outbox_worker = OutboxWorker(
             self.conn,
@@ -293,11 +331,16 @@ class RuntimeApplication:
         self.event_consumer_registry = build_default_registry()
         if self.channel_gateway is None:
             self.build_channel_components()
-        self.delivery_worker = DeliveryWorker(
+        elif self.gateway_client is None:
+            from cogito.service.loopback_gateway_client import LoopbackGatewayClient
+            self.local_gateway_client = LoopbackGatewayClient(self.channel_gateway)
+            self.gateway_client = self.local_gateway_client
+        self.delivery_service = SqliteDeliveryService(
             conn=self.conn,
-            gateway=self.channel_gateway,
+            gateway=self.gateway_client,
             lease_ttl_s=self.config.worker.delivery_lease_ttl_seconds,
         )
+        self.delivery_worker = self.delivery_service.worker()
 
     # ── read-only accessors ────────────────────────────────────────────────
 
@@ -501,15 +544,11 @@ class RuntimeApplication:
         # 启动启用的 Channel Adapter（如 QQ）
         await self._start_enabled_channels()
 
-        # Concrete DeliveryService 实现（主动投递闭环 —— M8）
-        from cogito.service.proactive_delivery_service import SqliteDeliveryService
-        proactive_delivery_svc = SqliteDeliveryService(self.conn)
-
         task_handler_ctx = TaskHandlerContext(
             connection_factory=lambda p=self.config.resolve_db_path(): get_connection(p),
             workspace_path=self.config.workspace_path,
             mcp_manager=self.mcp_manager,
-            delivery_service=proactive_delivery_svc,
+            delivery_service=self.delivery_service,
             proactive_config=self.config.capability.proactive,
         )
         task_registry = _build_registry(task_handler_ctx)
@@ -640,6 +679,16 @@ class RuntimeApplication:
                     asyncio.run(self.mcp_manager.stop_all())
         except Exception as e:
             logger.warning("Error stopping MCP manager: %s", e)
+        try:
+            if self.plugin_runtime is not None:
+                self.plugin_runtime.close()
+        except Exception as e:
+            logger.warning("Error closing plugin runtime: %s", e)
+        try:
+            if self.gateway_client is not None and hasattr(self.gateway_client, "close"):
+                self.gateway_client.close()
+        except Exception as e:
+            logger.warning("Error closing gateway client: %s", e)
         try:
             self.conn.close()
             logger.info("Application closed.")

@@ -15,7 +15,7 @@ import json
 import sqlite3
 import uuid
 from datetime import UTC, datetime
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 from cogito.contracts.clock import Clock, epoch_ms
 from cogito.service.delivery_service import (
@@ -30,46 +30,7 @@ from cogito.service.delivery_worker import (
     DeliveryLease,
     DeliveryWorker,
 )
-
-# ── GatewayClient Protocol ─────────────────────────────────────────────
-
-
-class GatewayResult:
-    """平台发送结果。"""
-
-    __slots__ = (
-        "status", "platform_message_id", "error_code",
-        "retry_after_seconds",
-    )
-
-    def __init__(
-        self,
-        status: str,
-        *,
-        platform_message_id: str | None = None,
-        error_code: str | None = None,
-        retry_after_seconds: float | None = None,
-    ) -> None:
-        self.status = status
-        self.platform_message_id = platform_message_id
-        self.error_code = error_code
-        self.retry_after_seconds = retry_after_seconds
-
-
-@runtime_checkable
-class GatewayClient(Protocol):
-    """投递通道抽象（service 层只经此访问平台）。
-
-    部署形态：
-      - LoopbackGatewayClient: 合并进程，复用 ChannelManager + Adapter
-      - HttpGatewayClient: 分离 Gateway 进程，走 HTTP
-    """
-
-    def send(
-        self, target_snapshot: str, content_ref: str, idempotency_key: str,
-    ) -> GatewayResult:
-        """发送一条消息。"""
-        ...
+from cogito.service.gateway_client import GatewayClient, GatewayResult
 
 
 def _now_ms(clock: Clock | None = None) -> int:
@@ -89,19 +50,19 @@ class SqliteDeliveryService(DeliveryService):  # type: ignore[override]
     def __init__(
         self,
         conn: sqlite3.Connection,
-        gateway: Any,
+        gateway: Any | None = None,
         *,
         clock: Clock | None = None,
         lease_ttl_s: int = 120,
     ) -> None:
         self._conn = conn
         self._clock = clock
-        self._gateway = gateway
-        # DeliveryWorker 只认 Gateway Protocol (send -> bool|None)；
-        # 通过此 adapter 把 GatewayClient 的 bool|None 桥接回去
+        self._gateway = gateway or _UnavailableGateway()
+        # DeliveryWorker consumes ChannelSendResult.  This adapter resolves the
+        # Core content_ref before crossing the Gateway boundary.
         self._worker = DeliveryWorker(
             conn=conn,
-            gateway=_LegacyGateway(send_worker=self),
+            gateway=_DeliveryGatewayAdapter(service=self),
             lease_ttl_s=lease_ttl_s,
             clock=clock,
         )
@@ -182,9 +143,7 @@ class SqliteDeliveryService(DeliveryService):  # type: ignore[override]
             row = self._conn.execute(
                 "SELECT status FROM deliveries WHERE delivery_id=?", (delivery_id,),
             ).fetchone()
-            if row is None or row["status"] not in (
-                "retry_scheduled", "failed", "unknown",
-            ):
+            if row is None or row["status"] != "retry_scheduled":
                 return
             self._conn.execute(
                 "UPDATE deliveries SET status='pending', next_attempt_at=?, "
@@ -198,6 +157,41 @@ class SqliteDeliveryService(DeliveryService):  # type: ignore[override]
         self, delivery_id: str, platform_message_id: str | None = None,
     ) -> ReconcileResult:
         now = _now_ms(self._clock)
+        initial = self._conn.execute(
+            "SELECT status, target_snapshot, idempotency_key FROM deliveries "
+            "WHERE delivery_id=?", (delivery_id,),
+        ).fetchone()
+        if initial is None:
+            return ReconcileResult(delivery_id=delivery_id, status="still_unknown")
+        if initial["status"] == "sent":
+            return ReconcileResult(
+                delivery_id=delivery_id, status="sent",
+                platform_message_id=platform_message_id,
+            )
+        if initial["status"] != "unknown":
+            return ReconcileResult(delivery_id=delivery_id, status="still_unknown")
+
+        # External lookup is deliberately outside the database transaction.
+        gateway_result = None
+        if hasattr(self._gateway, "reconcile"):
+            try:
+                gateway_result = self._gateway.reconcile(
+                    initial["target_snapshot"], platform_message_id,
+                    initial["idempotency_key"] or f"reconcile:{delivery_id}",
+                )
+            except Exception:
+                gateway_result = GatewayResult(status="unknown", error_code="gateway_exception")
+        if gateway_result is not None:
+            if gateway_result.status not in ("success", "sent"):
+                return ReconcileResult(
+                    delivery_id=delivery_id,
+                    status="failed" if gateway_result.status == "permanent" else "still_unknown",
+                    platform_message_id=gateway_result.platform_message_id,
+                )
+            platform_message_id = gateway_result.platform_message_id or platform_message_id
+        elif not platform_message_id:
+            return ReconcileResult(delivery_id=delivery_id, status="still_unknown")
+
         with _uow(self._conn) as uow:
             row = self._conn.execute(
                 "SELECT status, lease_version FROM deliveries WHERE delivery_id=?",
@@ -206,11 +200,6 @@ class SqliteDeliveryService(DeliveryService):  # type: ignore[override]
             if row is None:
                 return ReconcileResult(
                     delivery_id=delivery_id, status="still_unknown",
-                )
-            if row["status"] == "sent":
-                return ReconcileResult(
-                    delivery_id=delivery_id, status="sent",
-                    platform_message_id=platform_message_id,
                 )
             if row["status"] != "unknown":
                 return ReconcileResult(
@@ -271,43 +260,50 @@ def _uow(conn: sqlite3.Connection) -> Any:
     return UnitOfWork(conn)
 
 
-class _LegacyGateway:
-    """把 bool|None () 形 GatewayClient 结果适配回 DeliveryWorker 期望的 bool|None。
+class _DeliveryGatewayAdapter:
+    """Adapt GatewayClient results to DeliveryWorker's structured contract."""
 
-    DeliveryWorker 按 send() 的 bool|None 决定 confirmed/temporary/unknown；
-    此 adapter 把 GatewayClient 的 GatewayResult.status 映射回 bool|None:
-      success                                            → True
-      permanent / auth_error / route_expired /
-      unsupported / too_large                            → False
-      temporary / rate_limited / unknown                 → None
-    """
+    def __init__(self, service: SqliteDeliveryService) -> None:
+        self._svc = service
 
-    _PERMANENT_STATUSES = frozenset({
-        "permanent", "auth_error", "route_expired", "unsupported", "too_large",
-    })
+    def send_request(self, target: str, content_ref: str) -> Any:
+        from cogito.channel.base import ChannelSendResult
+        from cogito.service.gateway_client import gateway_status_to_channel
 
-    def __init__(self, send_worker: SqliteDeliveryService) -> None:
-        self._svc = send_worker
-
-    def send(self, target: str, content_ref: str) -> bool | None:
+        content = self._resolve_content(content_ref)
+        idem = f"delivery:{target}:{content_ref}"
         try:
-            client = self._svc._gateway
-            idem = f"{target}:{content_ref}"
-            if isinstance(client, GatewayClient) or hasattr(client, "send"):
-                result = client.send(target, content_ref, idem)
-                if isinstance(result, GatewayResult):
-                    if result.status == "success":
-                        return True
-                    if result.status in self._PERMANENT_STATUSES:
-                        return False
-                    return None
-                if isinstance(result, (tuple, list)) and result:
-                    status = str(result[0])
-                    if status == "success":
-                        return True
-                    if status in self._PERMANENT_STATUSES:
-                        return False
-                    return None
-        except Exception:
-            pass
-        return None
+            result = self._svc._gateway.send(target, content, idem)
+        except Exception as exc:
+            return ChannelSendResult(status="unknown", error_code=type(exc).__name__)
+        return ChannelSendResult(
+            status=gateway_status_to_channel(result.status),
+            platform_message_id=result.platform_message_id,
+            error_code=result.error_code,
+            retry_after_seconds=result.retry_after_seconds,
+        )
+
+    def _resolve_content(self, content_ref: str) -> str:
+        if not content_ref:
+            return ""
+        row = self._svc._conn.execute(
+            "SELECT inline_data FROM content_parts "
+            "WHERE message_id=? AND content_type='text' ORDER BY rowid LIMIT 1",
+            (content_ref,),
+        ).fetchone()
+        # Scheduled/proactive callers may already provide literal or payload
+        # references. Preserve the value if no Message row exists.
+        return str(row[0]) if row is not None else content_ref
+
+
+class _UnavailableGateway:
+    """Safe default used by enqueue-only maintenance and migration paths."""
+
+    def send(self, target_snapshot: str, content: str, idempotency_key: str) -> GatewayResult:
+        return GatewayResult(status="unknown", error_code="gateway_not_configured")
+
+
+# Compatibility re-exports for callers that imported the Port from this module.
+__all__ = [
+    "GatewayClient", "GatewayResult", "SqliteDeliveryService", "_uow",
+]

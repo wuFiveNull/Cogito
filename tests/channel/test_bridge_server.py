@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from cogito.channel.bridge_server import BridgeServer
 from cogito.contracts.bridge_dto import DeliveryOperationV0
+from cogito.service.gateway_client import GatewayResult
 from cogito.store.migration import migrate
 
 
@@ -23,9 +24,37 @@ def bridge_server(conn):
     async def fake_handler(msg):
         return f"msg-{msg.event_id}"
 
+    class FakeDeliveryHandler:
+        def send(self, target, content, idempotency_key):
+            return GatewayResult(status="success", platform_message_id="pm-1")
+
+        def start_placeholder(self, target, content, idempotency_key):
+            return GatewayResult(status="success", platform_message_id="pm-placeholder")
+
+        def edit(self, target, platform_message_id, content, operation_seq,
+                 idempotency_key, *, is_final=False):
+            return GatewayResult(status="success", platform_message_id=platform_message_id)
+
+        def finish(self, target, platform_message_id, content, operation_seq,
+                   idempotency_key):
+            return GatewayResult(status="success", platform_message_id=platform_message_id)
+
+        def delete(self, target, platform_message_id, operation_seq, idempotency_key):
+            return GatewayResult(status="success", platform_message_id=platform_message_id)
+
+        def reconcile(self, target, platform_message_id, idempotency_key):
+            return GatewayResult(
+                status="success" if platform_message_id else "unknown",
+                platform_message_id=platform_message_id,
+            )
+
+        def health(self):
+            return {"status": "healthy", "instances": []}
+
     server = BridgeServer(
         conn=conn,
         inbound_handler=fake_handler,
+        delivery_handler=FakeDeliveryHandler(),
     )
     # 注入健康状态
     server.update_health(
@@ -102,7 +131,7 @@ class TestDelivery:
             "content": [{"type": "text", "data": "hello"}],
         })
         assert resp.status_code == 200
-        assert resp.json()["status"] == "accepted"
+        assert resp.json()["status"] == "success"
         assert resp.json()["action"] == "send"
 
     def test_delivery_placeholder(self, client):
@@ -115,6 +144,23 @@ class TestDelivery:
         })
         assert resp.status_code == 200
         assert resp.json()["action"] == "start_placeholder"
+
+    def test_delivery_operation_is_durable_idempotent(self, client):
+        payload = {
+            "schema_version": "1",
+            "operation_id": "op-stable-1",
+            "idempotency_key": "op-stable-1",
+            "delivery_id": "del-3",
+            "attempt_id": "att-3",
+            "action": "send",
+            "content": [{"type": "text", "data": "hello"}],
+        }
+        first = client.post("/bridge/v1/delivery/send", json=payload)
+        second = client.post("/bridge/v1/delivery/send", json=payload)
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert second.json()["duplicate"] is True
+        assert second.json()["platform_message_id"] == first.json()["platform_message_id"]
 
     def test_delivery_unknown_action_rejected(self, client):
         resp = client.post("/bridge/v1/delivery/send", json={

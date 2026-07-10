@@ -39,6 +39,10 @@ class TestNewTablesExist:
         "traces",
         "spans",
         "config_versions",
+        "gateway_operation_receipts",
+        "plugins",
+        "plugin_snapshots",
+        "plugin_runtime_audit",
     ]
 
     def test_new_tables_exist(self, conn):

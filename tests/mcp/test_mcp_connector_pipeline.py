@@ -92,6 +92,7 @@ class _MCPPersistentRunner:
 
 
 import threading
+import sys
 _mcp_loop_runner = _MCPPersistentRunner()
 
 
@@ -114,7 +115,7 @@ def fake_server_path() -> str:
 def fake_mcp_config(fake_server_path: str) -> MCPServerConfig:
     return MCPServerConfig(
         name="fake-data-server",
-        command="C:/Users/wu/miniconda3/envs/cogito/python.exe",
+        command=sys.executable,
         args=[fake_server_path],
         transport="stdio",
         toolset="connector",

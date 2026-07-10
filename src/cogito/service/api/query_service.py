@@ -10,6 +10,7 @@ handler 绝不直接操作数据库；所有数据访问都经由此服务与现
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Any
 
@@ -658,19 +659,41 @@ class QueryService:
 
         return issues
 
-    # ── plugins (capability mcp servers config 快照) ───────────
+    # ── plugins (durable Plugin Runtime state + MCP config) ───────────
 
     def list_plugins(self) -> dict[str, Any]:
+        rows = self._conn.execute(
+            "SELECT plugin_id, version, status, source, isolation, permissions, "
+            "error, fail_count, started_at FROM plugins ORDER BY plugin_id"
+        ).fetchall()
+        plugins = [
+            {
+                "name": row["plugin_id"],
+                "version": row["version"],
+                "status": row["status"],
+                "source": row["source"],
+                "isolation": row["isolation"],
+                "permissions": json.loads(row["permissions"] or "[]"),
+                "error": row["error"],
+                "fail_count": row["fail_count"],
+                "started_at": row["started_at"],
+                "kind": "plugin",
+                "enabled": row["status"] not in ("disabled", "degraded", "stopped"),
+            }
+            for row in rows
+        ]
         servers = [
             {
                 "name": s.name,
                 "transport": s.transport,
                 "enabled": s.enabled,
                 "toolset": s.toolset,
+                "kind": "mcp",
             }
             for s in self._config.capability.mcp_servers
         ]
-        return {"items": servers, "count": len(servers)}
+        items = plugins + servers
+        return {"items": items, "count": len(items)}
 
     # ── helpers ──────────────────────────────────────────────────
 

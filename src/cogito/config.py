@@ -684,10 +684,32 @@ class ProactiveConfig:
 
 
 @dataclass
+class PluginConfig:
+    """Plugin discovery, grants, and startup policy."""
+
+    enabled: bool = False
+    builtin_paths: list[str] = field(default_factory=list)
+    project_paths: list[str] = field(default_factory=list)
+    granted_permissions: list[str] = field(default_factory=list)
+    auto_start: bool = False
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> PluginConfig:
+        return cls(
+            enabled=bool(raw.get("enabled", False)),
+            builtin_paths=[str(v) for v in raw.get("builtin_paths", [])],
+            project_paths=[str(v) for v in raw.get("project_paths", [])],
+            granted_permissions=[str(v) for v in raw.get("granted_permissions", [])],
+            auto_start=bool(raw.get("auto_start", False)),
+        )
+
+
+@dataclass
 class CapabilityConfig:
     """Capability 配置（MCP servers + proactive 等）。"""
     mcp_servers: list[MCPServerEntry] = field(default_factory=list)
     proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
+    plugins: PluginConfig = field(default_factory=PluginConfig)
 
     @classmethod
     def _from_raw(cls, raw: dict[str, Any]) -> CapabilityConfig:
@@ -709,7 +731,13 @@ class CapabilityConfig:
             if isinstance(proactive_raw, dict)
             else ProactiveConfig()
         )
-        return cls(mcp_servers=servers, proactive=proactive)
+        plugins_raw = raw.get("plugins")
+        plugins = (
+            PluginConfig._from_raw(plugins_raw)
+            if isinstance(plugins_raw, dict)
+            else PluginConfig()
+        )
+        return cls(mcp_servers=servers, proactive=proactive, plugins=plugins)
 
 
 
@@ -985,6 +1013,9 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
         top_level_proactive = resolved.get("proactive")
         if isinstance(top_level_proactive, dict) and "proactive" not in capability_raw:
             capability_raw["proactive"] = top_level_proactive
+        top_level_plugins = resolved.get("plugins")
+        if isinstance(top_level_plugins, dict) and "plugins" not in capability_raw:
+            capability_raw["plugins"] = top_level_plugins
         capability = CapabilityConfig._from_raw(capability_raw)
 
         embedding_raw = resolved.get("embedding", {})

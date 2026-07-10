@@ -17,49 +17,9 @@ import time
 import uuid
 from typing import Any
 
-from cogito.domain.delivery import Delivery, DeliveryStatus
-from cogito.service.delivery_service import DeliveryRequest, DeliveryService
-from cogito.store.repositories import DeliveryRepository
+from cogito.service.sqlite_delivery_service import SqliteDeliveryService
 
 _LOGGER = logging.getLogger(__name__)
-
-
-class SqliteDeliveryService(DeliveryService):
-    """DeliveryService 的 SQLite 实现 —— 非流式 pending delivery。"""
-
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self._conn = conn
-
-    async def enqueue(self, request: DeliveryRequest) -> Any:
-        conn = self._conn
-        conn.row_factory = sqlite3.Row
-        delivery = Delivery(
-            delivery_id=f"dev-{uuid.uuid4().hex[:16]}",
-            target_snapshot=request.target,
-            content_ref=request.content_ref,
-            status=DeliveryStatus.pending,
-            idempotency_key=request.idempotency_key or "",
-            created_at=None,
-        )
-        repo = DeliveryRepository(conn)
-        repo.insert(delivery)
-        conn.commit()
-        return delivery.delivery_id
-
-    async def cancel(self, delivery_id: str) -> None:
-        self._conn.execute(
-            "UPDATE deliveries SET status='cancelled' WHERE delivery_id=?",
-            (delivery_id,),
-        )
-        self._conn.commit()
-
-    async def retry(self, delivery_id: str) -> None:
-        self._conn.execute(
-            "UPDATE deliveries SET status='pending', next_attempt_at=NULL "
-            "WHERE delivery_id=?",
-            (delivery_id,),
-        )
-        self._conn.commit()
 
 
 def create_scheduled_request(
@@ -147,8 +107,9 @@ def prepare_delivery_from_request(
 def mark_request_converted(
     conn: sqlite3.Connection,
     request_id: str,
-    delivery_id: str,
+    delivery_id: Any,
 ) -> None:
+    delivery_id = getattr(delivery_id, "delivery_id", delivery_id)
     now = int(time.time() * 1000)
     conn.execute(
         "UPDATE scheduled_delivery_requests "
@@ -176,3 +137,13 @@ def find_due_requests(conn: sqlite3.Connection, *, limit: int = 10) -> list[str]
         (now, now, limit),
     ).fetchall()
     return [r[0] for r in rows]
+
+
+__all__ = [
+    "SqliteDeliveryService",
+    "create_scheduled_request",
+    "prepare_delivery_from_request",
+    "mark_request_converted",
+    "mark_request_expired",
+    "find_due_requests",
+]

@@ -40,7 +40,10 @@ class InboundDispatcher:
                 "inline_data": c.data,
                 "mime": c.mime,
                 "name": c.name,
-                "size": c.size,
+                # Older adapters may still pass None; normalize at the contract
+                # boundary so database defaults are never bypassed by an
+                # explicit SQL NULL.
+                "size": int(c.size or 0),
                 "trust_label": "unverified",
             }
             for c in inbound.content

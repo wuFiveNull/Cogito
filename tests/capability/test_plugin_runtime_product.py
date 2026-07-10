@@ -20,6 +20,7 @@ import pytest
 
 from cogito.capability.plugin_runtime import (
     CircuitBreaker,
+    PluginManifest,
     SqlitePluginRuntime,
 )
 from cogito.service.plugin_runtime import PluginManifest, PluginState
@@ -204,3 +205,68 @@ class TestConflict:
         # 仅一条记录
         rows = conn.execute("SELECT COUNT(*) FROM plugins WHERE plugin_id='dup'").fetchone()[0]
         assert rows == 1
+
+
+def _runnable_manifest(tmp_path: Path, *, permissions: tuple[str, ...] = ()) -> PluginManifest:
+    plugin_dir = tmp_path / "runnable_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "__init__.py").write_text(
+        "def register():\n    return 'ok'\n", encoding="utf-8",
+    )
+    return PluginManifest(
+        plugin_id="runnable-plugin",
+        version="1.0",
+        api_version="1",
+        permissions=permissions,
+        entry_point="runnable_plugin:register",
+        subprocess=True,
+        source="project",
+        source_path=str(plugin_dir),
+    )
+
+
+class TestRuntimeLifecycle:
+    def test_subprocess_start_health_stop(self, conn, tmp_path: Path) -> None:
+        runtime = SqlitePluginRuntime(conn)
+        runtime.install(_runnable_manifest(tmp_path))
+        runtime.enable("runnable-plugin")
+        state = runtime.start("runnable-plugin")
+        assert state is not None and state.status == "running"
+        assert state.process_id is not None
+        assert runtime.health("runnable-plugin")["status"] == "running"
+        stopped = runtime.stop("runnable-plugin")
+        assert stopped is not None and stopped.status == "stopped"
+        assert runtime.health("runnable-plugin")["status"] == "stopped"
+        runtime.close()
+
+    def test_permission_denial_is_degraded_and_audited(self, conn, tmp_path: Path) -> None:
+        runtime = SqlitePluginRuntime(conn)
+        runtime.install(_runnable_manifest(tmp_path, permissions=("filesystem.read",)))
+        runtime.enable("runnable-plugin")
+        state = runtime.start("runnable-plugin")
+        assert state is not None and state.status == "degraded"
+        row = conn.execute(
+            "SELECT outcome, safe_detail FROM plugin_runtime_audit "
+            "WHERE plugin_id='runnable-plugin' AND action='start' "
+            "ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        assert row["outcome"] == "denied"
+        assert row["safe_detail"] == "PluginPermissionError"
+
+    def test_explicit_permission_grant_allows_start(self, conn, tmp_path: Path) -> None:
+        runtime = SqlitePluginRuntime(
+            conn, granted_permissions={"filesystem.read"},
+        )
+        runtime.install(_runnable_manifest(tmp_path, permissions=("filesystem.read",)))
+        runtime.enable("runnable-plugin")
+        state = runtime.start("runnable-plugin")
+        assert state is not None and state.status == "running"
+        runtime.close()
+
+    def test_upgrade_snapshot_and_rollback(self, conn) -> None:
+        runtime = SqlitePluginRuntime(conn)
+        runtime.install(PluginManifest(plugin_id="upgrade", version="1.0"))
+        runtime.install(PluginManifest(plugin_id="upgrade", version="2.0"))
+        restored = runtime.rollback("upgrade")
+        assert restored is not None and restored.manifest is not None
+        assert restored.manifest.version == "1.0"

@@ -22,9 +22,11 @@
 from __future__ import annotations
 
 import logging
+import json
 import sqlite3
+import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -63,6 +65,7 @@ class BridgeServer:
 
     conn: sqlite3.Connection
     inbound_handler: Any  # Callable[[InboundMessage], Awaitable[str]] — 接受 DTO 返回 message_id
+    delivery_handler: Any | None = None  # GatewayClient; never a DeliveryService
     instance_health: dict[str, InstanceHealth] = field(default_factory=dict)
 
     def create_router(self) -> APIRouter:
@@ -124,6 +127,10 @@ class BridgeServer:
         @router.get("/health")
         def get_health() -> dict[str, Any]:
             """健康接口：报告每个 Instance 的连接/认证/限流/最后事件时间。"""
+            if self.delivery_handler is not None and hasattr(self.delivery_handler, "health"):
+                gateway_health = self.delivery_handler.health()
+                if gateway_health.get("instances"):
+                    return gateway_health
             instances = []
             for inst in self.instance_health.values():
                 instances.append({
@@ -159,24 +166,111 @@ class BridgeServer:
             error = BridgeError(error_code="unsupported", message=f"unknown action: {op.action}")
             raise HTTPException(status_code=400, detail=error.to_json())
 
-        # TODO: 实际出站投递逻辑（通过 DeliveryService 创建 Delivery）
-        # 当前返回确认；Core 侧通过调用此接口触发投递
+        if self.delivery_handler is None:
+            error = BridgeError(
+                error_code="unsupported",
+                message="Gateway delivery handler is not configured",
+            )
+            raise HTTPException(status_code=503, detail=error.to_json())
+
+        operation_key = op.idempotency_key or op.operation_id or (
+            f"{op.delivery_id}:{op.attempt_id}:{op.operation_seq}:{op.action}"
+        )
+        cached = self._get_operation_receipt(operation_key)
+        if cached is not None:
+            cached["duplicate"] = True
+            return cached
+        if not self._claim_operation(operation_key, op.action):
+            cached = self._get_operation_receipt(operation_key) or {
+                "status": "unknown",
+                "error_code": "operation_in_progress",
+            }
+            cached["duplicate"] = True
+            return cached
+
         _LOGGER.info(
             "Bridge delivery: action=%s delivery_id=%s attempt_id=%s",
             op.action, op.delivery_id, op.attempt_id,
         )
-        return {
-            "status": "accepted",
+        result = self._execute_delivery(op, operation_key)
+        response = {
+            **result.to_dict(),
             "operation_id": op.operation_id or uuid.uuid4().hex,
             "action": op.action,
         }
+        self._save_operation_receipt(operation_key, op.action, response)
+        return response
+
+    def _execute_delivery(self, op: DeliveryOperation, operation_key: str) -> Any:
+        target = json.dumps(
+            asdict(op.target_snapshot) if op.target_snapshot else {},
+            ensure_ascii=False,
+        )
+        text = "\n".join(part.data for part in op.content if part.type == "text")
+        if op.action == "send":
+            return self.delivery_handler.send(target, text, operation_key)
+        if op.action == "start_placeholder":
+            return self.delivery_handler.start_placeholder(target, text, operation_key)
+        if op.action == "append_or_replace":
+            return self.delivery_handler.edit(
+                target, op.platform_message_id or "", text, op.operation_seq,
+                operation_key,
+            )
+        if op.action == "finish":
+            return self.delivery_handler.finish(
+                target, op.platform_message_id or "", text, op.operation_seq,
+                operation_key,
+            )
+        if op.action == "delete":
+            return self.delivery_handler.delete(
+                target, op.platform_message_id or "", op.operation_seq,
+                operation_key,
+            )
+        return self.delivery_handler.reconcile(
+            target, op.platform_message_id, operation_key,
+        )
+
+    def _get_operation_receipt(self, operation_key: str) -> dict[str, Any] | None:
+        try:
+            row = self.conn.execute(
+                "SELECT response_json FROM gateway_operation_receipts "
+                "WHERE operation_key=?",
+                (operation_key,),
+            ).fetchone()
+            return json.loads(row[0]) if row is not None else None
+        except sqlite3.OperationalError:
+            return None
+
+    def _save_operation_receipt(
+        self, operation_key: str, action: str, response: dict[str, Any],
+    ) -> None:
+        self.conn.execute(
+            "UPDATE gateway_operation_receipts SET response_json=? "
+            "WHERE operation_key=?",
+            (json.dumps(response), operation_key),
+        )
+        self.conn.commit()
+
+    def _claim_operation(self, operation_key: str, action: str) -> bool:
+        pending = json.dumps({
+            "status": "unknown",
+            "error_code": "operation_in_progress",
+            "action": action,
+        })
+        cursor = self.conn.execute(
+            "INSERT OR IGNORE INTO gateway_operation_receipts "
+            "(operation_key, action, response_json, created_at) VALUES (?, ?, ?, ?)",
+            (operation_key, action, pending, int(time.time() * 1000)),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
 
     def _check_idempotent(self, event_id: str) -> str | None:
         """幂等检查：event_id 是否已处理。"""
         if not event_id:
             return None
         try:
-            row = self._conn.execute(
+            row = self.conn.execute(
                 "SELECT message_id FROM inbound_inbox "
                 "WHERE platform_event_id=? AND status='processed'",
                 (event_id,),

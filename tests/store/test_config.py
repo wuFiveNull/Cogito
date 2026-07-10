@@ -201,3 +201,26 @@ class TestProactiveConfig:
         r = repr(c.capability.proactive)
         assert "dry_run=True" in r
         assert "enabled=False" in r
+
+
+class TestPluginConfig:
+    def test_top_level_plugins_alias_parses_runtime_policy(self):
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".toml", delete=False, encoding="utf-8",
+        ) as f:
+            f.write(
+                '[plugins]\n'
+                'enabled = true\n'
+                'auto_start = true\n'
+                'project_paths = [".cogito/plugins"]\n'
+                'granted_permissions = ["filesystem.read"]\n'
+            )
+            tmp = f.name
+        try:
+            config = Config.load(tmp)
+            assert config.capability.plugins.enabled is True
+            assert config.capability.plugins.auto_start is True
+            assert config.capability.plugins.project_paths == [".cogito/plugins"]
+            assert config.capability.plugins.granted_permissions == ["filesystem.read"]
+        finally:
+            os.unlink(tmp)

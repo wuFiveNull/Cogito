@@ -87,7 +87,7 @@ def _parts_from_list(items: list[dict]) -> list[ContentPart]:
             data=p.get("data", ""),
             mime=p.get("mime"),
             name=p.get("name"),
-            size=p.get("size", 0),
+            size=int(p.get("size") or 0),
         )
         for p in items
     ]
@@ -177,6 +177,7 @@ class DeliveryOperation:
     action: str = "send"
     # send / start_placeholder / append_or_replace / finish / delete / reconcile
     content: list[ContentPart] = field(default_factory=list)
+    platform_message_id: str | None = None
 
     def to_json(self) -> str:
         return json.dumps({
@@ -189,6 +190,7 @@ class DeliveryOperation:
             "target_snapshot": self.target_snapshot.__dict__ if self.target_snapshot else None,
             "action": self.action,
             "content": _parts_to_list(self.content),
+            "platform_message_id": self.platform_message_id,
         }, ensure_ascii=False)
 
     @classmethod
@@ -211,6 +213,7 @@ class DeliveryOperation:
             target_snapshot=target,
             action=obj.get("action", "send"),
             content=parts,
+            platform_message_id=obj.get("platform_message_id"),
         )
 
 

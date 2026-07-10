@@ -89,9 +89,9 @@ def test_delivery_service_enqueue_creates_pending(memory_db):
         ))
         return ref
     import asyncio
-    delivery_id = asyncio.run(_do())
+    delivery_ref = asyncio.run(_do())
     row = memory_db.execute(
-        "SELECT status FROM deliveries WHERE delivery_id=?", (delivery_id,),
+        "SELECT status FROM deliveries WHERE delivery_id=?", (delivery_ref.delivery_id,),
     ).fetchone()
     assert row is not None
     assert row["status"] == "pending"

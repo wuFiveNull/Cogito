@@ -29,6 +29,9 @@ class DeliveryRef:
     """投递引用。"""
     delivery_id: str
 
+    def __str__(self) -> str:
+        return self.delivery_id
+
 
 @dataclass(frozen=True)
 class ReconcileResult:
@@ -75,12 +78,12 @@ class DeliveryService(Protocol):
         ...
 
     async def retry(self, delivery_id: str, expected_version: int) -> None:
-        """重试 retry_scheduled / failed / unknown 的投递（状态机守护）。"""
+        """Retry only a retry_scheduled Delivery; unknown must reconcile."""
         ...
 
     async def reconcile(
         self, delivery_id: str, platform_message_id: str | None = None,
     ) -> ReconcileResult:
-        """对 unknown 状态的投递做对账确认（reconcile → sent）。"""
+        """Ask Gateway for evidence before resolving an unknown Delivery."""
         ...
 

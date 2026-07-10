@@ -70,6 +70,15 @@ conversation:
   group_sessions_per_user: true
   thread_sessions_per_user: false
   per_context_partition_concurrency: 1
+channel:
+  gateway_url: ""              # 空=Loopback；非空=独立 Gateway HTTP
+capability:
+  plugins:
+    enabled: false
+    auto_start: false
+    builtin_paths: []
+    project_paths: []
+    granted_permissions: []     # Manifest 权限必须是该集合的子集
 ```
 
 当前 personal Profile 仍按项目阶段使用明文 Payload，以便检查 Agent 行为；development 额外启用更详细 Trace 和 Stub。明文策略不代表未来远程或共享部署默认值。

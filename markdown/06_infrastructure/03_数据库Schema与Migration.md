@@ -41,6 +41,10 @@ ops: payload_objects,traces,spans,audit_records,config_versions
 
 可变聚合包含 `version INTEGER NOT NULL`；状态对象包含 created/updated/terminal 时间；软删除对象包含 deleted_at。JSON 只用于非关键 Metadata，状态、外键、幂等键和查询字段必须独立列。
 
+契约默认值与物理 Schema 必须一致。特别是 `content_parts.size` 为
+`INTEGER NOT NULL DEFAULT 0`；跨进程 DTO 和进程内值对象不得用 `None`
+覆盖该默认。Repository 在写入前仍需归一化，以兼容旧 Adapter。
+
 ## 4. 关键外键
 
 - Session → Conversation；Message → Conversation/Session；

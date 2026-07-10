@@ -471,6 +471,17 @@ Schema 不兼容       拒绝加载
 
 插件失败不得使 Agent Core 无法启动，除非标记为 `required: true`。
 
+运行时公开面固定为：`PluginRuntime` Port、`SqlitePluginRuntime` 唯一状态写入
+实现、`PluginProcessSupervisor` 第三方进程生命周期、`PluginPolicyAdapter`
+权限映射。`enabled` 只表示允许启动；完成宿主进程 ready 握手后才能进入
+`running`。Core 重启时旧 `running` 记录按 `stopped` 恢复，不假设旧 PID
+仍有效。
+
+第三方宿主使用参数数组启动、最小环境变量、独立工作目录和显式停止协议。
+Manifest 权限必须是配置 Grant 的子集；越权或启动失败进入 degraded 并写
+Plugin Runtime Audit。升级覆盖现有版本前保存 Manifest/状态快照，rollback
+恢复最近快照后保持 installed，需重新 enable/start。
+
 ---
 
 ## 8. 版本与依赖冲突

@@ -61,6 +61,9 @@ def create_app(
         from cogito.channel.bridge_server import BridgeServer
         from cogito.contracts.envelope import ChannelEnvelope, ReplyRoute
 
+        if runtime is None or not hasattr(runtime, "conn"):
+            raise RuntimeError("Bridge requires a RuntimeApplication-owned connection")
+
         async def _bridge_inbound_handler(dto):
             if runtime and hasattr(runtime, 'inbound'):
                 # 复用 InboundService 的 accept 路径（直接构造 ChannelEnvelope，
@@ -87,7 +90,16 @@ def create_app(
                 result = runtime.inbound.accept(envelope)
                 return result.message_id if result else f"dto-{dto.event_id}"
             return f"dto-{dto.event_id}"
-        bridge = BridgeServer(conn=provider.conn, inbound_handler=_bridge_inbound_handler)
+        bridge = BridgeServer(
+            conn=runtime.conn,
+            inbound_handler=_bridge_inbound_handler,
+            # In a merged deployment this is the local platform executor. In a
+            # split deployment the same router is mounted by the Gateway
+            # process and Core uses HttpGatewayClient to call it.
+            delivery_handler=(
+                getattr(runtime, "local_gateway_client", None) if runtime else None
+            ),
+        )
         app.include_router(bridge.create_router())
         app.state.bridge_server = bridge  # type: ignore[attr-defined]
     except Exception as e:

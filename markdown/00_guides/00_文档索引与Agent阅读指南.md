@@ -36,6 +36,8 @@ quality-spec          安全、可观察性、测试和评估
 - [文档索引与阅读指南](00_文档索引与Agent阅读指南.md) — `DOCSET-INDEX`
 - [统一术语表](01_术语表.md) — `GLOSSARY`
 - [架构决策记录指南](02_架构决策记录指南.md) — `ADR-GUIDE`
+- [Runtime 与 Application 组合边界](adr/ADR-001_Runtime与Application边界.md) — `ADR-001`
+- [Channel Gateway 进程与协议边界](adr/ADR-002_ChannelGateway进程边界.md) — `ADR-002`
 
 ### 2.2 Architecture
 

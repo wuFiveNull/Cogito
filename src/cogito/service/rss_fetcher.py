@@ -131,7 +131,10 @@ class RssFetcher:
 
     def _parse_feed(self, raw_body: bytes, connector_id: str) -> list[RssEntry]:
         """解析 feed XML 为 RssEntry 列表。"""
-        import feedparser
+        try:
+            import feedparser
+        except ImportError:
+            return _parse_feed_stdlib(raw_body)
 
         parsed = feedparser.parse(raw_body)
         entries: list[RssEntry] = []
@@ -164,6 +167,69 @@ class RssFetcher:
             ))
 
         return entries
+
+
+def _parse_feed_stdlib(raw_body: bytes) -> list[RssEntry]:
+    """Dependency-free RSS/Atom fallback used in minimal/offline installs."""
+    from email.utils import parsedate_to_datetime
+    from xml.etree import ElementTree
+
+    root = ElementTree.fromstring(raw_body)
+
+    def local_name(tag: str) -> str:
+        return tag.rsplit("}", 1)[-1]
+
+    nodes = [
+        node for node in root.iter()
+        if local_name(node.tag) in ("item", "entry")
+    ]
+    results: list[RssEntry] = []
+    for node in nodes:
+        values: dict[str, str] = {}
+        for child in node:
+            name = local_name(child.tag)
+            text = "".join(child.itertext()).strip()
+            if name == "link" and not text:
+                text = child.attrib.get("href", "")
+            if text and name not in values:
+                values[name] = text
+        title = values.get("title", "")
+        link = values.get("link", "")
+        summary = values.get("summary") or values.get("description", "")
+        author = values.get("author", "")
+        source_id = values.get("guid") or values.get("id") or link
+        published_raw = (
+            values.get("pubDate")
+            or values.get("published")
+            or values.get("updated", "")
+        )
+        if not source_id:
+            source_id = f"{title}|{published_raw}"
+        published_at = None
+        if published_raw:
+            try:
+                published_at = parsedate_to_datetime(published_raw)
+                if published_at.tzinfo is None:
+                    published_at = published_at.replace(tzinfo=UTC)
+                else:
+                    published_at = published_at.astimezone(UTC)
+            except (TypeError, ValueError):
+                try:
+                    published_at = datetime.fromisoformat(
+                        published_raw.replace("Z", "+00:00")
+                    ).astimezone(UTC)
+                except ValueError:
+                    published_at = None
+        results.append(RssEntry(
+            source_item_id=source_id,
+            title=title,
+            link=link,
+            summary=summary,
+            author=author,
+            published_at=published_at,
+            content_hash=compute_content_hash(title, link, summary),
+        ))
+    return results
 
 
 def _get_text(entry: Any, key: str, default: str = "") -> str:

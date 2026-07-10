@@ -109,6 +109,14 @@ recovery_grace_period_seconds = 30
 # [channel]
 # gateway_url = "http://127.0.0.1:8080"
 
+# ── Plugin Runtime（默认关闭；第三方默认 subprocess）──
+# [capability.plugins]
+# enabled = false
+# auto_start = false
+# builtin_paths = ["plugins"]
+# project_paths = [".cogito/plugins"]
+# granted_permissions = ["filesystem.read", "network.connect:api.example.com"]
+
 # ── MCP Server（Phase 5；可选）──
 # [capability.mcp.servers.filesystem]
 # command = "npx"

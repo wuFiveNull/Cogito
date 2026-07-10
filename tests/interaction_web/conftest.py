@@ -4,10 +4,12 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
+from types import SimpleNamespace
 
 import pytest
 
 from cogito.config import Config
+from cogito.capability.plugin_runtime import PluginManifest, SqlitePluginRuntime
 from cogito.interaction_web.server import create_app
 from cogito.store.migration import migrate
 
@@ -16,7 +18,7 @@ from cogito.store.migration import migrate
 def client():
     db_dir = tempfile.mkdtemp()
     db_path = os.path.join(db_dir, "test.db")
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     migrate(conn)
     conn.execute("INSERT INTO principals (principal_id,principal_type,status,created_at) VALUES ('owner','owner','active','2026-01-01T00:00:00Z')")
     conn.execute("INSERT INTO endpoints (endpoint_id,channel_type,channel_instance_id,platform_account_id,principal_id,endpoint_ref,capabilities,status,verified_at) VALUES ('ep1','web','web-main','web-main','owner','ep_ref','[]','active',NULL)")
@@ -33,13 +35,20 @@ def client():
     conn.execute("INSERT INTO approvals (approval_id,request,status,expires_at,created_at) VALUES ('ap1','{}','pending','2027-01-01T00:00:00Z','2026-01-01T00:00:00Z')")
     conn.execute("INSERT INTO deliveries (delivery_id,status,idempotency_key,created_at) VALUES ('d1','failed','dk1',1700000000000)")
     conn.commit()
-    conn.close()
+    plugin_runtime = SqlitePluginRuntime(conn)
+    plugin_runtime.install(PluginManifest(plugin_id="some-mcp"))
 
     cfg = Config()
     cfg.storage.db_path = db_path
     cfg.workspace_path = db_dir
 
-    app = create_app(cfg, recovery_counts={"tasks": 1})
+    runtime = SimpleNamespace(
+        plugin_runtime=plugin_runtime,
+        local_gateway_client=None,
+    )
+    app = create_app(cfg, recovery_counts={"tasks": 1}, runtime=runtime)
     from fastapi.testclient import TestClient
     c = TestClient(app)
     yield c
+    plugin_runtime.close()
+    conn.close()

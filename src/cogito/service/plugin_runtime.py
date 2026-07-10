@@ -13,6 +13,11 @@ from cogito.capability.plugin_runtime import (  # noqa: F401
     PluginState,
     SqlitePluginRuntime,
 )
+from cogito.capability.plugin_supervisor import (  # noqa: F401
+    PluginPermissionError,
+    PluginPolicyAdapter,
+    PluginProcessSupervisor,
+)
 
 __all__ = [
     "PluginManifest",
@@ -20,4 +25,7 @@ __all__ = [
     "PluginRuntime",
     "CircuitBreaker",
     "SqlitePluginRuntime",
+    "PluginPermissionError",
+    "PluginPolicyAdapter",
+    "PluginProcessSupervisor",
 ]
