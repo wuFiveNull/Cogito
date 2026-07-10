@@ -1,0 +1,6 @@
+version = 1
+name = "plugins_table"
+description = "Plugin Runtime 状态持久化表"
+online_safe = true
+requires_backup = false
+rollback = "DROP TABLE IF EXISTS plugins"

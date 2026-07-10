@@ -9,7 +9,7 @@ import json
 import logging
 from typing import Any
 
-from cogito.service.sqlite_delivery_service import GatewayClient, GatewayResult
+from cogito.service.sqlite_delivery_service import GatewayResult
 
 _LOGGER = logging.getLogger("cogito.loopback_gateway")
 

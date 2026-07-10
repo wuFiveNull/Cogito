@@ -26,11 +26,10 @@ from cogito.service.delivery_service import (
     ReconcileResult,
 )
 from cogito.service.delivery_worker import (
+    MAX_DELIVERY_TENTATIVE,
     DeliveryLease,
     DeliveryWorker,
-    MAX_DELIVERY_TENTATIVE,
 )
-
 
 # ── GatewayClient Protocol ─────────────────────────────────────────────
 
@@ -287,7 +286,7 @@ class _LegacyGateway:
         "permanent", "auth_error", "route_expired", "unsupported", "too_large",
     })
 
-    def __init__(self, send_worker: "SqliteDeliveryService") -> None:
+    def __init__(self, send_worker: SqliteDeliveryService) -> None:
         self._svc = send_worker
 
     def send(self, target: str, content_ref: str) -> bool | None:

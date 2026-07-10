@@ -40,17 +40,23 @@ class TestMigration:
     def test_idempotent_migration(self, empty_db):
         """Running migrate twice should be safe."""
         from pathlib import Path
-        from cogito.store.migration import migrate, MIGRATIONS_DIR
+        from cogito.store.migration import (
+            migrate, MIGRATIONS_DIR, PLUGIN_MIGRATIONS_DIR,
+        )
         migrate(empty_db)
         migrate(empty_db)  # second run
         rows = empty_db.execute("SELECT version FROM _schema_version ORDER BY version").fetchall()
         versions = [r[0] for r in rows]
-        # 动态计算预期版本列表，避免每加一个 migration 就改一次断言
-        migration_files = sorted(
+        # 动态计算预期版本列表（core + plugin 迁移），避免每加一个 migration 就改一次断言
+        core_files = [
             p for p in Path(MIGRATIONS_DIR).glob("*.sql")
             if p.name[:4].isdigit()
-        )
-        expected = sorted(int(p.name[:4]) for p in migration_files)
+        ]
+        plugin_files = [
+            p for p in Path(PLUGIN_MIGRATIONS_DIR).glob("*.sql")
+            if p.name[:4].isdigit()
+        ] if PLUGIN_MIGRATIONS_DIR.exists() else []
+        expected = sorted(int(p.name[:4]) for p in core_files + plugin_files)
         assert versions == expected  # all migration versions applied exactly once
 
     def test_unique_constraints(self, in_memory_db):
@@ -135,11 +141,12 @@ class TestMigrationUpgrade:
             ).fetchall()
         }
         from pathlib import Path
-        from cogito.store.migration import MIGRATIONS_DIR
-        expected = {
-            int(p.name[:4]) for p in Path(MIGRATIONS_DIR).glob("*.sql")
-            if p.name[:4].isdigit()
-        }
+        from cogito.store.migration import MIGRATIONS_DIR, PLUGIN_MIGRATIONS_DIR
+        core = {int(p.name[:4]) for p in Path(MIGRATIONS_DIR).glob("*.sql")
+                if p.name[:4].isdigit()}
+        plugin = {int(p.name[:4]) for p in Path(PLUGIN_MIGRATIONS_DIR).glob("*.sql")
+                  if p.name[:4].isdigit()} if PLUGIN_MIGRATIONS_DIR.exists() else set()
+        expected = core | plugin
         assert versions == expected
 
     def test_fresh_install_versions(self, empty_db):
@@ -153,11 +160,12 @@ class TestMigrationUpgrade:
             ).fetchall()
         }
         from pathlib import Path
-        from cogito.store.migration import MIGRATIONS_DIR
-        expected = {
-            int(p.name[:4]) for p in Path(MIGRATIONS_DIR).glob("*.sql")
-            if p.name[:4].isdigit()
-        }
+        from cogito.store.migration import MIGRATIONS_DIR, PLUGIN_MIGRATIONS_DIR
+        core = {int(p.name[:4]) for p in Path(MIGRATIONS_DIR).glob("*.sql")
+                if p.name[:4].isdigit()}
+        plugin = {int(p.name[:4]) for p in Path(PLUGIN_MIGRATIONS_DIR).glob("*.sql")
+                  if p.name[:4].isdigit()} if PLUGIN_MIGRATIONS_DIR.exists() else set()
+        expected = core | plugin
         assert versions == expected
 
     def test_turn_schema_v2(self, in_memory_db):
