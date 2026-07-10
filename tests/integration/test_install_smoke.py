@@ -1,64 +1,139 @@
-"""Install smoke tests: `pip install -e .` + `python -m cogito info` works.
+"""Install smoke tests: public Python API is importable and usable without a CLI.
 
-Runs in subprocess and exercises:
-- installed entry point (cogito) is on PATH
-- argparse, config defaults, workspace path resolution
-- no import-time side-effect triggers for channel adapters (RB-08)
+Drives the public Python API (`Config.load`, `RuntimeApplication.build`) directly,
+instead of going through `python -m cogito`.  Exercises:
+- cogito package has no import-time side-effect triggers for channel adapters (RB-08)
+- RuntimeApplication builds without traceback
+- config load + schema validation round-trips
 """
-
 from __future__ import annotations
 
-import os
-import subprocess
 import sys
 import tempfile
+import textwrap
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE_CONFIG = ROOT / "config.example.toml"
 
-PY = sys.executable
+SAMPLE_BODY = textwrap.dedent("""\
+    workspace_path = ".workspace"
+    [storage]
+    db_path = "data/cogito.db"
+    enable_wal = true
+    busy_timeout = 5000
+    payload_dir = "data/payload"
+    [runtime]
+    profile = "personal"
+    timezone = "Asia/Shanghai"
+    [interaction]
+    bind_host = "127.0.0.1"
+    allow_remote = false
+    validate_origin = true
+    [worker]
+    concurrency = 1
+    lease_duration_seconds = 300
+    heartbeat_interval_seconds = 60
+    outbox_lease_ttl_seconds = 120
+    delivery_lease_ttl_seconds = 120
+    recovery_grace_period_seconds = 30
+""")
 
 
-def _run(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [PY, "-m", "cogito", *args],
-        cwd=str(cwd) if cwd else None,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        env={**os.environ},
-    )
+class TestPublicApiImport:
+    def test_top_level_import(self) -> None:
+        """Top-level cogito import must not error on channel adapters (RB-08)."""
+        import cogito
+        assert hasattr(cogito, "__version__")
+
+    def test_main_cli_module_removed(self) -> None:
+        """PLAN-09 M0: cogito.__main__ must NOT exist anymore."""
+        import importlib
+        spec = importlib.util.find_spec("cogito.__main__")
+        assert spec is None, "cogito.__main__ still exists — M0 not complete"
+
+    def test_runtime_public_api_exposed(self) -> None:
+        from cogito.application import RuntimeApplication
+        from cogito.config import Config
+
+        # Public API surface used by deployment launchers:
+        assert callable(getattr(RuntimeApplication, "build", None))
+        assert callable(getattr(RuntimeApplication, "close", None))
+        assert callable(getattr(RuntimeApplication, "recovery_counts", None))
+        assert hasattr(Config, "load")
 
 
-class TestInstallSmoke:
-    def test_info_works_from_installed_entry_point(self) -> None:
-        """RB-A15 — no PYTHONPATH override needed."""
-        r = _run("info", "--config", str(EXAMPLE_CONFIG))
-        assert r.returncode == 0, r.stderr
-        assert "Cogito" in r.stdout
+class TestPublicConfigApi:
+    def test_load_example_config(self) -> None:
+        from cogito.config import Config
+        cfg = Config.load(EXAMPLE_CONFIG)
+        assert cfg.schema_version
+        assert Path(cfg.workspace_path).name == ".workspace"
 
-    def test_config_check_reasonable(self) -> None:
-        r = _run("config", "check", "--config", str(EXAMPLE_CONFIG))
-        assert r.returncode == 0, r.stderr
-        out = r.stdout
-        assert "[ok] schema:    valid" in out
-
-    def test_unknown_section(self) -> None:
+    def test_unknown_section_rejected(self) -> None:
+        from cogito.config import Config, ConfigError
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "bad.toml"
             p.write_text("[storage]\ndb_path='x'\n[magic_section]\nfoo=1\n")
-            r = _run("config", "check", "--config", str(p), cwd=Path(tmp))
-            assert r.returncode == 2, r.stderr
-            assert "magic_section" in r.stderr
+            try:
+                Config.load(p)
+            except ConfigError as e:
+                assert "magic_section" in str(e)
+            else:
+                raise AssertionError("Expected ConfigError for unknown section")
 
-    def test_no_channel_traceback(self) -> None:
-        """Top-level cogito import must not error on channel adapters (RB-08)."""
-        r = subprocess.run(
-            [PY, "-c", "import cogito; import cogito.__main__; print('ok')"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        assert r.returncode == 0, r.stderr
-        assert "ok" in r.stdout
+    def test_secret_not_in_formatted_error(self) -> None:
+        from cogito.config import Config, ConfigError
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "config.toml"
+            bad.write_text(textwrap.dedent("""\
+                workspace_path = ".workspace"
+                [storage]
+                db_path = "data/cogito.db"
+                enable_wal = true
+                busy_timeout = 5000
+                payload_dir = "data/payload"
+                [runtime]
+                profile = "personal"
+                timezone = "Asia/Shanghai"
+                [interaction]
+                bind_host = "127.0.0.1"
+                allow_remote = false
+                validate_origin = true
+                [worker]
+                concurrency = 1
+                lease_duration_seconds = 300
+                heartbeat_interval_seconds = 60
+                outbox_lease_ttl_seconds = 120
+                delivery_lease_ttl_seconds = 120
+                recovery_grace_period_seconds = 30
+                [model]
+                provider = "openai_compat"
+                api_key = "sk-this-is-a-test-secret-123"
+                enable_thinking = true
+            """))
+            try:
+                Config.load(bad)
+            except ConfigError as e:
+                formatted = e.format_cli() if hasattr(e, "format_cli") else str(e)
+                assert "sk-this-is-a-test-secret-123" not in formatted, formatted
+            else:
+                raise AssertionError("Expected ConfigError for invalid model config")
+
+    def test_application_builds_on_fresh_workspace(self) -> None:
+        """RB-A03 — public API builds without traceback on fresh workspace."""
+        from cogito.config import Config
+        from cogito.application import RuntimeApplication
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            cfg_path = cwd / "config.toml"
+            cfg_path.write_text(SAMPLE_BODY, encoding="utf-8")
+            cfg = Config.load(cfg_path)
+            app = RuntimeApplication.build(cfg)
+            try:
+                counts = app.recovery_counts()
+                assert "outbox_leases" in counts
+                assert "delivery_leases" in counts
+                assert "stale_turns" in counts
+            finally:
+                app.close()

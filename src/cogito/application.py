@@ -5,7 +5,7 @@ Single source of truth for:
 - Migration and recovery-all at startup (RB-06)
 - Provider / Registry / Executor / AgentRunner / InboundService assembly
 - Outbox / Delivery / Channel 生命周期
-- Terminal interactive REPL and background worker entrypoints
+- In-process interactive terminal entrypoint and background worker entrypoints
 - Idempotent close() and graceful async shutdown()
 
 Plan 02 / `RUNNABLE-BASELINE-01` — 统一装配，避免 worker vs interactive 漂移 (RB-07)。

@@ -1,11 +1,16 @@
-"""Architecture dependency rules — Plan 01 M1.
+"""Architecture dependency rules — Plan 01 M1 / PLAN-09 M0.
 
 Enforces SYSTEM-BOUNDARIES / 2 + / 4 at CI time:
   1. domain / contracts / config must not depend on infrastructure subpackages;
   2. Agent Runtime (cogito.runtime) must not write Repository directly;
   3. Dashboard (cogito.interaction_web) must not execute write SQL directly;
-  4. assembly roots (application, __main__) are exempt from inbound restrictions;
+  4. assembly root (application) is exempt from inbound restrictions;
   5. import cycles are forbidden (tracked via a time-bounded exception registry).
+
+NOTE (PLAN-09 M0): cogito.__main__ has been removed. If it is ever
+reintroduced this test must be updated to guard against it.
+
+
 
 Known violations are registered with an ADR link and a clear_by date; once a
 violation is cleared the entry is removed, and the test will fail on any
@@ -178,7 +183,6 @@ def test_scan_matches_map_doc() -> None:
         "cogito.service",
         "cogito.interaction_web",
         "cogito.application",
-        "cogito.__main__",
     }
     missing = expected - modules
     assert not missing, f"Scanner missing expected modules: {missing}"

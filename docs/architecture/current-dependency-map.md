@@ -26,8 +26,9 @@ service          -> bench, capability, channel, config, contracts,
 interaction_web  -> bench, config, contracts, domain, service, store  ✗ 见 V8
 application      -> capability, channel, config, contracts, inbound,
                     model, service, store             → 装配根，允许
-__main__         -> application, config, interaction_web, service, store  → CLI 入口，允许
 ```
+> PLAN-09 M0 已移除 `__main__.py`（CLI 入口）。部署脚本应直接调用
+> `cogito.application.RuntimeApplication`，不再经过 CLI。
 
 ## 2. 期望的依赖方向（SYSTEM-BOUNDARIES / 2）
 
@@ -81,7 +82,7 @@ domain ← application ← adapters/infrastructure
 
 ## 5. 装配根合法依赖
 
-`application.py` 与 `__main__.py` 作为装配根/CLI 入口，允许依赖全部子包。业务模块不得反向依赖装配根。
+`application.py` 作为唯一装配根，允许依赖全部子包。业务模块不得反向依赖装配根（PLAN-09 §3.2）。
 
 ## 6. 自动扫描脚本
 

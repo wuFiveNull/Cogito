@@ -14,8 +14,8 @@ dependencies = [
     "uvicorn[standard]>=0.27",
 ]
 
-[project.scripts]
-cogito = "cogito.__main__:main"
+# NOTE: PLAN-09 M0 — no console_scripts.
+# Deployment launchers should call `cogito.application.RuntimeApplication` directly.
 
 [project.optional-dependencies]
 # Plan 03 / QQ-ONEBOT-E2E-01 — aiocqhttp 1.4.4 是当前已审计基线。
