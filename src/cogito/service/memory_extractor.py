@@ -103,8 +103,39 @@ class ExtractionContext:
         return f"{self.session_id}:{self.from_sequence}:{self.to_sequence}:{self.extractor_version}"
 
 
+@dataclass
+class ExtractionTriggerPolicy:
+    """提取触发策略（PLAN-13 P13-06，可配置化）。
+
+    替代旧的固定"至少 4 条消息"阈值。
+    """
+    min_new_messages: int = 4
+    max_window_messages: int = 50
+    enabled_triggers: set[str] = field(default_factory=lambda: {
+        "explicit_remember", "turn_completed", "session_closed",
+    })
+
+    def should_trigger(
+        self,
+        *,
+        trigger_type: str,
+        new_message_count: int,
+        is_explicit_remember: bool = False,
+    ) -> bool:
+        """判断是否应提交提取任务。
+
+        trigger 只决定是否提交 extraction Task，不直接确认事实。
+        """
+        if trigger_type not in self.enabled_triggers:
+            return False
+        if is_explicit_remember and trigger_type == "explicit_remember":
+            return True
+        # 其他触发需要达到最小消息数阈值
+        return new_message_count >= self.min_new_messages
+
+
 class MemoryExtractor:
-    """从会话中提取长期记忆候选。"""
+    """从会话中提取长期记忆候选（PLAN-13 P13-06: trigger + watermark）。"""
 
     def __init__(
         self,
@@ -112,11 +143,15 @@ class MemoryExtractor:
         service: SqliteMemoryService,
         router: ModelRouter | None = None,
         model_role: str = "memory_extractor",
+        trigger_policy: ExtractionTriggerPolicy | None = None,
+        watermark_repo=None,
     ) -> None:
         self._conn = conn
         self._service = service
         self._router = router
         self._model_role = model_role
+        self._trigger_policy = trigger_policy or ExtractionTriggerPolicy()
+        self._watermark_repo = watermark_repo
 
     async def extract_from_messages(
         self,
@@ -177,8 +212,45 @@ class MemoryExtractor:
             except Exception as e:
                 _LOGGER.warning("Failed to write memory candidate: %s", e)
 
+        # PLAN-13 P13-06: 成功写入后推进 watermark
+        if written and ctx.to_sequence > 0:
+            self._advance_watermark(ctx)
+
         _LOGGER.info("Extracted %d memory candidates", len(written))
         return written
+
+    def _advance_watermark(self, ctx: ExtractionContext) -> None:
+        """推进提取水位（PLAN-13 P13-06，CAS 幂等）。
+
+        成功提交后才推进，失败不推进（下次重试不漏消息）。
+        """
+        if self._watermark_repo is None:
+            return
+        from cogito.store.watermark_repo import PROC_MEMORY_EXTRACT
+        # 确保行存在
+        self._watermark_repo.upsert(
+            processor_type=PROC_MEMORY_EXTRACT,
+            conversation_id=ctx.session_id,
+            session_id=ctx.session_id,
+            input_version=0,
+        )
+        # 读取当前状态进行 CAS 推进
+        current = self._watermark_repo.get(
+            PROC_MEMORY_EXTRACT, ctx.session_id, ctx.session_id,
+        )
+        if current is None:
+            return
+        # 只推进到更大序列（幂等、单调）
+        if ctx.to_sequence > current.processed_upto_sequence:
+            self._watermark_repo.advance(
+                processor_type=PROC_MEMORY_EXTRACT,
+                conversation_id=ctx.session_id,
+                session_id=ctx.session_id,
+                to_sequence=ctx.to_sequence,
+                input_version=0,
+                expected_from_sequence=current.processed_upto_sequence,
+                expected_version=current.version,
+            )
 
     async def _call_extractor(
         self, conversation_text: str,
