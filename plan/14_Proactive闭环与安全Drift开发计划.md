@@ -2,7 +2,7 @@
 plan_id: "PLAN-14"
 title: "Proactive 闭环与安全 Drift 开发计划"
 version: "1.0"
-status: "in_progress (M0-M5 已完成)"
+status: "completed (M0-M7 核心闭环 + R7-R10 收口；M2 Task C 模型增强显式未做)"
 created_at: "2026-07-11"
 owner: "Cogito"
 scope: "修复现有 Proactive 决策、能量、调度、投递和审计闭环；在统一 Task/Attempt/Lease/Checkpoint/Policy 体系内实现可抢占、默认只读、Skill 驱动的 Drift；建立回放、指标和发布门禁"
@@ -1018,16 +1018,16 @@ enabled = true
 
 - [x] Decision dry-run 与真实发送状态一致；
 - [x] energy 使用真实用户活动并驱动决策与持久调度；
-- [ ] Alert、content、context 三路有端到端测试；
-- [ ] 模型增强只提供信号，不能绕过 Policy；
+- [x] Alert、content、context 三路有端到端测试；
+- [ ] 模型增强只提供信号，不能绕过 Policy；（M2 Task C 显式未做）
 - [x] Drift admission 是全局、确定性、事务快照；
 - [x] Drift 使用 Task/Attempt/Lease/Checkpoint，无第二事实源；
 - [x] Drift 默认 Tool 集只读且无直接发送能力；
 - [x] 新 Turn、Lease 丢失和预算耗尽均能安全抢占；
 - [x] paused/waiting 可从兼容 Checkpoint 恢复；
-- [ ] 用户可见 Drift 结果先生成 Candidate，再走 Policy/Delivery；
-- [ ] Dashboard 可解释 admission、selection、decision、preemption、delivery；
-- [ ] dry-run、回放、故障注入和安全门禁通过；
+- [x] 用户可见 Drift 结果先生成 Candidate，再走 Policy/Delivery；
+- [x] Dashboard 可解释 admission、selection、decision、preemption、delivery；
+- [x] dry-run、回放、故障注入和安全门禁通过；
 - [x] 配置、Migration、运维手册和示例同步更新；
 - [x] 默认安装不产生主动消息或 Drift 外部副作用。
 
