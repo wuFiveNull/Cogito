@@ -157,6 +157,17 @@ def _knowledge_service(ctx: TaskHandlerContext, conn: sqlite3.Connection):
     return KnowledgeService(conn)
 
 
+def _refresh_knowledge_views_task(ctx: TaskHandlerContext, conn: sqlite3.Connection) -> None:
+    """Task handler 安全刷新 KNOWLEDGE.md 视图（失败不回滚事务）。"""
+    if not ctx.workspace_path:
+        return
+    try:
+        from cogito.service.knowledge_views import KnowledgeViewsGenerator
+        KnowledgeViewsGenerator(conn, workspace_path=ctx.workspace_path).generate_all()
+    except Exception as e:
+        _LOGGER.warning("Knowledge view refresh failed (task %s): %s", ctx._task_id, e)
+
+
 def _task_json(task: Task) -> dict[str, Any]:
     try:
         value = json.loads(task.payload_ref or "{}")
@@ -179,6 +190,7 @@ def _handle_knowledge_ingest(task: Task, ctx: TaskHandlerContext) -> str:
         if not resource_id or not raw_text:
             raise ValueError("knowledge.ingest requires resource_id and raw_text")
         document, segments = service.ingest(resource_id, raw_text)
+        _refresh_knowledge_views_task(ctx, conn)
         return f"knowledge ingested: {document.document_id} ({len(segments)} segments)"
     except Exception:
         conn.rollback()
@@ -212,6 +224,7 @@ def _handle_knowledge_invalidate(task: Task, ctx: TaskHandlerContext) -> str:
         if not resource_id:
             raise ValueError("knowledge.invalidate requires resource_id")
         count = _knowledge_service(ctx, conn).invalidate(resource_id, str(data.get("reason", "")))
+        _refresh_knowledge_views_task(ctx, conn)
         return f"knowledge invalidated: {resource_id} ({count} segments)"
     finally:
         conn.close()
@@ -225,6 +238,7 @@ def _handle_knowledge_rebuild_index(task: Task, ctx: TaskHandlerContext) -> str:
         from cogito.service.knowledge.embedding import rebuild_index
         result = rebuild_index(conn, fts=True, embeddings=False)
         conn.commit()
+        _refresh_knowledge_views_task(ctx, conn)
         return f"knowledge index rebuilt: {result}"
     finally:
         conn.close()
@@ -246,6 +260,7 @@ def _handle_knowledge_sync_source(task: Task, ctx: TaskHandlerContext) -> str:
             principal_id=str(data.get("principal_id", "")),
             trust_label=str(data.get("trust_label", "unverified")),
         )
+        _refresh_knowledge_views_task(ctx, conn)
         return f"knowledge synced: {resource_id}"
     finally:
         conn.close()

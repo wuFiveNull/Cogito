@@ -204,3 +204,36 @@ class PinSkillPayload(BaseCommandPayload):
 
 class PayloadGcDryRunPayload(BaseCommandPayload):
     pass
+
+
+# ── PLAN-14 Knowledge 命令 ────────────────────────────────────
+
+
+class KnowledgeRegisterPayload(BaseCommandPayload):
+    """注册知识资源并可选立即摄入。"""
+    source_uri_hash: str = ""
+    source_kind: str = "explicit_local_file"
+    media_type: str = "text/markdown"
+    principal_id: str = "owner"
+    trust_label: str = "unverified"
+    content: str = ""  # 非空时立即 ingest
+    source_version: str = ""
+
+
+class KnowledgeRefreshPayload(BaseCommandPayload):
+    """刷新知识来源（重新 ingest，content_hash 变化才执行）。"""
+    source_uri_hash: str = ""
+    principal_id: str = "owner"
+    content: str = ""  # 最新文本
+
+
+class KnowledgeInvalidatePayload(BaseCommandPayload):
+    """失效知识资源（撤销检索，重置为 stale）。"""
+    resource_id: str
+    reason: str = "manual_invalidate"
+
+
+class KnowledgeErasePayload(BaseCommandPayload):
+    """擦除知识资源（撤销检索 + 清理 MemorySource）。"""
+    resource_id: str
+    reason: str = "manual_erase"

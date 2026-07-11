@@ -1288,6 +1288,42 @@ class QueryService:
         }]
 
 
+    # ── Knowledge 查询（PLAN-14 R-14）──────────────────────────
+
+    def list_knowledge_resources(self, *, principal_id: str = "owner",
+                                  limit: int = 50, status_filter: str = "") -> list[dict]:
+        """列出知识资源摘要。"""
+        from cogito.service.explain import ExplainService
+        return ExplainService(self._conn).list_knowledge_resources(
+            principal_id=principal_id, limit=limit, status_filter=status_filter,
+        )
+
+    def get_knowledge_resource(self, resource_id: str) -> dict | None:
+        """获取单资源详情 + 段统计。"""
+        from cogito.service.explain import ExplainService
+        return ExplainService(self._conn).get_knowledge_resource(resource_id)
+
+    def explain_knowledge_retrieval(self, resource_id: str) -> dict | None:
+        """解释资源是否可检索、检索路径覆盖。"""
+        from cogito.service.explain import ExplainService
+        return ExplainService(self._conn).explain_knowledge_retrieval(resource_id)
+
+    def explain_memory_weight(self, memory_id: str) -> dict | None:
+        """解释记忆权重分项（PLAN-13 Enable 后暴露）。"""
+        from cogito.service.explain import ExplainService
+        return ExplainService(self._conn).explain_memory_weight(memory_id)
+
+    def list_memory_sources(self, memory_id: str) -> list[dict]:
+        """列出记忆来源集合。"""
+        from cogito.service.explain import ExplainService
+        return ExplainService(self._conn).list_memory_sources(memory_id)
+
+    def get_memory_detail(self, memory_id: str) -> dict | None:
+        """获取记忆详情安全摘要。"""
+        from cogito.service.explain import ExplainService
+        return ExplainService(self._conn).get_memory_detail(memory_id)
+
+
 # ── PLAN-09 M4b 兼容别名：保留 QueryService 类名，同时暴露
 #    SqliteQueryService 以便 interaction_web.query.py 引用 ──
 SqliteQueryService = QueryService

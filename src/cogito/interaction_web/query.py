@@ -424,6 +424,74 @@ def proactive_context_diff(
     return _svc(deps).proactive_context_diff(body.content)
 
 
+# ── PLAN-14 Knowledge + Memory 查询 ─────────────────────────
+
+
+@router.get("/knowledge/resources")
+def list_knowledge_resources(
+    principal_id: str = "owner",
+    limit: int = Query(50, ge=1, le=200),
+    status: str = "",
+    deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    """知识资源列表（摘要）。"""
+    return {"items": _svc(deps).list_knowledge_resources(
+        principal_id=principal_id, limit=limit, status_filter=status,
+    )}
+
+
+@router.get("/knowledge/resources/{resource_id}")
+def get_knowledge_resource(
+    resource_id: str, deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    """知识资源详情 + 段统计。"""
+    out = _svc(deps).get_knowledge_resource(resource_id)
+    if out is None:
+        raise HTTPException(status_code=404, detail=f"knowledge resource {resource_id} not found")
+    return out
+
+
+@router.get("/knowledge/resources/{resource_id}/explain")
+def explain_knowledge_retrieval(
+    resource_id: str, deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    """解释资源是否可检索 + 检索路径覆盖。"""
+    out = _svc(deps).explain_knowledge_retrieval(resource_id)
+    if out is None:
+        raise HTTPException(status_code=404, detail=f"knowledge resource {resource_id} not found")
+    return out
+
+
+@router.get("/memory/{memory_id}/explain")
+def explain_memory_weight(
+    memory_id: str, deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    """记忆权重分项解释（PLAN-13 Enable）。"""
+    out = _svc(deps).explain_memory_weight(memory_id)
+    if out is None:
+        raise HTTPException(status_code=404, detail=f"memory {memory_id} not found")
+    return out
+
+
+@router.get("/memory/{memory_id}/sources")
+def list_memory_sources(
+    memory_id: str, deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    """记忆来源集合。"""
+    return {"memory_id": memory_id, "sources": _svc(deps).list_memory_sources(memory_id)}
+
+
+@router.get("/memory/{memory_id}")
+def get_memory_detail(
+    memory_id: str, deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    """记忆详情安全摘要。"""
+    out = _svc(deps).get_memory_detail(memory_id)
+    if out is None:
+        raise HTTPException(status_code=404, detail=f"memory {memory_id} not found")
+    return out
+
+
 # ── delivery detail (attempts + receipts + operation sequence) ──
 
 

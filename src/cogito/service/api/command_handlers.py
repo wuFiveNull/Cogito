@@ -33,6 +33,10 @@ from cogito.contracts.models import (
     DeleteSessionsByConvPayload,
     DisablePluginPayload,
     DisableToolPayload,
+    KnowledgeErasePayload,
+    KnowledgeInvalidatePayload,
+    KnowledgeRefreshPayload,
+    KnowledgeRegisterPayload,
     MemoryConfirmPayload,
     MemoryDeletePayload,
     PauseConnectorPayload,
@@ -547,6 +551,132 @@ def force_connector_poll(
         changes={"schedule_id": sched["schedule_id"] if sched else None},
     )
     return _ok("force-connector-poll", payload.connector_id)
+
+
+# ── Knowledge: register / refresh / invalidate / erase ───────
+
+
+def _refresh_knowledge_views(conn: sqlite3.Connection, config: Any) -> None:
+    """生成 KNOWLEDGE.md 视图（失败不回滚事实事务）。"""
+    try:
+        from cogito.service.knowledge_views import KnowledgeViewsGenerator
+        KnowledgeViewsGenerator(conn, workspace_path=config.workspace_path).generate_all()
+    except Exception as e:
+        _LOGGER.warning("Knowledge view refresh after command failed: %s", e)
+
+
+@router.post("/register-knowledge", response_model=CommandResponse)
+def register_knowledge(
+    payload: KnowledgeRegisterPayload, deps: CommandDeps = Depends(get_command_deps),
+) -> CommandResponse:
+    """注册知识资源 + 可选立即 ingest"""
+    cached = _check_idempotency(deps.conn, ACTOR, "register-knowledge", payload.idempotency_key)
+    if cached:
+        return cached
+    from cogito.service.knowledge.service import KnowledgeService
+    svc = KnowledgeService(deps.conn)
+    resource = svc.register_resource(
+        source_uri_hash=payload.source_uri_hash or uuid.uuid4().hex,
+        source_kind=payload.source_kind,
+        media_type=payload.media_type,
+        principal_id=payload.principal_id or "owner",
+        trust_label=payload.trust_label,
+        source_version=payload.source_version,
+    )
+    if payload.content:
+        svc.ingest(resource.resource_id, payload.content)
+    deps.conn.commit()
+    _refresh_knowledge_views(deps.conn, deps.config)
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="register-knowledge",
+        target_type="knowledge_resource", target_id=resource.resource_id,
+        changes={"source_kind": payload.source_kind, "ingested": bool(payload.content)},
+    )
+    return _ok("register-knowledge", resource.resource_id,
+               source_kind=payload.source_kind)
+
+
+@router.post("/refresh-knowledge", response_model=CommandResponse)
+def refresh_knowledge(
+    payload: KnowledgeRefreshPayload, deps: CommandDeps = Depends(get_command_deps),
+) -> CommandResponse:
+    """刷新现有知识来源内容（重新 ingest）。"""
+    cached = _check_idempotency(deps.conn, ACTOR, "refresh-knowledge", payload.idempotency_key)
+    if cached:
+        return cached
+    row = deps.conn.execute(
+        "SELECT resource_id, content_hash FROM knowledge_resources "
+        "WHERE source_uri_hash=? AND principal_id=? AND deleted_at IS NULL",
+        (payload.source_uri_hash, payload.principal_id or "owner"),
+    ).fetchone()
+    if row is None:
+        return _fail("refresh-knowledge", payload.source_uri_hash, "resource not found")
+    resource_id = row["resource_id"]
+    from cogito.service.knowledge.service import KnowledgeService
+    svc = KnowledgeService(deps.conn)
+    if payload.content:
+        svc.invalidate(resource_id, "refresh")
+        svc.ingest(resource_id, payload.content)
+    deps.conn.commit()
+    _refresh_knowledge_views(deps.conn, deps.config)
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="refresh-knowledge",
+        target_type="knowledge_resource", target_id=resource_id,
+        changes={"refreshed": bool(payload.content)},
+    )
+    return _ok("refresh-knowledge", resource_id)
+
+
+@router.post("/invalidate-knowledge", response_model=CommandResponse)
+def invalidate_knowledge(
+    payload: KnowledgeInvalidatePayload, deps: CommandDeps = Depends(get_command_deps),
+) -> CommandResponse:
+    """失效知识资源（撤销检索，重置为 stale）。"""
+    cached = _check_idempotency(deps.conn, ACTOR, "invalidate-knowledge", payload.idempotency_key)
+    if cached:
+        return cached
+    row = deps.conn.execute(
+        "SELECT resource_id FROM knowledge_resources WHERE resource_id=? AND deleted_at IS NULL",
+        (payload.resource_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"knowledge resource {payload.resource_id} not found")
+    from cogito.service.knowledge.service import KnowledgeService
+    KnowledgeService(deps.conn).invalidate(payload.resource_id, payload.reason)
+    deps.conn.commit()
+    _refresh_knowledge_views(deps.conn, deps.config)
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="invalidate-knowledge",
+        target_type="knowledge_resource", target_id=payload.resource_id,
+        changes={"reason": payload.reason},
+    )
+    return _ok("invalidate-knowledge", payload.resource_id)
+
+
+@router.post("/erase-knowledge", response_model=CommandResponse)
+def erase_knowledge(
+    payload: KnowledgeErasePayload, deps: CommandDeps = Depends(get_command_deps),
+) -> CommandResponse:
+    """擦除知识资源（撤销检索 + 清理 MemorySource）。"""
+    cached = _check_idempotency(deps.conn, ACTOR, "erase-knowledge", payload.idempotency_key)
+    if cached:
+        return cached
+    row = deps.conn.execute(
+        "SELECT resource_id FROM knowledge_resources WHERE resource_id=? AND deleted_at IS NULL",
+        (payload.resource_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"knowledge resource {payload.resource_id} not found")
+    from cogito.service.knowledge.service import KnowledgeService
+    KnowledgeService(deps.conn).erase(payload.resource_id, payload.reason)
+    deps.conn.commit()
+    _refresh_knowledge_views(deps.conn, deps.config)
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="erase-knowledge",
+        target_type="knowledge_resource", target_id=payload.resource_id,
+        changes={"reason": payload.reason},
+    )
+    return _ok("erase-knowledge", payload.resource_id)
 
 
 @router.post("/import-proactive-context", response_model=CommandResponse)
