@@ -80,6 +80,7 @@ select = ["E", "F", "I", "N", "W", "UP"]
 "src/cogito/service/retrieval_service.py" = ["F401", "I001"]
 "src/cogito/store/query_plan.py" = ["UP041"]
 "tests/**/*.py" = ["E501", "E402", "F841", "F401", "I001", "F541"]
+"scripts/**/*.py" = ["E501", "E402", "F401"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

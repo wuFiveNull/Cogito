@@ -1,0 +1,15 @@
+{
+  "recall@k": 0.5301,
+  "mrr": 0.625,
+  "source_traceability": 1.0,
+  "delete_no_resurrect": true,
+  "num_docs": 15,
+  "num_segments": 23,
+  "top_k": 8,
+  "latency_ms": {
+    "p50": 0.144,
+    "p95": 0.161
+  },
+  "total_eval_time_s": 0.323,
+  "backend": "cogito_native"
+}
