@@ -33,7 +33,7 @@ class SignalWriter:
         algorithm_version: str = "",
         metadata_json: str = "{}",
     ) -> bool:
-        """幂等写入一条信号。"""
+        """幂等写入一条信号（PLAN-14 R-08: 同时发 MemorySignalRecorded 到 Outbox）。"""
         signal = MemorySignal(
             signal_id="",
             memory_id=memory_id,
@@ -46,7 +46,28 @@ class SignalWriter:
             algorithm_version=algorithm_version,
             metadata_json=metadata_json,
         )
-        return self._repo.insert(signal)
+        ok = self._repo.insert(signal)
+        if ok:
+            self._emit_signal_event(signal_type, memory_id, signal_value, task_id)
+        return ok
+
+    def _emit_signal_event(self, signal_type: str, memory_id: str, signal_value: int, task_id: str) -> None:
+        """PLAN-14 R-08: MemorySignalRecorded 领域事件（非阻塞）。"""
+        try:
+            from cogito.domain.events import DomainEvent
+            from cogito.store.repositories import OutboxRepository
+            payload = {"signal_type": signal_type, "signal_value": signal_value, "task_id": task_id}
+            OutboxRepository(self._conn).insert(DomainEvent(
+                event_type="MemorySignalRecorded",
+                aggregate_type="memory",
+                aggregate_id=memory_id,
+                aggregate_version=1,
+                payload=payload,
+                payload_ref=__import__("json").dumps(payload, ensure_ascii=False),
+                origin="signal_writer",
+            ))
+        except Exception:
+            pass
 
     def record_exposed(self, memory_id: str, **kwargs) -> bool:
         """召回展示信号（不增加 reinforcement）。"""

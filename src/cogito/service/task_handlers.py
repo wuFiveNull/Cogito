@@ -594,6 +594,21 @@ def _handle_memory_recompute_weight(task: Task, ctx: TaskHandlerContext) -> str:
             signals_repo=SignalRepository(conn),
         )
         conn.commit()
+        # PLAN-14 R-08: 权重重算完成
+        try:
+            from cogito.domain.events import DomainEvent
+            from cogito.store.repositories import OutboxRepository
+            OutboxRepository(conn).insert(DomainEvent(
+                event_type="MemoryWeightRecomputed",
+                aggregate_type="memory_weight",
+                aggregate_id=f"recompute-{ctx._task_id}",
+                aggregate_version=1,
+                payload={"recomputed_count": count, "task_id": ctx._task_id},
+                payload_ref=__import__("json").dumps({"recomputed_count": count}),
+                origin="memory_recompute_weight_handler",
+            ))
+        except Exception:
+            pass
         return f"memory weights recomputed: {count}"
     except Exception:
         conn.rollback()

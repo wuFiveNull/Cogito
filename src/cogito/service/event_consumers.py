@@ -269,6 +269,19 @@ class TurnCompletedMemoryExtractionConsumer(EventConsumer):
                         priority=40,
                         retry_policy={"max_attempts": 3, "backoff_seconds": [5, 30, 120]},
                     )
+                    # PLAN-14 R-08: 提取请求已创建
+                    from cogito.domain.events import DomainEvent
+                    from cogito.store.repositories import OutboxRepository
+                    from cogito.contracts.clock import epoch_ms
+                    OutboxRepository(conn).insert(DomainEvent(
+                        event_type="MemoryExtractionRequested",
+                        aggregate_type="memory_extract",
+                        aggregate_id=key,
+                        aggregate_version=1,
+                        payload=task_payload,
+                        payload_ref=json.dumps(task_payload, ensure_ascii=False),
+                        origin="turn_completed_consumer",
+                    ))
                 except sqlite3.IntegrityError:
                     pass
             _mark_consumed(conn, self.name, lease.event_id)

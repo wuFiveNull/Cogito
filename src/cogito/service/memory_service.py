@@ -171,6 +171,27 @@ class SqliteMemoryService:
         else:
             raise ValueError("Either conn or repo must be provided")
 
+    def _emit_memory_event(self, event_type: str, memory_id: str, payload: dict | None = None) -> None:
+        """发布 Memory 领域事件到 Outbox（失败不阻塞事务，PLAN-14 R-08）。"""
+        try:
+            from cogito.domain.events import DomainEvent
+            from cogito.store.repositories import OutboxRepository
+            data = payload or {}
+            OutboxRepository(self._repo._conn).insert(DomainEvent(
+                event_type=event_type,
+                aggregate_type="memory",
+                aggregate_id=memory_id,
+                aggregate_version=1,
+                payload=data,
+                payload_ref=__import__("json").dumps(data, ensure_ascii=False),
+                origin="memory_service",
+            ))
+        except Exception:
+            import logging as _logging
+            _logging.getLogger("cogito.memory_service").debug(
+                "memory event emit failed: %s", event_type, exc_info=True,
+            )
+
     # ── 写入 ──
 
     def propose(
@@ -281,6 +302,14 @@ class SqliteMemoryService:
             created.confirmed_by = principal_id
             created.confirmation_method = explicitness
             created.confirmed_at = now
+
+        # PLAN-14 R-08: Memory 候选已创建
+        event = "MemoryConfirmed" if created.status == MemoryStatus.confirmed else "MemoryCandidateCreated"
+        self._emit_memory_event(event, created.memory_id, {
+            "kind": created.kind.value if hasattr(created.kind, "value") else str(created.kind),
+            "status": created.status.value if hasattr(created.status, "value") else str(created.status),
+            "principal_id": principal_id,
+        })
 
         return created
 
@@ -491,15 +520,30 @@ class SqliteMemoryService:
     # ── 管理 ──
 
     def confirm(self, memory_id: str, confirmed_by: str = "") -> bool:
-        """确认候选记忆。"""
-        return self._repo.confirm(
+        """确认候选记忆（PLAN-14 R-08: emit MemoryConfirmed）。"""
+        ok = self._repo.confirm(
             memory_id, confirmed_by=confirmed_by, confirmation_method="manual",
         )
+        if ok:
+            self._emit_memory_event("MemoryConfirmed", memory_id, {
+                "confirmed_by": confirmed_by, "method": "manual",
+            })
+        return ok
 
     def reject(self, memory_id: str, principal_id: str = "") -> bool:
-        """拒绝候选记忆。"""
-        return self._repo.reject(memory_id, principal_id=principal_id)
+        """拒绝候选记忆（PLAN-14 R-08: emit MemoryRejected）。"""
+        ok = self._repo.reject(memory_id, principal_id=principal_id)
+        if ok:
+            self._emit_memory_event("MemoryRejected", memory_id, {
+                "principal_id": principal_id,
+            })
+        return ok
 
     def supersede(self, old_id: str, new_id: str) -> bool:
-        """标旧记忆被新记忆覆盖（PLAN-14 R-05）。"""
-        return self._repo.supersede(old_id, new_id)
+        """标旧记忆被新记忆覆盖（PLAN-14 R-05, R-08）。"""
+        ok = self._repo.supersede(old_id, new_id)
+        if ok:
+            self._emit_memory_event("MemorySuperseded", old_id, {
+                "superseded_by": new_id,
+            })
+        return ok
