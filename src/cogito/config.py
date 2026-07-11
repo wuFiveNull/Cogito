@@ -621,7 +621,13 @@ KNOWN_PROACTIVE_FIELDS = frozenset({
     "same_topic_cooldown_minutes",
     "max_pushes_per_hour", "max_pushes_per_day",
     "digest_max_delay_minutes", "candidate_ttl_hours",
-    "quiet_hours",
+    "quiet_hours", "cadence",
+})
+
+KNOWN_PROACTIVE_CADENCE_FIELDS = frozenset({
+    "min_interval_seconds", "max_interval_seconds",
+    "high_energy_interval_seconds", "medium_energy_interval_seconds",
+    "low_energy_interval_seconds", "jitter_ratio", "misfire_policy",
 })
 
 
@@ -651,8 +657,46 @@ class ProactiveQuietHours:
 
 
 @dataclass
+class ProactiveCadenceConfig:
+    """Proactive 自适应节拍配置 (PROACTIVE-IDLE / 3. 能量模型)。
+
+    高能量 (用户活跃) → 更短间隔更频繁评估；低能量 → 拉长间隔节省资源。
+    """
+    min_interval_seconds: int = 60
+    max_interval_seconds: int = 1800
+    high_energy_interval_seconds: int = 60
+    medium_energy_interval_seconds: int = 240
+    low_energy_interval_seconds: int = 480
+    jitter_ratio: float = 0.10
+    misfire_policy: str = "coalesce"
+
+    def __repr__(self) -> str:
+        return (
+            f"ProactiveCadenceConfig(range={self.min_interval_seconds}s-"
+            f"{self.max_interval_seconds}s, energy="
+            f"(H={self.high_energy_interval_seconds},"
+            f"M={self.medium_energy_interval_seconds},"
+            f"L={self.low_energy_interval_seconds}), "
+            f"jitter={self.jitter_ratio}, misfire={self.misfire_policy!r})"
+        )
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> ProactiveCadenceConfig:
+        _check_unknown(raw, KNOWN_PROACTIVE_CADENCE_FIELDS, "proactive.cadence")
+        return cls(
+            min_interval_seconds=int(raw.get("min_interval_seconds", 60)),
+            max_interval_seconds=int(raw.get("max_interval_seconds", 1800)),
+            high_energy_interval_seconds=int(raw.get("high_energy_interval_seconds", 60)),
+            medium_energy_interval_seconds=int(raw.get("medium_energy_interval_seconds", 240)),
+            low_energy_interval_seconds=int(raw.get("low_energy_interval_seconds", 480)),
+            jitter_ratio=float(raw.get("jitter_ratio", 0.10)),
+            misfire_policy=str(raw.get("misfire_policy", "coalesce")),
+        )
+
+
+@dataclass
 class ProactiveConfig:
-    """主动推送配置：观察线、预算、阈值、冷却、安静时段。
+    """主动推送配置：观察线、预算、阈值、冷却、安静时段、自适应节拍。
 
     默认 dry_run=True + enabled=False：用户必须显式翻转才会进入真实发送。
     """
@@ -667,13 +711,14 @@ class ProactiveConfig:
     digest_max_delay_minutes: int = 360
     candidate_ttl_hours: int = 48
     quiet_hours: ProactiveQuietHours = field(default_factory=ProactiveQuietHours)
+    cadence: ProactiveCadenceConfig = field(default_factory=ProactiveCadenceConfig)
 
     def __repr__(self) -> str:
         return (
             f"ProactiveConfig(enabled={self.enabled}, dry_run={self.dry_run}, "
             f"principal={self.default_principal_id!r}, "
             f"budget=({self.max_pushes_per_hour}/h,{self.max_pushes_per_day}/d), "
-            f"quiet_hours={self.quiet_hours!r})"
+            f"cadence={self.cadence!r})"
         )
 
     @classmethod
@@ -683,6 +728,12 @@ class ProactiveConfig:
         qh_raw = raw.get("quiet_hours")
         if isinstance(qh_raw, dict):
             quiet = ProactiveQuietHours._from_raw(qh_raw)
+        cadence_raw = raw.get("cadence")
+        cadence = (
+            ProactiveCadenceConfig._from_raw(cadence_raw)
+            if isinstance(cadence_raw, dict)
+            else ProactiveCadenceConfig()
+        )
         return cls(
             enabled=bool(raw.get("enabled", False)),
             dry_run=bool(raw.get("dry_run", True)),
@@ -695,6 +746,7 @@ class ProactiveConfig:
             digest_max_delay_minutes=int(raw.get("digest_max_delay_minutes", 360)),
             candidate_ttl_hours=int(raw.get("candidate_ttl_hours", 48)),
             quiet_hours=quiet,
+            cadence=cadence,
         )
 
 

@@ -688,7 +688,20 @@ class RuntimeApplication:
         # 创建 Scheduler
         from cogito.service.scheduler import Scheduler
 
-        self.scheduler = Scheduler(self.conn)
+        # Scheduler 的 PresenceReader（与 TaskHandlerContext 共用同一工厂语义）
+        _pres_reader = None
+        try:
+            _pres_reader = SqlitePresenceReader(
+                connection_factory=lambda p=self.config.resolve_db_path(): get_connection(p),
+            )
+        except Exception:
+            logger.warning("Scheduler PresenceReader build failed", exc_info=True)
+
+        self.scheduler = Scheduler(
+            self.conn,
+            proactive_config=self.config.capability.proactive,
+            presence_reader=_pres_reader,
+        )
 
         # 启动启用的 Channel Adapter（如 QQ）
         await self._start_enabled_channels()

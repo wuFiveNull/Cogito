@@ -43,12 +43,18 @@ class Scheduler:
         self,
         conn: sqlite3.Connection,
         clock: Clock | None = None,
+        proactive_config: Any = None,     # ProactiveConfig
+        presence_reader: Any = None,       # PresenceReader
+        rng: Any = None,                   # random.Random (可注入，测试可复现)
     ) -> None:
         self._conn = conn
         self._clock = clock or ProductionClock()
         self._schedule_repo = ScheduleRepository(conn)
         self._fire_repo = ScheduledFireRepository(conn)
         self._task_repo = TaskRepository(conn)
+        self._proactive_config = proactive_config
+        self._presence_reader = presence_reader
+        self._rng = rng
 
     @staticmethod
     def task_type_for_connector(connector_type: str) -> str:
@@ -121,40 +127,123 @@ class Scheduler:
         return tasks
 
     def tick_proactive_evaluate(self, limit: int = 10) -> list[Task]:
-        """主动评估 tick：创建 proactive.evaluate Task。
+        """主动评估 tick：energy-driven 自适应节拍。
 
-        全局由 proactive_worker_enabled 镜像 config.capability.proactive.enabled。
-        每次 process_background_once 调用一次；Scheduler 不自跑 loop。
+        不再每次 process_background_once 都创建 Task，而是读取
+        proactive_cadence_state.next_eval_at，仅在到期 (now >= next_eval_at) 时
+        创建 proactive.evaluate Task 并按当前 energy band 计算下一次触发。
+
+        - 可注入 Clock/RNG（构造时注入，测试可复现）。
+        - misfire coalesce：到期时无论错过了多少 tick 只补一次评估。
+        - Alert 由 Event 立即触发 (schedule_immediate_evaluate)，不走此节流。
         """
+        if self._proactive_config is None or not self._proactive_config.enabled:
+            return []
         now = self._now()
+        now_ms = epoch_ms(now)
+
+        state = self._read_cadence_state()
+        # 未到期 → 不创建任务
+        if state["next_eval_at"] > now_ms:
+            return []
+
         tasks: list[Task] = []
-        # proactive.evaluate — 单 Task（批量处理 evaluating candidates）
-        idempotency = f"proactive-evaluate:{epoch_ms(now)}"
+        # 创建 proactive.evaluate 任务（单次，misfire 只补一次）
+        idempotency = f"proactive-evaluate:{now_ms}"
         existing = self._conn.execute(
             "SELECT task_id FROM tasks WHERE idempotency_key=?", (idempotency,),
         ).fetchone()
         if existing is None:
+            # Task.scheduled_at / created_at 为 datetime 类型（task_repo.insert
+            # 内部调用 epoch_ms() 转为 epoch ms 存储）。
             task = Task(
                 task_id=f"task-pe-{idempotency}",
                 task_type=PROACTIVE_EVALUATE_TASK_TYPE,
                 payload_ref="",
                 status=TaskStatus.queued,
-                priority=15,  # 高于 connector poll 的 10 但低于 memory
-                scheduled_at=epoch_ms(now),
+                priority=15,
+                scheduled_at=now,
                 idempotency_key=idempotency,
                 origin="proactive-scheduler",
             )
             try:
                 self._task_repo.insert(task)
-                self._conn.commit()
                 tasks.append(task)
             except Exception:
                 self._conn.rollback()
                 _LOGGER.warning("insert proactive.evaluate task failed (likely duplicate)")
+                return tasks
+
+        # 根据当前能量档计算下一次评估间隔
+        band = self._current_energy_band()
+        interval_s = self._compute_cadence_interval(band)
+        next_eval_at = now_ms + interval_s * 1000
+        self._write_cadence_state(
+            last_eval_at=now_ms,
+            next_eval_at=next_eval_at,
+            interval_s=interval_s,
+            energy_band=band,
+            updated_at=now_ms,
+        )
+        try:
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            _LOGGER.warning("persist cadence state failed")
         return tasks
 
     def _now(self) -> datetime:
         return self._clock.now()
+
+    # ── M2: cadence state 读写 + 能量档 + 间隔计算 ──
+
+    def _read_cadence_state(self) -> dict[str, Any]:
+        """读 cadence 单例行；不存在则返回到期默认。"""
+        row = self._conn.execute(
+            "SELECT last_eval_at, next_eval_at, interval_s, energy_band "
+            "FROM proactive_cadence_state WHERE id=1",
+        ).fetchone()
+        if row is None:
+            return {
+                "last_eval_at": None, "next_eval_at": 0,
+                "interval_s": 60, "energy_band": "medium",
+            }
+        return {
+            "last_eval_at": row[0], "next_eval_at": row[1],
+            "interval_s": row[2], "energy_band": row[3],
+        }
+
+    def _write_cadence_state(
+        self, *, last_eval_at, next_eval_at, interval_s, energy_band, updated_at,
+    ) -> None:
+        self._conn.execute(
+            "UPDATE proactive_cadence_state "
+            "SET last_eval_at=?, next_eval_at=?, interval_s=?, "
+            "energy_band=?, updated_at=? WHERE id=1",
+            (last_eval_at, next_eval_at, interval_s, energy_band, updated_at),
+        )
+
+    def _current_energy_band(self) -> str:
+        """取当前能量档：有 PresenceReader 用真实活动，否则 medium。"""
+        if self._presence_reader is None or self._proactive_config is None:
+            return "medium"
+        from cogito.service.energy_model import compute_energy, energy_band
+        try:
+            last_user_dt = self._presence_reader.get_last_user_activity(
+                self._proactive_config.default_principal_id,
+            )
+        except Exception:
+            return "medium"
+        return energy_band(compute_energy(last_user_dt))
+
+    def _compute_cadence_interval(self, band: str) -> int:
+        """按能量档 + 配置计算下一次评估间隔（秒，含 jitter、上下限）。"""
+        from cogito.service.proactive_cadence import compute_interval
+        if self._proactive_config is None:
+            return 60
+        return compute_interval(
+            band, self._proactive_config.cadence, rng=self._rng,
+        )
 
     def tick(self, limit: int = 10) -> list[Task]:
         """执行一轮调度，返回创建的 Task 列表。"""
