@@ -63,7 +63,7 @@
     {"file":"plan/10_残余违规清零与可发布闭环开发计划.md","plan_id":"PLAN-10","status":"completed","version":"1.0","covers":["Plan 10 M0-M6 (由 PLAN-11 修正 Delivery/Gateway/Plugin 收口)"]},
     {"file":"plan/11_DeliveryGatewayPlugin与入站契约收口计划.md","plan_id":"PLAN-11","status":"completed","version":"1.0","covers":["Plan 11 M1-M4"]},
     {"file":"plan/12_vision.md","plan_id":"PLAN-12","status":"completed","version":"1.1","covers":["Plan 12 image MVP; PDF/OCR follow-up"]},
-    {"file":"plan/13_记忆系统治理与内容记忆增强开发计划.md","plan_id":"PLAN-13","status":"pending","version":"1.0","covers":["Memory provenance and lifecycle convergence","Policy-driven memory promotion","Knowledge Resource-Document-Segment layer","Unified retrieval and deletion replay"]},
-    {"file":"plan/14_PLAN13生产闭环修复计划.md","plan_id":"PLAN-14","status":"in_progress","version":"1.0","covers":["Durable memory extraction","Memory signals and lifecycle","Knowledge production wiring","Unified retrieval and control surfaces"]}
+    {"file":"plan/13_记忆系统治理与内容记忆增强开发计划.md","plan_id":"PLAN-13","status":"completed","version":"1.0","covers":["Memory provenance and lifecycle convergence","Policy-driven memory promotion","Knowledge Resource-Document-Segment layer","Unified retrieval and deletion replay"]},
+    {"file":"plan/14_PLAN13生产闭环修复计划.md","plan_id":"PLAN-14","status":"completed","version":"1.0","covers":["Durable memory extraction (R1)","Memory signals and lifecycle (R2/R5/R8)","Knowledge production wiring (R3/R9/R10/R11)","Unified retrieval and control surfaces (R4/R12/R13/R14)","Memory maintenance scheduling (R6)"]}
   ]
 }
