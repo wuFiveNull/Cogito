@@ -2,11 +2,13 @@
 
 DOMAIN-CONTRACTS / 1.13 MemoryItem
 MEMORY-LIFECYCLE / 1-14
+PLAN-13 / §5.1 MemorySource
 """
 
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
@@ -283,3 +285,68 @@ def _parse_dt(s: str) -> datetime | None:
         return datetime.fromisoformat(s)
     except (ValueError, TypeError):
         return None
+
+
+@dataclass
+class MemorySource:
+    """MemoryItem 的单条来源记录。
+
+    PLAN-13 / §5.1：一个 MemoryItem 可关联多条来源，
+    每条来源携带 source_type、稳定 source_id、evidence_ref 等。
+
+    DOMAIN-CONTRACTS / 1.13：来源集合替代单引用 source_type/source_id。
+    """
+
+    memory_source_id: str
+    memory_id: str
+    source_type: str = "message"
+    source_id: str = ""
+    source_revision: str = ""
+    source_sequence: int = 0
+    evidence_ref: str = ""
+    evidence_hash: str = ""
+    trust_label: str = "unverified"
+    extraction_id: str = ""
+    created_at: datetime | None = None
+    deleted_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if self.created_at is None:
+            self.created_at = datetime.now(UTC)
+
+    @property
+    def is_deleted(self) -> bool:
+        return self.deleted_at is not None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "memory_source_id": self.memory_source_id,
+            "memory_id": self.memory_id,
+            "source_type": self.source_type,
+            "source_id": self.source_id,
+            "source_revision": self.source_revision,
+            "source_sequence": self.source_sequence,
+            "evidence_ref": self.evidence_ref,
+            "evidence_hash": self.evidence_hash,
+            "trust_label": self.trust_label,
+            "extraction_id": self.extraction_id,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "deleted_at": self.deleted_at.isoformat() if self.deleted_at else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> MemorySource:
+        return cls(
+            memory_source_id=data.get("memory_source_id", ""),
+            memory_id=data.get("memory_id", ""),
+            source_type=data.get("source_type", "message"),
+            source_id=data.get("source_id", ""),
+            source_revision=data.get("source_revision", ""),
+            source_sequence=int(data.get("source_sequence", 0)),
+            evidence_ref=data.get("evidence_ref", ""),
+            evidence_hash=data.get("evidence_hash", ""),
+            trust_label=data.get("trust_label", "unverified"),
+            extraction_id=data.get("extraction_id", ""),
+            created_at=_parse_dt(data["created_at"]) if data.get("created_at") else None,
+            deleted_at=_parse_dt(data["deleted_at"]) if data.get("deleted_at") else None,
+        )

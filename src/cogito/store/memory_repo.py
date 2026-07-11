@@ -17,6 +17,7 @@ from cogito.domain.memory import (
     GoalStatus,
     MemoryItem,
     MemoryKind,
+    MemorySource,
     MemoryStatus,
 )
 
@@ -802,6 +803,82 @@ class MemoryRepository:
             return True
         except sqlite3.IntegrityError:
             return False
+
+    # ── 来源管理（PLAN-13 P13-01）──
+
+    def insert_source(self, source: MemorySource) -> bool:
+        """幂等插入一条记忆来源。
+
+        基于 UNIQUE(memory_id, source_type, source_id, source_revision, evidence_hash)，
+        重复插入不产生重复行。
+        """
+        import uuid
+        if not source.memory_source_id:
+            source.memory_source_id = uuid.uuid4().hex
+        if source.created_at is None:
+            source.created_at = datetime.now(UTC)
+        try:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO memory_sources ("
+                "  memory_source_id, memory_id, source_type, source_id, "
+                "  source_revision, source_sequence, evidence_ref, evidence_hash, "
+                "  trust_label, extraction_id, created_at, deleted_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    source.memory_source_id,
+                    source.memory_id,
+                    source.source_type,
+                    source.source_id,
+                    source.source_revision,
+                    source.source_sequence,
+                    source.evidence_ref,
+                    source.evidence_hash,
+                    source.trust_label,
+                    source.extraction_id,
+                    source.created_at.isoformat(),
+                    source.deleted_at.isoformat() if source.deleted_at else None,
+                ),
+            )
+            return True
+        except sqlite3.OperationalError:
+            return False
+
+    def list_sources(
+        self,
+        memory_id: str,
+        include_deleted: bool = False,
+    ) -> list[MemorySource]:
+        """列出记忆的有效来源（PLAN-13 dual-read：优先读新表）。"""
+        try:
+            sql = (
+                "SELECT * FROM memory_sources "
+                "WHERE memory_id=?"
+            )
+            params: list[Any] = [memory_id]
+            if not include_deleted:
+                sql += " AND deleted_at IS NULL"
+            sql += " ORDER BY created_at ASC"
+            rows = self._conn.execute(sql, params).fetchall()
+            return [MemorySource.from_dict(dict(r)) for r in rows]
+        except sqlite3.OperationalError:
+            return []
+
+    def invalidate_sources(
+        self,
+        memory_id: str,
+        reason: str = "",
+    ) -> int:
+        """软删除记忆的所有来源（设置 deleted_at）。"""
+        now = datetime.now(UTC).isoformat()
+        try:
+            cur = self._conn.execute(
+                "UPDATE memory_sources SET deleted_at=? "
+                "WHERE memory_id=? AND deleted_at IS NULL",
+                (now, memory_id),
+            )
+            return cur.rowcount
+        except sqlite3.OperationalError:
+            return 0
 
     def get_relations(
         self,
