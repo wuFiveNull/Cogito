@@ -15,6 +15,18 @@ from cogito.domain.knowledge import (
     KnowledgeSegment,
 )
 
+# ── 辅助 ──
+
+def _row_as_dict(row: Any) -> dict[str, Any]:
+    """兼容 sqlite3.Row 与 tuple。"""
+    if row is None:
+        return {}
+    if hasattr(row, "keys"):
+        return dict(row)
+    # tuple fallback：无法推断列名，依赖调用方不用 tuple 路径
+    return {}
+
+
 # ── Resource ──
 
 def insert_resource(conn: sqlite3.Connection, r: KnowledgeResource) -> KnowledgeResource:
@@ -42,15 +54,20 @@ def get_resource(conn: sqlite3.Connection, resource_id: str) -> KnowledgeResourc
     ).fetchone()
     if not row:
         return None
-    d = dict(row)
+    d = _row_as_dict(row)
+    if d:
+        return KnowledgeResource(
+            resource_id=d["resource_id"], principal_id=d.get("principal_id", ""),
+            connector_id=d.get("connector_id", ""), source_uri_hash=d.get("source_uri_hash", ""),
+            source_kind=d.get("source_kind", ""), media_type=d.get("media_type", ""),
+            payload_ref=d.get("payload_ref", ""), content_hash=d.get("content_hash", ""),
+            trust_label=d.get("trust_label", ""), scope_type=d.get("scope_type", ""),
+            scope_id=d.get("scope_id", ""), source_version=d.get("source_version", ""),
+            status=d.get("status", ""), retention_class=d.get("retention_class", ""),
+        )
     return KnowledgeResource(
-        resource_id=d["resource_id"], principal_id=d.get("principal_id", ""),
-        connector_id=d.get("connector_id", ""), source_uri_hash=d.get("source_uri_hash", ""),
-        source_kind=d.get("source_kind", ""), media_type=d.get("media_type", ""),
-        payload_ref=d.get("payload_ref", ""), content_hash=d.get("content_hash", ""),
-        trust_label=d.get("trust_label", ""), scope_type=d.get("scope_type", ""),
-        scope_id=d.get("scope_id", ""), source_version=d.get("source_version", ""),
-        status=d.get("status", ""), retention_class=d.get("retention_class", ""),
+        resource_id=row[0], status=row[12] if len(row) > 12 else "",
+        content_hash=row[7] if len(row) > 7 else "",
     )
 
 
@@ -260,13 +277,13 @@ def search_knowledge_fts(
     except sqlite3.OperationalError:
         pass
     # LIKE 降级
-        like = f"%{query}%"
-        try:
-            rows = conn.execute(
-                "SELECT segment_id FROM knowledge_segments "
-                "WHERE text_ref_or_inline LIKE ? AND deleted_at IS NULL LIMIT ?",
-                (like, limit),
-            ).fetchall()
-            return [(r["segment_id"], 0.5) for r in rows]
-        except sqlite3.OperationalError:
-            return []
+    like = f"%{query}%"
+    try:
+        rows = conn.execute(
+            "SELECT segment_id FROM knowledge_segments "
+            "WHERE text_ref_or_inline LIKE ? AND deleted_at IS NULL LIMIT ?",
+            (like, limit),
+        ).fetchall()
+        return [(r["segment_id"], 0.5) for r in rows]
+    except sqlite3.OperationalError:
+        return []
