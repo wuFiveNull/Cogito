@@ -53,6 +53,7 @@
 - **预算**：每 hour / 每 day 发送上限；超出降级为 `send_later` 或 `digest`。
 - **安静时段**：跨午夜自动处理（23:00–08:00）。
 - **能量模型**：三档衰减（30m/4m/48h），仅调整 urgency 权重 + novelty/relevance 阈值。
+- **自适应节拍 (cadence)**：energy band 驱动下一次评估间隔（H=60s / M=240s / L=480s，默认），可注入 RNG 加 ±10% jitter；misfire 使用 coalesce（重启后只补一次）。配置见 `[proactive.cadence]`。
 
 ## 数据流
 
