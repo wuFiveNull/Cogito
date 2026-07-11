@@ -306,6 +306,13 @@ def list_drift_skill_states(
     return {"items": items, "total": len(items)}
 
 
+@router.get("/drift/metrics")
+def drift_metrics(deps: CommandDeps = Depends(get_command_deps)) -> dict:
+    """Drift 核心指标（M7）。"""
+    return _svc(deps).drift_metrics(
+        principal_id=deps.config.drift.default_principal_id)
+
+
 # ── multimodal metrics (PLAN-12 M6) ─────────────────────────────
 
 

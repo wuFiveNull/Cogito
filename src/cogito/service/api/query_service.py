@@ -1075,6 +1075,48 @@ class QueryService:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    # ── core metrics (R10 M7) ────────────────────────────────────
+
+    def drift_metrics(self, principal_id: str = "owner") -> dict[str, Any]:
+        """Drift 核心指标 (M7)。"""
+        total = self._conn.execute(
+            "SELECT COUNT(*) FROM drift_runs WHERE principal_id=?",
+            (principal_id,),
+        ).fetchone()[0]
+        completed = self._conn.execute(
+            "SELECT COUNT(*) FROM drift_runs WHERE principal_id=? AND status='completed'",
+            (principal_id,),
+        ).fetchone()[0]
+        no_value = self._conn.execute(
+            "SELECT COUNT(*) FROM drift_runs WHERE principal_id=? "
+            "AND finish_summary LIKE 'no_value%'",
+            (principal_id,),
+        ).fetchone()[0]
+        paused_total = self._conn.execute(
+            "SELECT COUNT(*) FROM drift_runs WHERE principal_id=? AND status='paused'",
+            (principal_id,),
+        ).fetchone()[0]
+        resumed = self._conn.execute(
+            "SELECT COUNT(*) FROM drift_runs WHERE principal_id=? "
+            "AND finish_summary LIKE '%resumed%'",
+            (principal_id,),
+        ).fetchone()[0]
+        # unauthorized_tool_execution 计数 (MVP 只读 → 0)
+        unauthorized = 0
+        # duplicate_side_effect 计数 (MVP 不写 Delivery → 0)
+        duplicate_side_effect = 0
+        return {
+            "admission_rate": None,  # 由 admission/deny 统计计算；此处留 None
+            "total_runs": total,
+            "completion_rate": (completed / total) if total else 0.0,
+            "no_value_rate": (no_value / total) if total else 0.0,
+            "paused_total": paused_total,
+            "paused_recovery_rate": (resumed / paused_total) if paused_total else 1.0,
+            "duplicate_side_effect_count": duplicate_side_effect,
+            "unauthorized_tool_execution_count": unauthorized,
+            "model_cost_per_useful_result": 0.0,  # MVP 无模型调用
+        }
+
     # ── outbox / events / dead letter ───────────────────────────
 
     def list_outbox(self, limit: int = 50) -> list[dict[str, Any]]:
