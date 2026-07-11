@@ -159,6 +159,33 @@ class DriftCheckpointV1:
         }
 
 
+@dataclass(frozen=True)
+class DriftCandidateDraft:
+    """Drift 完成后投影为用户可见 Candidate 的草稿（R9 M6）。
+
+    投影服务校验来源/PO，生成幂等 ProactiveCandidate(origin=drift)。
+    """
+    topic: str
+    summary: str
+    evidence_refs: tuple[str, ...] = ()
+    trust_label: str = "system_generated"   # unverified | system_generated | confirmed_inference
+    urgency: float = 0.5
+    confidence: float = 0.5
+    relevance: float = 0.5
+    expires_at: int | None = None           # epoch ms
+    suggested_target: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "topic": self.topic, "summary": self.summary,
+            "evidence_refs": list(self.evidence_refs),
+            "trust_label": self.trust_label, "urgency": self.urgency,
+            "confidence": self.confidence, "relevance": self.relevance,
+            "expires_at": self.expires_at,
+            "suggested_target": self.suggested_target,
+        }
+
+
 @dataclass
 class DriftRunResult:
     """Drift run 完成后的内部结果（不含用户可见 Candidate）。"""

@@ -34,6 +34,7 @@ class ProactiveCandidate:
     idempotency_key: str = ""
     source_event_ids: tuple[str, ...] = ()
     source_payload_ref: str | None = None
+    origin: str | None = None  # connector|feedback|drift|manual|alert_fastpath (NULL=遗留)
     created_at: int = 0
     consumed_at: int | None = None
     expires_at: int | None = None  # epoch ms
@@ -97,14 +98,14 @@ class ProactiveCandidateRepository:
             "(candidate_id, principal_id, stream_type, topic, summary, "
             " novelty, relevance, urgency, confidence, recommended_action, "
             " policy_version, idempotency_key, source_event_ids_json, "
-            " source_payload_ref, expires_at_value, created_at, status) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " source_payload_ref, origin, expires_at_value, created_at, status) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 c.candidate_id, c.principal_id, c.stream_type, c.topic,
                 c.summary, c.novelty, c.relevance, c.urgency, c.confidence,
                 c.recommended_action, c.policy_version, c.idempotency_key,
                 json.dumps(list(c.source_event_ids), ensure_ascii=False),
-                c.source_payload_ref,
+                c.source_payload_ref, c.origin,
                 c.created_at + c.candidate_ttl_hours * 3600 * 1000 if False else None,
                 c.created_at, c.status,
             ),
@@ -182,6 +183,7 @@ def _row_to_candidate(row: Any) -> ProactiveCandidate:
         idempotency_key=row["idempotency_key"],
         source_event_ids=json.loads(row["source_event_ids_json"] or "[]"),
         source_payload_ref=row["source_payload_ref"],
+        origin=row["origin"] if "origin" in row.keys() else None,
         created_at=row["created_at"],
         consumed_at=row["consumed_at"],
         status=row["status"],

@@ -278,6 +278,34 @@ def proactive_feedback(deps: CommandDeps = Depends(get_command_deps)) -> dict:
     return _svc(deps).proactive_feedback()
 
 
+# ── Drift Dashboard (R9 M6) ──────────────────────────────────────
+
+
+@router.get("/drift/status")
+def drift_status(deps: CommandDeps = Depends(get_command_deps)) -> dict:
+    """Drift 模块当前状态（真实值，不再返回占位）。"""
+    return _svc(deps).drift_status(principal_id=deps.config.drift.default_principal_id)
+
+
+@router.get("/drift/runs")
+def list_drift_runs(
+    limit: int = Query(50, ge=1, le=200),
+    deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    items = _svc(deps).list_drift_runs(
+        principal_id=deps.config.drift.default_principal_id, limit=limit)
+    return {"items": items, "total": len(items)}
+
+
+@router.get("/drift/skill-states")
+def list_drift_skill_states(
+    deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    items = _svc(deps).list_drift_skill_states(
+        principal_id=deps.config.drift.default_principal_id)
+    return {"items": items, "total": len(items)}
+
+
 # ── multimodal metrics (PLAN-12 M6) ─────────────────────────────
 
 

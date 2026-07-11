@@ -1007,8 +1007,73 @@ class QueryService:
             "not_useful": 0,
             "muted": actions.get("silent", 0),
             "requested_more": 0,
-            "drift_preemption_reason": None,
         }
+
+    # ── Drift Dashboard (R9 M6) ──────────────────────────────────────
+
+    def drift_status(self, principal_id: str = "owner") -> dict[str, Any]:
+        """Drift 模块当前状态（替代占位值，返回真实数据）。"""
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS total, "
+            "SUM(CASE WHEN status IN ('admitted','running','waiting','paused') "
+            "THEN 1 ELSE 0 END) AS active "
+            "FROM drift_runs WHERE principal_id=?",
+            (principal_id,),
+        ).fetchone()
+        total = row["total"] or 0
+        active = row["active"] or 0
+
+        # 最近一次抢占原因（真实值，不再是 None）
+        preempt_row = self._conn.execute(
+            "SELECT preemption_reason FROM drift_runs WHERE principal_id=? "
+            "AND preemption_reason IS NOT NULL "
+            "ORDER BY finished_at DESC, created_at DESC LIMIT 1",
+            (principal_id,),
+        ).fetchone()
+        latest_preemption_reason = preempt_row["preemption_reason"] if preempt_row else None
+
+        # 最近一次 Skill 选择
+        skill_row = self._conn.execute(
+            "SELECT skill_name, skill_version FROM drift_runs WHERE principal_id=? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (principal_id,),
+        ).fetchone()
+        return {
+            "enabled": True,  # 由路由层注入 config 控制；此处表示模块可用
+            "total_runs": total,
+            "active_runs": active,
+            "latest_preemption_reason": latest_preemption_reason,  # 真实值
+            "latest_skill": skill_row["skill_name"] if skill_row else None,
+            "latest_skill_version": skill_row["skill_version"] if skill_row else None,
+            "signals_pending": self._conn.execute(
+                "SELECT COUNT(*) FROM drift_preemption_signals "
+                "WHERE principal_id=? AND preempt_requested=1",
+                (principal_id,),
+            ).fetchone()[0],
+        }
+
+    def list_drift_runs(self, principal_id: str = "owner",
+                        limit: int = 50) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT drift_run_id, skill_name, skill_version, status, "
+            "preemption_reason, steps_taken, budget_used_json, "
+            "started_at, finished_at, created_at "
+            "FROM drift_runs WHERE principal_id=? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (principal_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_drift_skill_states(self, principal_id: str = "owner",
+                                ) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT skill_name, skill_version, last_status, last_run_at, "
+            "run_count, checkpoint_ref "
+            "FROM drift_skill_state WHERE principal_id=? "
+            "ORDER BY updated_at DESC",
+            (principal_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # ── outbox / events / dead letter ───────────────────────────
 

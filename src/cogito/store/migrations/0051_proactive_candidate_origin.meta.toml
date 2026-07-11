@@ -1,0 +1,6 @@
+online_safe = true
+requires_backup = false
+estimated_space = "1MB"
+preconditions = []
+post_checks = ["foreign_key_check", "integrity_check"]
+checksum = ""
