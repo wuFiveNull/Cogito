@@ -225,65 +225,62 @@ class TurnCompletedMemoryExtractionConsumer(EventConsumer):
                 _mark_consumed(conn, self.name, lease.event_id)
             return True
 
-        from cogito.service.memory_extractor import EXTRACTOR_VERSION, ExtractionTriggerPolicy
-        from cogito.service.task_handlers import make_idempotency_key
-        from cogito.service.task_service import SqliteTaskService
-        from cogito.store.watermark_repo import PROC_MEMORY_EXTRACT, WatermarkRepository
+        with conn:
+            from cogito.service.memory_extractor import request_extraction
+            request_extraction(
+                conn,
+                conversation_id=conversation_id,
+                session_id=session_id,
+                principal_id=principal_id,
+                trigger_type="turn_completed",
+                priority=40,
+            )
+            _mark_consumed(conn, self.name, lease.event_id)
+        return True
 
-        watermark = WatermarkRepository(conn).get(
-            PROC_MEMORY_EXTRACT, conversation_id, session_id,
-        )
-        from_seq = (watermark.processed_upto_sequence + 1) if watermark else 1
-        seq_row = conn.execute(
-            "SELECT COALESCE(MAX(receive_sequence), 0) AS upto, COUNT(*) AS n "
-            "FROM messages WHERE session_id=? AND receive_sequence>=?",
-            (session_id, from_seq),
+
+class SessionCompletedMemoryExtractionConsumer(EventConsumer):
+    """Project a committed SessionCompleted fact into one durable extraction Task.
+
+    session_closed 触发：会话结束（归档/删除）时，把该 session 剩余未提取
+    窗口作为一次性高优先级 extraction Task 提交，确保关闭前内容不丢失。
+    """
+
+    name = "session-extraction-scheduler"
+
+    def can_handle(self, lease: OutboxLease) -> bool:
+        return lease.event_type == "SessionCompleted"
+
+    def handle(self, conn: sqlite3.Connection, lease: OutboxLease) -> bool:
+        consumed = conn.execute(
+            "SELECT 1 FROM event_consumptions WHERE consumer_name=? AND event_id=?",
+            (self.name, lease.event_id),
         ).fetchone()
-        to_seq = int(seq_row["upto"] or 0)
-        new_count = int(seq_row["n"] or 0)
+        if consumed is not None:
+            return True
+
+        try:
+            payload = json.loads(lease.payload_ref or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        session_id = str(payload.get("session_id") or lease.aggregate_id)
+        conversation_id = str(payload.get("conversation_id") or "")
+        principal_id = str(payload.get("principal_id") or "")
+        if not session_id or not principal_id:
+            with conn:
+                _mark_consumed(conn, self.name, lease.event_id)
+            return True
 
         with conn:
-            if to_seq >= from_seq and ExtractionTriggerPolicy().should_trigger(
-                trigger_type="turn_completed", new_message_count=new_count,
-            ):
-                task_payload = {
-                    "conversation_id": conversation_id,
-                    "session_id": session_id,
-                    "principal_id": principal_id,
-                    "from_sequence": from_seq,
-                    "to_sequence": to_seq,
-                    "input_version": 0,
-                    "prompt_version": EXTRACTOR_VERSION,
-                    "model_role": "memory_extractor",
-                }
-                key = make_idempotency_key(
-                    "memory.extract", conversation_id, session_id,
-                    from_seq, to_seq, EXTRACTOR_VERSION,
-                )
-                try:
-                    SqliteTaskService(conn).create(
-                        "memory.extract",
-                        json.dumps(task_payload, ensure_ascii=False),
-                        idempotency_key=key,
-                        origin="turn_completed",
-                        priority=40,
-                        retry_policy={"max_attempts": 3, "backoff_seconds": [5, 30, 120]},
-                    )
-                    # PLAN-14 R-08: 提取请求已创建
-                    from cogito.domain.events import DomainEvent
-                    from cogito.store.repositories import OutboxRepository
-                    from cogito.contracts.clock import epoch_ms
-                    OutboxRepository(conn).insert(DomainEvent(
-                        event_type="MemoryExtractionRequested",
-                        aggregate_type="memory_extract",
-                        aggregate_id=key,
-                        aggregate_version=1,
-                        payload=task_payload,
-                        payload_ref=json.dumps(task_payload, ensure_ascii=False),
-                        origin="turn_completed_consumer",
-                    ))
-                except sqlite3.IntegrityError:
-                    pass
+            from cogito.service.memory_extractor import request_extraction
+            request_extraction(
+                conn,
+                conversation_id=conversation_id,
+                session_id=session_id,
+                principal_id=principal_id,
+                trigger_type="session_closed",
+                priority=80,
+            )
             _mark_consumed(conn, self.name, lease.event_id)
         return True
 
@@ -320,4 +317,5 @@ def build_default_registry(default_principal_id: str = "owner") -> EventConsumer
         default_principal_id=default_principal_id,
     ))
     registry.register(TurnCompletedMemoryExtractionConsumer())
+    registry.register(SessionCompletedMemoryExtractionConsumer())
     return registry

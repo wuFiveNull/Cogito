@@ -24,6 +24,21 @@ from cogito.service.memory_service import SqliteMemoryService
 
 _LOGGER = logging.getLogger("cogito.memory_extractor")
 
+
+class MemoryExtractionParseError(RuntimeError):
+    """strict 模式下模型输出解析失败。
+
+    strict 窗口内该异常意味着"模型响应不可用"，
+    不得被当作零候选窗口，亦不得推进 watermark。
+    """
+
+
+class MemoryExtractionWriteError(RuntimeError):
+    """strict 模式下候选写入失败。
+
+    整个提取窗口应视为失败：事务回滚、watermark 不推进、下次重试该窗口。
+    """
+
 # 最小消息数阈值，低于此数量不提取
 EXTRACT_MIN_MESSAGES = 4
 # 每次提取最多处理的消息数
@@ -134,6 +149,83 @@ class ExtractionTriggerPolicy:
         return new_message_count >= self.min_new_messages
 
 
+def request_extraction(
+    conn: sqlite3.Connection,
+    *,
+    conversation_id: str,
+    session_id: str,
+    principal_id: str,
+    trigger_type: str,
+    priority: int = 40,
+) -> bool:
+    """创建 durable memory.extract Task 并发出 MemoryExtractionRequested 事件。
+
+    三类提取触发（turn_completed / session_closed / explicit_remember）共用此入口，
+    避免重复的水位计算 / 幂等键 / 事件发出逻辑（PLAN-16 M1 P0-06）。
+    返回 True 表示（已创建或已存在），False 表示触发策略决定不提交。
+    """
+    from cogito.domain.events import DomainEvent
+    from cogito.service.task_handlers import make_idempotency_key
+    from cogito.service.task_service import SqliteTaskService
+    from cogito.store.repositories import OutboxRepository
+    from cogito.store.watermark_repo import PROC_MEMORY_EXTRACT, WatermarkRepository
+
+    watermark = WatermarkRepository(conn).get(
+        PROC_MEMORY_EXTRACT, conversation_id, session_id,
+    )
+    from_seq = (watermark.processed_upto_sequence + 1) if watermark else 1
+    seq_row = conn.execute(
+        "SELECT COALESCE(MAX(receive_sequence), 0) AS upto, COUNT(*) AS n "
+        "FROM messages WHERE session_id=? AND receive_sequence>=?",
+        (session_id, from_seq),
+    ).fetchone()
+    to_seq = int(seq_row["upto"] or 0)
+    new_count = int(seq_row["n"] or 0)
+
+    if to_seq < from_seq:
+        return True
+    if not ExtractionTriggerPolicy().should_trigger(
+        trigger_type=trigger_type, new_message_count=new_count,
+    ):
+        return True
+
+    task_payload = {
+        "conversation_id": conversation_id,
+        "session_id": session_id,
+        "principal_id": principal_id,
+        "from_sequence": from_seq,
+        "to_sequence": to_seq,
+        "input_version": 0,
+        "prompt_version": EXTRACTOR_VERSION,
+        "model_role": "memory_extractor",
+    }
+    key = make_idempotency_key(
+        "memory.extract", conversation_id, session_id, from_seq, to_seq, EXTRACTOR_VERSION,
+    )
+    try:
+        SqliteTaskService(conn).create(
+            "memory.extract",
+            json.dumps(task_payload, ensure_ascii=False),
+            idempotency_key=key,
+            origin=trigger_type,
+            priority=priority,
+            retry_policy={"max_attempts": 3, "backoff_seconds": [5, 30, 120]},
+        )
+    except sqlite3.IntegrityError:
+        return True  # 同一窗口已有任务，幂等成功
+
+    OutboxRepository(conn).insert(DomainEvent(
+        event_type="MemoryExtractionRequested",
+        aggregate_type="memory_extract",
+        aggregate_id=key,
+        aggregate_version=1,
+        payload=task_payload,
+        payload_ref=json.dumps(task_payload, ensure_ascii=False),
+        origin=f"{trigger_type}_consumer",
+    ))
+    return True
+
+
 class MemoryExtractor:
     """从会话中提取长期记忆候选（PLAN-13 P13-06: trigger + watermark）。"""
 
@@ -144,7 +236,6 @@ class MemoryExtractor:
         router: ModelRouter | None = None,
         model_role: str = "memory_extractor",
         trigger_policy: ExtractionTriggerPolicy | None = None,
-        watermark_repo=None,
         strict: bool = False,
     ) -> None:
         self._conn = conn
@@ -152,7 +243,6 @@ class MemoryExtractor:
         self._router = router
         self._model_role = model_role
         self._trigger_policy = trigger_policy or ExtractionTriggerPolicy()
-        self._watermark_repo = watermark_repo
         self._strict = strict
 
     async def extract_from_messages(
@@ -203,56 +293,25 @@ class MemoryExtractor:
             return []
 
         # 写入记忆（带精确来源）
+        # strict 模式：任意候选写入失败必须中止整个窗口（事务回滚、不推进 watermark）；
+        # non-strict 模式：才允许单条跳过，避免整窗口因单条脏数据丢失。
         written = []
         for c in candidates:
+            evidence = self._validate_evidence(c, ctx.allowed_message_ids)
             try:
-                # PLAN-13 P13-02: 服务端校验 evidence 必须属于当前窗口
-                evidence = self._validate_evidence(c, ctx.allowed_message_ids)
                 item = self._write_candidate(c, ctx, evidence=evidence)
-                if item:
-                    written.append(c)
             except Exception as e:
-                _LOGGER.warning("Failed to write memory candidate: %s", e)
-
-        # PLAN-13 P13-06: 成功写入后推进 watermark
-        if written and ctx.to_sequence > 0:
-            self._advance_watermark(ctx)
+                if self._strict:
+                    raise MemoryExtractionWriteError(
+                        f"strict extraction aborted: candidate write failed: {e}"
+                    ) from e
+                _LOGGER.warning("Failed to write memory candidate (non-strict, skipping): %s", e)
+                continue
+            if item:
+                written.append(c)
 
         _LOGGER.info("Extracted %d memory candidates", len(written))
         return written
-
-    def _advance_watermark(self, ctx: ExtractionContext) -> None:
-        """推进提取水位（PLAN-13 P13-06，CAS 幂等）。
-
-        成功提交后才推进，失败不推进（下次重试不漏消息）。
-        """
-        if self._watermark_repo is None:
-            return
-        from cogito.store.watermark_repo import PROC_MEMORY_EXTRACT
-        # 确保行存在
-        self._watermark_repo.upsert(
-            processor_type=PROC_MEMORY_EXTRACT,
-            conversation_id=ctx.session_id,
-            session_id=ctx.session_id,
-            input_version=0,
-        )
-        # 读取当前状态进行 CAS 推进
-        current = self._watermark_repo.get(
-            PROC_MEMORY_EXTRACT, ctx.session_id, ctx.session_id,
-        )
-        if current is None:
-            return
-        # 只推进到更大序列（幂等、单调）
-        if ctx.to_sequence > current.processed_upto_sequence:
-            self._watermark_repo.advance(
-                processor_type=PROC_MEMORY_EXTRACT,
-                conversation_id=ctx.session_id,
-                session_id=ctx.session_id,
-                to_sequence=ctx.to_sequence,
-                input_version=0,
-                expected_from_sequence=current.processed_upto_sequence,
-                expected_version=current.version,
-            )
 
     async def _call_extractor(
         self, conversation_text: str,
@@ -324,12 +383,22 @@ class MemoryExtractor:
                 raise RuntimeError(f"memory extraction failed: {response.finish_reason}")
             return []
 
-        # 解析 JSON 输出
-        return self._parse_response(response.text)
+        # 解析 JSON 输出（strict 模式下解析失败必须向上抛，不得当作零候选）
+        try:
+            return self._parse_response(response.text)
+        except MemoryExtractionParseError:
+            if self._strict:
+                raise
+            _LOGGER.warning("Non-strict extraction output parse failed, treating as empty")
+            return []
 
     @staticmethod
     def _parse_response(text: str) -> list[dict[str, Any]]:
-        """从模型输出文本中解析 JSON 候选列表。"""
+        """从模型输出文本中解析 JSON 候选列表。
+
+        解析失败时抛出 MemoryExtractionParseError（不再返回空列表），
+        使调用方能够区分"模型输出损坏"与"合法的空候选窗口"。
+        """
         text = text.strip()
 
         # 尝试提取 JSON 块（可能在 markdown 代码块中）
@@ -338,6 +407,7 @@ class MemoryExtractor:
         elif "```" in text:
             text = text.split("```")[1].split("```")[0].strip()
 
+        data: dict[str, Any] | None = None
         try:
             data = json.loads(text)
         except json.JSONDecodeError:
@@ -346,13 +416,24 @@ class MemoryExtractor:
                 start = text.index("{")
                 end = text.rindex("}")
                 data = json.loads(text[start:end + 1])
-            except (ValueError, json.JSONDecodeError):
-                _LOGGER.warning("Failed to parse extraction output as JSON")
-                return []
+            except (ValueError, json.JSONDecodeError) as e:
+                raise MemoryExtractionParseError(
+                    f"failed to parse extraction output as JSON: {e}"
+                ) from e
 
-        candidates = data.get("candidates", []) if isinstance(data, dict) else data
+        if not isinstance(data, dict):
+            raise MemoryExtractionParseError(
+                f"extraction output is not a JSON object: {type(data).__name__}"
+            )
+        if "candidates" not in data:
+            raise MemoryExtractionParseError(
+                "extraction output missing required 'candidates' field"
+            )
+        candidates = data.get("candidates", [])
         if not isinstance(candidates, list):
-            return []
+            raise MemoryExtractionParseError(
+                f"'candidates' is not a list: {type(candidates).__name__}"
+            )
         return candidates
 
     def _validate_evidence(

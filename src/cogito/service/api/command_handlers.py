@@ -16,6 +16,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from cogito.domain.events import DomainEvent
 from cogito.service.api.audit import write_audit
 from cogito.service.api.command_service import (
     replay_delivery,
@@ -23,6 +24,7 @@ from cogito.service.api.command_service import (
     set_approval_decision,
 )
 from cogito.service.api.deps import CommandDeps, get_command_deps
+from cogito.store.repositories import OutboxRepository
 from cogito.contracts.models import (
     ApprovalPayload,
     CancelTurnPayload,
@@ -397,22 +399,53 @@ def delete_memory(payload: MemoryDeletePayload, deps: CommandDeps = Depends(get_
 # ── delete-session (软删除，仅标记 deleted_at) ────────────────
 
 
+def _emit_session_completed(
+    conn: sqlite3.Connection, *, session_id: str, conversation_id: str, principal_id: str,
+) -> None:
+    """发出 SessionCompleted 事件，供 SessionCompletedMemoryExtractionConsumer 投影。
+
+    关闭会话时提交最后一次上下文提取任务，确保关闭前内容不丢失（PLAN-16 M1 P0-06）。
+    """
+    payload = {
+        "session_id": session_id,
+        "conversation_id": conversation_id,
+        "principal_id": principal_id,
+    }
+    OutboxRepository(conn).insert(DomainEvent(
+        event_type="SessionCompleted",
+        aggregate_type="session",
+        aggregate_id=session_id,
+        aggregate_version=1,
+        payload=payload,
+        payload_ref=json.dumps(payload, ensure_ascii=False),
+        origin="delete-session",
+    ))
+
+
 @router.post("/delete-session", response_model=CommandResponse)
 def delete_session(payload: DeleteSessionPayload, deps: CommandDeps = Depends(get_command_deps)) -> CommandResponse:
     """软删除会话：设置 deleted_at 时间戳，数据保留但页面不再显示。"""
     row = deps.conn.execute(
-        "SELECT session_id FROM sessions WHERE session_id=? AND deleted_at IS NULL",
+        "SELECT session_id, COALESCE(principal_id, 'owner') AS principal_id, "
+        "conversation_id FROM sessions WHERE session_id=? AND deleted_at IS NULL",
         (payload.session_id,),
     ).fetchone()
     if row is None:
         return _fail("delete-session", payload.session_id, "not found or already deleted")
     from datetime import UTC, datetime
     deleted_at = datetime.now(UTC).isoformat()
-    deps.conn.execute(
-        "UPDATE sessions SET deleted_at=? WHERE session_id=?",
-        (deleted_at, payload.session_id),
-    )
-    deps.conn.commit()
+    conversation_id = row["conversation_id"] or ""
+    principal_id = row["principal_id"] or "owner"
+    with deps.conn:
+        deps.conn.execute(
+            "UPDATE sessions SET deleted_at=? WHERE session_id=?",
+            (deleted_at, payload.session_id),
+        )
+        # PLAN-16 M1 P0-06: session_closed 触发 → 提交关闭前最后一次提取任务
+        _emit_session_completed(
+            deps.conn, session_id=payload.session_id,
+            conversation_id=conversation_id, principal_id=principal_id,
+        )
     write_audit(
         deps.conn, actor_id=ACTOR, action="delete-session",
         target_type="session", target_id=payload.session_id,
@@ -431,7 +464,8 @@ def delete_sessions_by_conversation(
     """按 conversation_id 软删除其下所有活跃 session。"""
     from datetime import UTC, datetime
     rows = deps.conn.execute(
-        "SELECT session_id FROM sessions WHERE conversation_id=? AND deleted_at IS NULL",
+        "SELECT session_id, COALESCE(principal_id, 'owner') AS principal_id "
+        "FROM sessions WHERE conversation_id=? AND deleted_at IS NULL",
         (payload.conversation_id,),
     ).fetchall()
     if not rows:
@@ -439,11 +473,18 @@ def delete_sessions_by_conversation(
     deleted_at = datetime.now(UTC).isoformat()
     ids = [r["session_id"] for r in rows]
     placeholders = ",".join("?" * len(ids))
-    deps.conn.execute(
-        f"UPDATE sessions SET deleted_at=? WHERE session_id IN ({placeholders})",
-        [deleted_at, *ids],
-    )
-    deps.conn.commit()
+    with deps.conn:
+        deps.conn.execute(
+            f"UPDATE sessions SET deleted_at=? WHERE session_id IN ({placeholders})",
+            [deleted_at, *ids],
+        )
+        # PLAN-16 M1 P0-06: 每个关闭的 session 都提交关闭前最后一次提取任务
+        for r in rows:
+            _emit_session_completed(
+                deps.conn, session_id=r["session_id"],
+                conversation_id=payload.conversation_id,
+                principal_id=r["principal_id"] or "owner",
+            )
     write_audit(
         deps.conn, actor_id=ACTOR, action="delete-sessions-by-conversation",
         target_type="conversation", target_id=payload.conversation_id,

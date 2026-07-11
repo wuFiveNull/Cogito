@@ -550,7 +550,7 @@ def _handle_memory_extract(task: Task, ctx: TaskHandlerContext) -> str:
         )
         extractor = MemoryExtractor(
             conn, service, ctx.model_router,
-            model_role=payload.model_role, watermark_repo=wm_repo, strict=True,
+            model_role=payload.model_role, strict=True,
         )
         import asyncio
         written = asyncio.run(extractor.extract_from_messages(

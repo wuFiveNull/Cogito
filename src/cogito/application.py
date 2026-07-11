@@ -28,6 +28,7 @@ from cogito.model.llm_manager import LLMManager
 from cogito.model.provider import ModelProvider
 from cogito.service.agent_runner import RunOutcome, build_agent_runner
 from cogito.service.inbound_service import InboundService
+from cogito.service.presence import SqlitePresenceReader
 from cogito.service.recovery_service import RecoveryService
 from cogito.service.task_handlers import TaskHandlerContext, _build_registry
 from cogito.store.connection import get_connection
@@ -237,6 +238,12 @@ class RuntimeApplication:
         def _make_memory_writer() -> MemoryWriter:
             return make_unit_of_work_memory_writer(config.resolve_db_path())
 
+        # PLAN-16 M1: explicit_remember 触发 — remember_memory 工具记住后
+        # 额外提交高优先级 context 提取任务
+        def _make_task_service():
+            from cogito.service.task_service import SqliteTaskService
+            return SqliteTaskService(get_connection(config.resolve_db_path()))
+
         def _make_memory_reader() -> MemoryReader:
             from cogito.store.connection import get_connection as _gc
             reader_conn = _gc(config.resolve_db_path())
@@ -327,6 +334,7 @@ class RuntimeApplication:
             make_memory_reader=_make_memory_reader,
             make_vision_service=vision_factory,
             make_sticker_service=sticker_factory,
+            make_task_service=_make_task_service,
         )
 
         runner = build_agent_runner(
@@ -699,19 +707,19 @@ class RuntimeApplication:
         # 创建 Scheduler
         from cogito.service.scheduler import Scheduler
 
-        # Scheduler 的 PresenceReader（与 TaskHandlerContext 共用同一工厂语义）
-        _pres_reader = None
+        # 单一 PresenceReader， Scheduler 与 TaskHandlerContext 共用，避免重复装配
+        presence_reader = None
         try:
-            _pres_reader = SqlitePresenceReader(
+            presence_reader = SqlitePresenceReader(
                 connection_factory=lambda p=self.config.resolve_db_path(): get_connection(p),
             )
         except Exception:
-            logger.warning("Scheduler PresenceReader build failed", exc_info=True)
+            logger.warning("SqlitePresenceReader build failed", exc_info=True)
 
         self.scheduler = Scheduler(
             self.conn,
             proactive_config=self.config.capability.proactive,
-            presence_reader=_pres_reader,
+            presence_reader=presence_reader,
             drift_config=self.config.drift,
             config_version_id=self.config.config_version,
         )
@@ -719,7 +727,6 @@ class RuntimeApplication:
         # 启动启用的 Channel Adapter（如 QQ）
         await self._start_enabled_channels()
 
-        from cogito.service.presence import SqlitePresenceReader
         task_handler_ctx = TaskHandlerContext(
             connection_factory=lambda p=self.config.resolve_db_path(): get_connection(p),
             model_router=self.llm_manager.router if self.llm_manager else None,
@@ -732,9 +739,7 @@ class RuntimeApplication:
             mcp_manager=self.mcp_manager,
             delivery_service=self.delivery_service,
             proactive_config=self.config.capability.proactive,
-            presence_reader=SqlitePresenceReader(
-                connection_factory=lambda p=self.config.resolve_db_path(): get_connection(p),
-            ),
+            presence_reader=presence_reader,
             config_version_id=self.config.config_version,
         )
         task_registry = _build_registry(task_handler_ctx)

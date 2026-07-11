@@ -9,6 +9,7 @@ PLAN-09 M4a: registry 不再依赖 SqliteMemoryService；记忆工具
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 from cogito.capability.registry import CapabilityRegistry
 from cogito.contracts.memory import MemoryReader, MemoryWriter
@@ -28,6 +29,7 @@ def discover_builtin_tools(
     make_memory_reader: Callable[[], MemoryReader] | None = None,
     make_vision_service: Callable[[], VisionToolService] | None = None,
     make_sticker_service: Callable[[], StickerService] | None = None,
+    make_task_service: Callable[[], Any] | None = None,
     knowledge_reader: KnowledgeReader | None = None,
 ) -> CapabilityRegistry:
     """发现并注册所有内置工具。
@@ -60,6 +62,7 @@ def discover_builtin_tools(
     r.register(_create_remember(
         writer=memory_writer,
         make_writer=make_memory_writer,
+        make_task_service=make_task_service,
     ))
     r.register(_create_forget(
         reader=memory_reader,
@@ -104,6 +107,7 @@ def assemble_default_registry(
     make_memory_reader: Callable[[], MemoryReader] | None = None,
     make_vision_service: Callable[[], VisionToolService] | None = None,
     make_sticker_service: Callable[[], StickerService] | None = None,
+    make_task_service: Callable[[], Any] | None = None,
     knowledge_reader: KnowledgeReader | None = None,
 ) -> CapabilityRegistry:
     """创建 CapabilityRegistry 并注册所有内置工具。
@@ -121,6 +125,7 @@ def assemble_default_registry(
         make_memory_reader=make_memory_reader,
         make_vision_service=make_vision_service,
         make_sticker_service=make_sticker_service,
+        make_task_service=make_task_service,
         knowledge_reader=knowledge_reader,
     )
     return registry

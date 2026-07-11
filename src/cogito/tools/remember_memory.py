@@ -9,10 +9,14 @@
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
+from typing import Any
 
 from cogito.capability.models import ToolContext, ToolDef
 from cogito.contracts.memory import MemoryWriter
+
+_LOGGER = logging.getLogger("cogito.tools.remember_memory")
 
 TOOL_NAME = "remember_memory"
 
@@ -20,6 +24,7 @@ TOOL_NAME = "remember_memory"
 def _make_handler(
     writer: MemoryWriter | None = None,
     make_writer: Callable[[], MemoryWriter] | None = None,
+    make_task_service: Callable[[], Any] | None = None,
 ):
     """创建 handler 闭包。
 
@@ -27,6 +32,9 @@ def _make_handler(
         writer: 推荐的 MemoryWriter 实例（组合根注入的具体实现）。
         make_writer: 按需创建 writer 的工厂（每次写操作 fresh writer，
                     隐含独立事务语义）。优先于此参数。
+        make_task_service: 按需创建 TaskService 的工厂。提供时，成功记住后
+                    还会提交一个高优先级 context 提取 Task（PLAN-16 M1
+                    explicit_remember 触发）。
     """
     async def handler(args: dict, ctx: ToolContext) -> str:
         """保存一个条目到长期记忆。"""
@@ -90,6 +98,14 @@ def _make_handler(
         except Exception as e:
             return f"[remember_memory] Error saving memory: {e}"
 
+        # PLAN-16 M1 P0-06: explicit_remember 触发 → 提交高优先级上下文提取任务
+        if make_task_service is not None and ctx.session_id:
+            try:
+                task_svc = make_task_service()
+                _request_extraction_after_remember(task_svc, ctx)
+            except Exception as e:
+                _LOGGER.warning("remember_memory extraction request failed: %s", e)
+
         return (
             f"Saved memory: [{memory.kind}] {memory.subject}/{memory.predicate} = "
             f"'{memory.value}' (confidence={memory.confidence:.1f}, "
@@ -99,15 +115,39 @@ def _make_handler(
     return handler
 
 
+def _request_extraction_after_remember(task_svc: Any, ctx: ToolContext) -> None:
+    """显式记住后，为该 session 提交一次高优先级 context 提取任务。
+
+    使用 TaskService 自有连接（与 remember 的写操作独立），失败仅记录而不
+    影响本次记忆保存的结果。
+    """
+    from cogito.service.task_service import SqliteTaskService
+
+    if not isinstance(task_svc, SqliteTaskService):
+        return
+    conn = task_svc.conn
+    from cogito.service.memory_extractor import request_extraction
+    request_extraction(
+        conn,
+        conversation_id=ctx.conversation_id,
+        session_id=ctx.session_id,
+        principal_id=ctx.principal_id,
+        trigger_type="explicit_remember",
+        priority=90,
+    )
+
+
 def create_tool_def(
     writer: MemoryWriter | None = None,
     make_writer: Callable[[], MemoryWriter] | None = None,
+    make_task_service: Callable[[], Any] | None = None,
 ) -> ToolDef:
     """创建 remember_memory 工具定义。
 
     Args:
         writer: MemoryWriter 端口实例。
         make_writer: 工厂，每次写操作创建 fresh writer（独立事务）。
+        make_task_service: 工厂，记住后创建 TaskService 以提交提取任务。
     """
     return ToolDef(
         name=TOOL_NAME,
@@ -170,6 +210,9 @@ def create_tool_def(
             "required": ["subject", "predicate", "value"],
         },
         toolset=("core", "memory"),
-        handler=_make_handler(writer=writer, make_writer=make_writer),
+        handler=_make_handler(
+            writer=writer, make_writer=make_writer,
+            make_task_service=make_task_service,
+        ),
         risk_level="low",
     )
