@@ -32,7 +32,7 @@ class ContextItem:
 
     每条 item 保留 source/score/tokens/trust_label/retrieval_path (Plan 02 M5)。
     """
-    item_type: str  # "message" | "system_policy" | "memory" | "summary"
+    item_type: str  # "message" | "system_policy" | "memory" | "summary" | "knowledge"
     item_id: str
     source: str  # session_id 或 "system"
     tokens: int = 0
@@ -41,6 +41,8 @@ class ContextItem:
     role: str = ""  # "user" | "assistant" | "tool" | "system"
     score: float = 0.0  # 相关性/重要性分数（用于可解释性）
     retrieval_path: str = ""  # 命中路径: "keyword" | "vector" | "keyword+vector"
+    # PLAN-13 P13-12：来源版本、score 分项、retrieval path、policy version（不可变快照来源解释）
+    provenance: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -74,10 +76,16 @@ class ContextSnapshot:
     excluded_summary: str = ""
     total_tokens: int = 0
     created_at: int = 0
+    # PLAN-13 P13-12：各源实际 Token 分配（per-source budget 可解释性）
+    per_source_tokens: tuple[tuple[str, int], ...] = ()
+    # PLAN-13 P13-12：排除摘要统计（unauthorized/stale/superseded/low score/token budget/duplicate）
+    exclusion_stats: tuple[tuple[str, int], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "items", tuple(self.items))
         object.__setattr__(self, "memory_ids", tuple(self.memory_ids))
+        object.__setattr__(self, "per_source_tokens", tuple(self.per_source_tokens))
+        object.__setattr__(self, "exclusion_stats", tuple(self.exclusion_stats))
 
 
 class ContextBuilder:
