@@ -178,6 +178,37 @@ recovery_grace_period_seconds = 30
 # start = "23:00"
 # end = "08:00"
 # timezone = "Asia/Shanghai"
+#
+# [proactive.cadence]
+# enabled = true
+# min_interval_seconds = 60
+# max_interval_seconds = 1800
+# high_energy_interval_seconds = 60
+# medium_energy_interval_seconds = 240
+# low_energy_interval_seconds = 480
+# jitter_ratio = 0.10
+# misfire_policy = "coalesce"
+
+# ── Drift 空闲后台维护（Plan 14 M3-M5；默认关闭 + dry-run）──
+# Drift 是 Task mode (drift.run)，不是独立 Agent Loop。
+# 复用 tasks/task_attempts 生命周期；默认只读内置 Skill。
+#
+# [drift]
+# enabled = false                # 主开关；false=不创建 drift.run Task
+# dry_run = true                 # 仅记录本应选择的 Skill，不创建 run Task
+# default_principal_id = "owner"
+# idle_after_minutes = 30        # 用户多久无活动才算 idle
+# max_runs_per_day = 3
+# max_concurrent = 1
+# max_runtime_seconds = 60
+# max_steps = 8
+# allow_workspace_skills = false
+# allow_candidate_emission = false
+#
+# [drift.preemption]
+# check_interval_seconds = 1
+# turn_priority_threshold = 50
+# high_priority_backlog_threshold = 1
 
 # ── Embedding（Phase 4；默认关闭）──
 # [embedding]
