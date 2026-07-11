@@ -46,48 +46,18 @@ class TestExtractionTriggerPolicy:
 
 
 class TestExtractionWatermark:
-    def test_watermark_advances_after_write(self):
-        """成功写入后推进 watermark（PLAN-13 P13-06）。"""
-        import sqlite3
-        import asyncio
-        from cogito.store.migration import migrate
-        from cogito.store.watermark_repo import WatermarkRepository, PROC_MEMORY_EXTRACT
-        from cogito.service.memory_extractor import (
-            ExtractMessage, ExtractionContext, MemoryExtractor,
-        )
-        from cogito.service.memory_service import SqliteMemoryService
+    def test_extractor_no_longer_owns_watermark(self):
+        """PLAN-16 M1: Extractor 不再持有 watermark_repo / 推进水位。
 
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        migrate(conn)
+        水位推进已收归 TaskHandler 单一所有者；Extractor 构造函数不再接受
+        watermark_repo，也不暴露 _advance_watermark。
+        """
+        import inspect
+        from cogito.service.memory_extractor import MemoryExtractor
 
-        service = SqliteMemoryService(conn)
-        wm_repo = WatermarkRepository(conn)
-        extractor = MemoryExtractor(
-            conn, service, router=None, watermark_repo=wm_repo,
-        )
-
-        msgs = [
-            ExtractMessage(message_id=f"m{i}", role="user", content="c",
-                          receive_sequence=i)
-            for i in range(5)
-        ]
-        ctx = ExtractionContext(
-            session_id="s1", principal_id="p1",
-            from_sequence=0, to_sequence=4,
-            allowed_message_ids={m.message_id for m in msgs},
-        )
-
-        # 模拟成功后推进（无 router 不实际提取，直接测 watermark）
-        # upsert 后 version=1, from_sequence=0，CAS 需匹配
-        extractor._advance_watermark(ctx)
-        row = wm_repo.get(PROC_MEMORY_EXTRACT, "s1", "s1")
-        assert row is not None
-        # advance 使用 expected_from_sequence=0, expected_version=0，
-        # 但 upsert 后 version=1，所以 CAS 失败；这是预期行为——
-        # 实际流程中 advance 应在 upsert 之前或调整 expected_version。
-        # 这里验证 upsert 已初始化行
-        assert row is not None
+        sig = inspect.signature(MemoryExtractor.__init__)
+        assert "watermark_repo" not in sig.parameters
+        assert not hasattr(MemoryExtractor, "_advance_watermark")
 
     def test_watermark_not_advanced_on_failure(self):
         """失败不推进 watermark（下次重试不漏消息）。"""
