@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import uuid
 from datetime import datetime, timedelta
 
 from cogito.domain.schedule import (
@@ -36,6 +37,7 @@ PROACTIVE_EVALUATE_TASK_TYPE = "proactive.evaluate"
 PROACTIVE_DIGEST_PUBLISH_TASK_TYPE = "proactive.digest.publish"
 MEMORY_RECOMPUTE_WEIGHT_TASK_TYPE = "memory.recompute_weight"
 MEMORY_CONSOLIDATE_TASK_TYPE = "memory.consolidate"
+DRIFT_RUN_TASK_TYPE = "drift.run"
 
 
 class Scheduler:
@@ -46,6 +48,8 @@ class Scheduler:
         proactive_config: Any = None,     # ProactiveConfig
         presence_reader: Any = None,       # PresenceReader
         rng: Any = None,                   # random.Random (可注入，测试可复现)
+        drift_config: Any = None,          # DriftConfig
+        config_version_id: str = "",
     ) -> None:
         self._conn = conn
         self._clock = clock or ProductionClock()
@@ -55,6 +59,8 @@ class Scheduler:
         self._proactive_config = proactive_config
         self._presence_reader = presence_reader
         self._rng = rng
+        self._drift_config = drift_config          # DriftConfig
+        self._config_version_id = config_version_id
 
     @staticmethod
     def task_type_for_connector(connector_type: str) -> str:
@@ -191,6 +197,91 @@ class Scheduler:
             self._conn.rollback()
             _LOGGER.warning("persist cadence state failed")
         return tasks
+
+    def tick_drift_admit(self) -> tuple[str, str] | None:
+        """Drift admission tick（M3）。
+
+        全局 idle 检查；admit 时创建幂等 drift.run Task (origin=drift-admission)。
+        dry_run 仅记录应选 Skill，不创建 Task。
+        返回 (drift_run_id, task_id) 或 None。
+        """
+        if self._drift_config is None or not self._drift_config.enabled:
+            return None
+        from cogito.service.drift_admission import admit
+        result = admit(
+            self._conn,
+            principal_id=self._drift_config.default_principal_id,
+            idle_after_minutes=self._drift_config.idle_after_minutes,
+            max_runs_per_day=self._drift_config.max_runs_per_day,
+            max_concurrent=self._drift_config.max_concurrent,
+            presence_reader=self._presence_reader,
+        )
+        if not result.admit:
+            _LOGGER.debug("drift admission denied: %s", result.reasons)
+            return None
+
+        # dry-run：仅记录，不创建真实 Task
+        if self._drift_config.dry_run:
+            _LOGGER.info("[dry_run] drift admission would select skill (snapshot=%s)",
+                         result.snapshot.to_dict())
+            return None
+
+        # 创建幂等 drift.run Task (idempotency_key 包含 snapshot_at 的粗粒度窗口)
+        now = self._now()
+        now_ms = epoch_ms(now)
+        # 粗粒度幂等窗口（1 分钟内只创建一个）
+        window_ms = (now_ms // 60000) * 60000
+        idempotency = f"drift-run:{self._drift_config.default_principal_id}:{window_ms}"
+        existing = self._conn.execute(
+            "SELECT task_id FROM tasks WHERE idempotency_key=?", (idempotency,),
+        ).fetchone()
+        if existing is not None:
+            return None
+
+        from cogito.domain.task import Task, TaskStatus
+        from cogito.store.drift_repo import DriftRunRepository
+
+        task = Task(
+            task_id=f"task-dr-{uuid.uuid4().hex[:16]}",
+            task_type=DRIFT_RUN_TASK_TYPE,
+            payload_ref="",
+            status=TaskStatus.queued,
+            priority=5,  # 低于 proactive.evaluate (15) 和 memory (10)
+            scheduled_at=now,
+            idempotency_key=idempotency,
+            origin="drift-admission",
+        )
+        try:
+            self._task_repo.insert(task)
+        except Exception:
+            self._conn.rollback()
+            _LOGGER.warning("insert drift.run task failed")
+            return None
+
+        # 写 drift_runs 记录
+        repo = DriftRunRepository(self._conn)
+        try:
+            run_id = repo.insert(
+                task_id=task.task_id,
+                principal_id=self._drift_config.default_principal_id,
+                skill_name="(selected-at-run)",
+                skill_version="1.0",
+                admission_snapshot=result.snapshot.to_dict(),
+            )
+        except Exception:
+            self._conn.rollback()
+            _LOGGER.warning("insert drift_run record failed")
+            return None
+
+        # 释放由 Scheduler claim 的 Lease（Scheduler 不 claim；由 Task Worker 以后领取）
+        # 只 commit Task + drift_run
+        try:
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            return None
+        _LOGGER.info("drift admitted: run=%s task=%s", run_id, task.task_id)
+        return (run_id, task.task_id)
 
     def _now(self) -> datetime:
         return self._clock.now()

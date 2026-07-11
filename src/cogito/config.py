@@ -26,7 +26,7 @@ KNOWN_SECTIONS = frozenset({
     "runtime", "storage", "interaction",
     "channel", "channels", "conversation", "agent", "model", "llm", "memory",
     "capability", "sandbox", "worker", "scheduler",
-    "connector", "proactive", "security",
+    "connector", "proactive", "drift", "security",
     "observability", "retention", "backup", "plugins",
     "embedding", "multimodal", "knowledge",
 })
@@ -96,7 +96,7 @@ DEFAULT_SYSTEM_PROMPT = (
 _TOLERATED_SECTIONS = frozenset({
     "channel", "channels", "conversation", "agent", "model", "llm", "memory",
     "capability", "sandbox", "scheduler",
-    "connector", "proactive", "security",
+    "connector", "proactive", "drift", "security",
     "observability", "retention", "backup", "plugins",
     "capability",
 })
@@ -750,6 +750,87 @@ class ProactiveConfig:
         )
 
 
+# ── Drift 配置 ────────────────────────────────────────────────────────────────
+
+_KNOWN_DRIFT_FIELDS = frozenset({
+    "enabled", "dry_run", "default_principal_id",
+    "idle_after_minutes", "max_runs_per_day", "max_concurrent",
+    "max_runtime_seconds", "max_steps",
+    "allow_workspace_skills", "allow_candidate_emission",
+    "preemption",
+})
+
+_KNOWN_DRIFT_PREEMPTION_FIELDS = frozenset({
+    "check_interval_seconds", "turn_priority_threshold",
+    "high_priority_backlog_threshold",
+})
+
+
+@dataclass
+class DriftPreemptionConfig:
+    """Drift 抢占相关配置。"""
+    check_interval_seconds: int = 1
+    turn_priority_threshold: int = 50
+    high_priority_backlog_threshold: int = 1
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> DriftPreemptionConfig:
+        _check_unknown(raw, _KNOWN_DRIFT_PREEMPTION_FIELDS, "drift.preemption")
+        return cls(
+            check_interval_seconds=int(raw.get("check_interval_seconds", 1)),
+            turn_priority_threshold=int(raw.get("turn_priority_threshold", 50)),
+            high_priority_backlog_threshold=int(
+                raw.get("high_priority_backlog_threshold", 1)),
+        )
+
+
+@dataclass
+class DriftConfig:
+    """Drift 配置：默认关闭 + dry_run，所有外部副作用 opt-in。"""
+    enabled: bool = False
+    dry_run: bool = True
+    default_principal_id: str = "owner"
+    idle_after_minutes: int = 30
+    max_runs_per_day: int = 3
+    max_concurrent: int = 1
+    max_runtime_seconds: int = 60
+    max_steps: int = 8
+    allow_workspace_skills: bool = False
+    allow_candidate_emission: bool = False
+    preemption: DriftPreemptionConfig = field(default_factory=DriftPreemptionConfig)
+
+    def __repr__(self) -> str:
+        return (
+            f"DriftConfig(enabled={self.enabled}, dry_run={self.dry_run}, "
+            f"idle_after={self.idle_after_minutes}min, max_runs/day={self.max_runs_per_day}, "
+            f"workspace_skills={self.allow_workspace_skills}, "
+            f"candidate_emission={self.allow_candidate_emission})"
+        )
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> DriftConfig:
+        _check_unknown(raw, _KNOWN_DRIFT_FIELDS, "drift")
+        preemption_raw = raw.get("preemption")
+        preemption = (
+            DriftPreemptionConfig._from_raw(preemption_raw)
+            if isinstance(preemption_raw, dict)
+            else DriftPreemptionConfig()
+        )
+        return cls(
+            enabled=bool(raw.get("enabled", False)),
+            dry_run=bool(raw.get("dry_run", True)),
+            default_principal_id=str(raw.get("default_principal_id", "owner")),
+            idle_after_minutes=int(raw.get("idle_after_minutes", 30)),
+            max_runs_per_day=int(raw.get("max_runs_per_day", 3)),
+            max_concurrent=int(raw.get("max_concurrent", 1)),
+            max_runtime_seconds=int(raw.get("max_runtime_seconds", 60)),
+            max_steps=int(raw.get("max_steps", 8)),
+            allow_workspace_skills=bool(raw.get("allow_workspace_skills", False)),
+            allow_candidate_emission=bool(raw.get("allow_candidate_emission", False)),
+            preemption=preemption,
+        )
+
+
 @dataclass
 class PluginConfig:
     """Plugin discovery, grants, and startup policy."""
@@ -1103,6 +1184,7 @@ class Config:
     multimodal: MultimodalConfig = field(default_factory=MultimodalConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
+    drift: DriftConfig = field(default_factory=DriftConfig)
 
     # ── Plan 06 M2: 配置版本元数据（load() 时计算）──
     content_hash: str = ""
@@ -1269,6 +1351,8 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
         memory = MemoryConfig._from_raw(memory_raw) if memory_raw else MemoryConfig()
         knowledge_raw = resolved.get("knowledge", {})
         knowledge = KnowledgeConfig._from_raw(knowledge_raw) if knowledge_raw else KnowledgeConfig()
+        drift_raw = resolved.get("drift", {})
+        drift = DriftConfig._from_raw(drift_raw) if drift_raw else DriftConfig()
 
         # Plan 06 M2: 跨字段校验（在构建前执行，失败则 ConfigError）
         from cogito.infrastructure.config_version import validate_cross_fields
@@ -1299,6 +1383,7 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
             multimodal=multimodal,
             memory=memory,
             knowledge=knowledge,
+            drift=drift,
             content_hash=version_meta.get("content_hash", ""),
             schema_version=version_meta.get("schema_version", "1"),
             config_version=version_meta.get("config_version", "1"),

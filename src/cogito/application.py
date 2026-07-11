@@ -649,6 +649,17 @@ class RuntimeApplication:
             except Exception:
                 logger.warning("Proactive evaluate tick failed", exc_info=True)
 
+        # Drift admission tick —— 仅当 config.drift.enabled=true (M3)
+        drift_cfg = getattr(self.config, "drift", None)
+        if drift_cfg is not None and drift_cfg.enabled and self.scheduler is not None:
+            try:
+                admitted = await asyncio.to_thread(self.scheduler.tick_drift_admit)
+                if admitted:
+                    result.scheduler += 1
+                    result.idle = False
+            except Exception:
+                logger.warning("Drift admission tick failed", exc_info=True)
+
         return result
 
     # ── worker entrypoint ──────────────────────────────────────────────────
@@ -701,6 +712,8 @@ class RuntimeApplication:
             self.conn,
             proactive_config=self.config.capability.proactive,
             presence_reader=_pres_reader,
+            drift_config=self.config.drift,
+            config_version_id=self.config.config_version,
         )
 
         # 启动启用的 Channel Adapter（如 QQ）
