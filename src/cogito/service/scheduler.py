@@ -34,6 +34,8 @@ POLL_TASK_TYPE = "connector.poll"
 MCP_POLL_TASK_TYPE = "mcp_connector.poll"
 PROACTIVE_EVALUATE_TASK_TYPE = "proactive.evaluate"
 PROACTIVE_DIGEST_PUBLISH_TASK_TYPE = "proactive.digest.publish"
+MEMORY_RECOMPUTE_WEIGHT_TASK_TYPE = "memory.recompute_weight"
+MEMORY_CONSOLIDATE_TASK_TYPE = "memory.consolidate"
 
 
 class Scheduler:
@@ -58,6 +60,65 @@ class Scheduler:
         if connector_type == "mcp":
             return MCP_POLL_TASK_TYPE
         return POLL_TASK_TYPE
+
+    def _try_create_unique_task(self, task_type: str, idempotency: str,
+                                 payload_ref: str = "", *, priority: int = 20,
+                                 origin: str = "memory_maintenance") -> Task | None:
+        """幂等：创建唯一 Task（已存在则跳过），返回 Task 或 None。"""
+        existing = self._conn.execute(
+            "SELECT task_id FROM tasks WHERE idempotency_key=?", (idempotency,),
+        ).fetchone()
+        if existing is not None:
+            return None
+        task = Task(
+            task_id=f"task-mm-{idempotency}",
+            task_type=task_type,
+            payload_ref=payload_ref,
+            status=TaskStatus.queued,
+            priority=priority,
+            idempotency_key=idempotency,
+            origin=origin,
+        )
+        try:
+            self._task_repo.insert(task)
+            self._conn.commit()
+            return task
+        except Exception:
+            self._conn.rollback()
+            _LOGGER.debug("unique task %s insert skipped (duplicate race)", task_type)
+            return None
+
+    def tick_memory_maintenance(self) -> list[Task]:
+        """PLAN-14 R-06: 定期创建 memory.recompute_weight / memory.consolidate 任务。
+
+        每次 process_background_once 调用一次。幂等键基于任务类型 + 时间窗口，
+        窗口内不重复创建。窗口大小由配置决定（默认 600s recompute / 3600s consolidate）。
+        """
+        now = self._now()
+        now_ms = epoch_ms(now)
+        tasks: list[Task] = []
+
+        # memory.recompute_weight —— 窗口：每 600s（10 分钟）一次
+        recompute_window = now_ms // (10 * 60 * 1000)
+        idemp_recompute = f"memory-maintenance:recompute:{recompute_window}"
+        t = self._try_create_unique_task(
+            MEMORY_RECOMPUTE_WEIGHT_TASK_TYPE, idemp_recompute,
+            priority=10, origin="memory_maintenance",
+        )
+        if t:
+            tasks.append(t)
+
+        # memory.consolidate —— 窗口：每 3600s（1 小时）一次
+        consolidate_window = now_ms // (60 * 60 * 1000)
+        idemp_consolidate = f"memory-maintenance:consolidate:{consolidate_window}"
+        t = self._try_create_unique_task(
+            MEMORY_CONSOLIDATE_TASK_TYPE, idemp_consolidate,
+            priority=5, origin="memory_maintenance",
+        )
+        if t:
+            tasks.append(t)
+
+        return tasks
 
     def tick_proactive_evaluate(self, limit: int = 10) -> list[Task]:
         """主动评估 tick：创建 proactive.evaluate Task。

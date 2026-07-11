@@ -628,6 +628,16 @@ class RuntimeApplication:
             except Exception:
                 logger.warning("Scheduler tick failed", exc_info=True)
 
+        # Memory maintenance tick —— 定期创建 recompute_weight / consolidate Task（PLAN-14 R-06）
+        if self.scheduler is not None:
+            try:
+                mm_tasks = await asyncio.to_thread(self.scheduler.tick_memory_maintenance)
+                if mm_tasks:
+                    result.scheduler += len(mm_tasks)
+                    result.idle = False
+            except Exception:
+                logger.warning("Memory maintenance tick failed", exc_info=True)
+
         # Proactive evaluate tick —— 仅当 config.capability.proactive.enabled=true
         proactive_cfg = getattr(self.config.capability, "proactive", None)
         if proactive_cfg is not None and proactive_cfg.enabled and self.scheduler is not None:
