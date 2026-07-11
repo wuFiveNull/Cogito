@@ -51,6 +51,7 @@ class Explicitness(StrEnum):
     model_inference = "model_inference"
     external_source = "external_source"
     system_generated = "system_generated"
+    user_corrected = "user_corrected"
 
 
 class MemoryItem:

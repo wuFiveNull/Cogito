@@ -42,8 +42,35 @@ class MemoryConfirmPayload(BaseModel):
     memory_id: str
 
 
+class MemoryRejectPayload(BaseModel):
+    memory_id: str
+    idempotency_key: str = ""
+
+
+class MemoryCorrectPayload(BaseModel):
+    """提交对记忆的修正（创建新记忆 + 标 old 为 superseded）。"""
+    memory_id: str
+    idempotency_key: str = ""
+    kind: str = "fact"
+    subject: str = ""
+    predicate: str = ""
+    value: str = ""
+    scope_type: str = "global"
+    scope_id: str = ""
+    confidence: float = 1.0
+    importance: float = 0.8
+    principal_id: str = "owner"
+
+
 class MemoryDeletePayload(BaseModel):
     memory_id: str
+
+
+class ProactiveNegativeFeedbackPayload(BaseModel):
+    """主动推送导致的负反馈入口（PLAN-14 R-05）。"""
+    idempotency_key: str = ""
+    candidate_id: str = ""
+    reason: str = "not_relevant"
 
 
 class DisablePluginPayload(BaseModel):

@@ -38,7 +38,10 @@ from cogito.contracts.models import (
     KnowledgeRefreshPayload,
     KnowledgeRegisterPayload,
     MemoryConfirmPayload,
+    MemoryCorrectPayload,
     MemoryDeletePayload,
+    MemoryRejectPayload,
+    ProactiveNegativeFeedbackPayload,
     PauseConnectorPayload,
     PayloadGcDryRunPayload,
     ArchiveSkillPayload,
@@ -268,6 +271,113 @@ def confirm_memory(payload: MemoryConfirmPayload, deps: CommandDeps = Depends(ge
         target_type="memory", target_id=payload.memory_id,
     )
     return _ok("confirm-memory", payload.memory_id)
+
+
+@router.post("/reject-memory", response_model=CommandResponse)
+def reject_memory(payload: MemoryRejectPayload, deps: CommandDeps = Depends(get_command_deps)) -> CommandResponse:
+    """拒绝记忆候选：标 rejected + 发 negative_feedback 信号（PLAN-14 R-05）。"""
+    cached = _check_idempotency(deps.conn, ACTOR, "reject-memory", payload.idempotency_key)
+    if cached:
+        return cached
+    svc = SqliteMemoryService(deps.conn)
+    item = svc.get(payload.memory_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail=f"memory {payload.memory_id} not found")
+    ok = svc.reject(payload.memory_id)
+    if not ok:
+        return _fail("reject-memory", payload.memory_id, "not candidate or already decided")
+    from cogito.service.memory_signals import SignalWriter
+    SignalWriter(deps.conn).record_signal(
+        "negative_feedback", payload.memory_id,
+        actor_principal_id=item.principal_id or ACTOR,
+        idempotency_key=f"negative:reject-memory:{payload.memory_id}",
+        algorithm_version="2",
+    )
+    try:
+        SqliteTaskService(deps.conn).create(
+            "memory.recompute_weight", "{}",
+            idempotency_key=f"memory.recompute_weight:reject:{payload.memory_id}",
+            origin="reject-memory", priority=20,
+            retry_policy={"max_attempts": 3, "backoff_seconds": [5, 30, 120]},
+        )
+    except sqlite3.IntegrityError:
+        pass
+    deps.conn.commit()
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="reject-memory",
+        target_type="memory", target_id=payload.memory_id,
+    )
+    return _ok("reject-memory", payload.memory_id)
+
+
+@router.post("/correct-memory", response_model=CommandResponse)
+def correct_memory(payload: MemoryCorrectPayload, deps: CommandDeps = Depends(get_command_deps)) -> CommandResponse:
+    """修正记忆：创建新记忆 + 标旧记忆为 superseded + user_corrected 信号。"""
+    cached = _check_idempotency(deps.conn, ACTOR, "correct-memory", payload.idempotency_key)
+    if cached:
+        return cached
+    svc = SqliteMemoryService(deps.conn)
+    old = svc.get(payload.memory_id)
+    if old is None:
+        raise HTTPException(status_code=404, detail=f"memory {payload.memory_id} not found")
+    import uuid
+    from cogito.domain.memory import MemoryItem
+    from cogito.domain.memory import Explicitness
+    corrected = MemoryItem(
+        memory_id=uuid.uuid4().hex,
+        principal_id=old.principal_id,
+        kind=payload.kind if payload.kind else old.kind,
+        subject=payload.subject if payload.subject else old.subject,
+        predicate=payload.predicate if payload.predicate else old.predicate,
+        value=payload.value if payload.value else old.value,
+        scope_type=payload.scope_type if payload.scope_type != "global" else old.scope_type,
+        scope_id=payload.scope_id if payload.scope_id else old.scope_id,
+        confidence=payload.confidence,
+        importance=payload.importance,
+        explicitness=Explicitness.user_corrected,
+        status="confirmed",
+    )
+    svc._repo.insert(corrected)
+    svc.supersede(old.memory_id, corrected.memory_id)
+    from cogito.service.memory_signals import SignalWriter
+    SignalWriter(deps.conn).record_signal(
+        "user_corrected", payload.memory_id,
+        actor_principal_id=old.principal_id or ACTOR,
+        idempotency_key=f"correct-memory:{payload.memory_id}:{corrected.memory_id}",
+        algorithm_version="2",
+    )
+    try:
+        SqliteTaskService(deps.conn).create(
+            "memory.recompute_weight", "{}",
+            idempotency_key=f"memory.recompute_weight:correct:{payload.memory_id}",
+            origin="correct-memory", priority=20,
+            retry_policy={"max_attempts": 3, "backoff_seconds": [5, 30, 120]},
+        )
+    except sqlite3.IntegrityError:
+        pass
+    deps.conn.commit()
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="correct-memory",
+        target_type="memory", target_id=corrected.memory_id,
+        changes={"supersedes": payload.memory_id},
+    )
+    return _ok("correct-memory", corrected.memory_id, supersedes=payload.memory_id)
+
+
+@router.post("/proactive-negative-feedback", response_model=CommandResponse)
+def proactive_negative_feedback(
+    payload: ProactiveNegativeFeedbackPayload, deps: CommandDeps = Depends(get_command_deps),
+) -> CommandResponse:
+    """主动推送负反馈入口（reason: not_relevant/too_frequent/duplicate/wrong_time）。"""
+    cached = _check_idempotency(deps.conn, ACTOR, "proactive-negative-feedback", payload.idempotency_key)
+    if cached:
+        return cached
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="proactive-negative-feedback",
+        target_type="proactive_candidate", target_id=payload.candidate_id,
+        changes={"reason": payload.reason},
+    )
+    return _ok("proactive-negative-feedback", payload.candidate_id, reason=payload.reason)
 
 
 @router.post("/delete-memory", response_model=CommandResponse)

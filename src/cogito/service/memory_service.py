@@ -499,3 +499,7 @@ class SqliteMemoryService:
     def reject(self, memory_id: str, principal_id: str = "") -> bool:
         """拒绝候选记忆。"""
         return self._repo.reject(memory_id, principal_id=principal_id)
+
+    def supersede(self, old_id: str, new_id: str) -> bool:
+        """标旧记忆被新记忆覆盖（PLAN-14 R-05）。"""
+        return self._repo.supersede(old_id, new_id)

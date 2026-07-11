@@ -186,6 +186,9 @@ class AgentRunner:
         self._persist_context_snapshot(context, attempt)
         _bench_timing.checkpoint("context:built")
 
+        # ── 记忆暴露信号（PLAN-14 R-05）：注入上下文的记忆 → exposed ──
+        self._record_memory_exposed(context)
+
         # ── 2a. 预读输入消息元数据（流式 / 非流式都可能用来向浏览器回推） ──
         stream_meta = self._read_stream_input_meta(turn)
 
@@ -462,6 +465,23 @@ class AgentRunner:
              epoch_ms(self._clock.now())),
         ).fetchone()
         return row is not None
+
+    def _record_memory_exposed(self, context) -> None:
+        """PLAN-14 R-05: 被注入 Turn 上下文的记忆 → exposed 信号（非阻塞）。"""
+        memory_ids = getattr(context, "memory_ids", None)
+        if not memory_ids:
+            return
+        try:
+            from cogito.service.memory_signals import SignalWriter
+            writer = SignalWriter(self._conn)
+            for mid in memory_ids:
+                writer.record_exposed(
+                    mid,
+                    idempotency_key=f"context-exposed:{context.turn_id}:{mid}",
+                    algorithm_version="2",
+                )
+        except Exception:
+            _LOGGER.debug("exposed signal recording failed", exc_info=True)
 
     def _fail_safe(self, turn, attempt) -> None:
         """安全地标记 Attempt 失败，不抛出。"""
