@@ -150,6 +150,7 @@ def _build_registry(ctx: TaskHandlerContext) -> TaskHandlerRegistry:
     registry.register("proactive.delivery.ready", _handle_proactive_delivery_ready)
     registry.register("proactive.digest.publish", _handle_proactive_digest_publish)
     registry.register("proactive.evaluate", _handle_proactive_evaluate)
+    registry.register("drift.run", _handle_drift_run)
     registry.register("vision.analyze", _handle_vision_analyze)
     return registry
 
@@ -268,6 +269,31 @@ def _handle_knowledge_sync_source(task: Task, ctx: TaskHandlerContext) -> str:
         return f"knowledge synced: {resource_id}"
     finally:
         conn.close()
+
+
+def _handle_drift_run(task: Task, ctx: TaskHandlerContext) -> str:
+    """drift.run: 执行已选 Skill 只读维护动作 + finish_drift 强制收尾。
+
+    委托 drift_runner.handle_drift_run (注册为 TaskHandler 以复用 TaskWorker/Lease)。
+    """
+    from cogito.service.drift_runner import handle_drift_run
+    conn = ctx.connection_factory() if ctx.connection_factory else None
+    if conn is None:
+        return "drift.run skipped: no connection"
+    try:
+        result = handle_drift_run(task, ctx)
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return result
+    except Exception:
+        _LOGGER.exception("drift.run failed")
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise
 
 
 def _handle_vision_analyze(task: Task, ctx: TaskHandlerContext) -> str:

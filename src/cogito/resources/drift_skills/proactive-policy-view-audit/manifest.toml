@@ -1,0 +1,13 @@
+name = "proactive-policy-view-audit"
+version = "1.0"
+description = "Check consistency between DB proactive_policies and in-memory derived view; report diffs only (read-only)."
+handler = "builtin.proactive_policy_view_audit"
+risk_level = "low"
+allowed_tools = ["filesystem.read:workspace", "query.proactive_policy"]
+max_steps = 6
+max_runtime_seconds = 30
+max_model_calls = 0
+max_tool_calls = 8
+can_emit_candidate = false
+requires_approval = false
+checkpoint_schema_version = 1

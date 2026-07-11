@@ -26,6 +26,7 @@ class DriftReasonCode(StrEnum):
     drift_already_active = "drift_already_active"
     # finish reasons
     completed = "completed"
+    failed = "failed"
     skipped_no_value = "skipped_no_value"
     paused_budget_exhausted = "paused_budget_exhausted"
     preempted_by_turn = "preempted_by_turn"
