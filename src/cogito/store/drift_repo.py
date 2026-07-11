@@ -42,13 +42,41 @@ class DriftRunRepository:
         now = int(time.time() * 1000)
         sets = ["status=?", "finished_at=COALESCE(finished_at, ?)"]
         vals: list[Any] = [status, now]
+        # budget_used_json 字段名映射
+        if "budget_used" in fields and "budget_used_json" not in fields:
+            fields["budget_used_json"] = fields.pop("budget_used")
         for k, v in fields.items():
+            if k == "budget_used_json" and isinstance(v, dict):
+                v = json.dumps(v, ensure_ascii=False)
             sets.append(f"{k}=?")
             vals.append(v)
         vals.append(drift_run_id)
         self._conn.execute(
             f"UPDATE drift_runs SET {', '.join(sets)} WHERE drift_run_id=?",
             vals,
+        )
+        self._conn.commit()
+
+    def update_progress(self, drift_run_id: str, *, budget_used: dict[str, int],
+                        steps_taken: int) -> None:
+        """累计 steps + budget（跨 Attempt 不重置，读取后累加）。"""
+        row = self.get(drift_run_id)
+        if row is None:
+            return
+        prev_budget = {}
+        if row.get("budget_used_json"):
+            try:
+                prev_budget = json.loads(row["budget_used_json"])
+            except Exception:
+                prev_budget = {}
+        merged = {k: prev_budget.get(k, 0) + budget_used.get(k, 0)
+                  for k in set(prev_budget) | set(budget_used)}
+        prev_steps = row.get("steps_taken") or 0
+        self._conn.execute(
+            "UPDATE drift_runs SET budget_used_json=?, steps_taken=? "
+            "WHERE drift_run_id=?",
+            (json.dumps(merged, ensure_ascii=False),
+             prev_steps + steps_taken, drift_run_id),
         )
         self._conn.commit()
 

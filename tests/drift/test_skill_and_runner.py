@@ -138,10 +138,10 @@ class TestDriftRunHandler:
         result = handle_drift_run(task, ctx)
         assert "completed" in result
         row = memory_db.execute(
-            "SELECT status, finish_summary FROM drift_runs WHERE drift_run_id='dr-1'"
+            "SELECT status, steps_taken FROM drift_runs WHERE drift_run_id='dr-1'"
         ).fetchone()
         assert row["status"] == "completed"
-        assert "policy v" in row["finish_summary"]
+        assert row["steps_taken"] >= 1  # 多步循环至少执行了 1 步
 
     def test_unknown_skill_no_value(self, memory_db):
         """未知 skill → completed + skipped_no_value。"""
