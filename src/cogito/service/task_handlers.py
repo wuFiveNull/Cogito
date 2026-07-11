@@ -196,6 +196,8 @@ def _handle_knowledge_ingest(task: Task, ctx: TaskHandlerContext) -> str:
             raise ValueError("knowledge.ingest requires resource_id and raw_text")
         document, segments = service.ingest(resource_id, raw_text)
         _refresh_knowledge_views_task(ctx, conn)
+        # PLAN-16 M2 TX-05: KnowledgeService 不再内部 commit，handler 统一提交。
+        conn.commit()
         return f"knowledge ingested: {document.document_id} ({len(segments)} segments)"
     except Exception:
         conn.rollback()
@@ -230,6 +232,8 @@ def _handle_knowledge_invalidate(task: Task, ctx: TaskHandlerContext) -> str:
             raise ValueError("knowledge.invalidate requires resource_id")
         count = _knowledge_service(ctx, conn).invalidate(resource_id, str(data.get("reason", "")))
         _refresh_knowledge_views_task(ctx, conn)
+        # PLAN-16 M2 TX-05: KnowledgeService 不再内部 commit，handler 统一提交。
+        conn.commit()
         return f"knowledge invalidated: {resource_id} ({count} segments)"
     finally:
         conn.close()
@@ -266,6 +270,8 @@ def _handle_knowledge_sync_source(task: Task, ctx: TaskHandlerContext) -> str:
             trust_label=str(data.get("trust_label", "unverified")),
         )
         _refresh_knowledge_views_task(ctx, conn)
+        # PLAN-16 M2 TX-05: KnowledgeService/sync 不再内部 commit，handler 统一提交。
+        conn.commit()
         return f"knowledge synced: {resource_id}"
     finally:
         conn.close()
@@ -623,22 +629,20 @@ def _handle_memory_recompute_weight(task: Task, ctx: TaskHandlerContext) -> str:
             policy=MemoryWeightPolicy(),
             signals_repo=SignalRepository(conn),
         )
+        # PLAN-16 M2 TX-04: 权重重算事件与权重在同一事务提交（先写事件再 commit），
+        # 失败则整体回滚，避免权重推进但事件丢失。
+        from cogito.domain.events import DomainEvent
+        from cogito.store.repositories import OutboxRepository
+        OutboxRepository(conn).insert(DomainEvent(
+            event_type="MemoryWeightRecomputed",
+            aggregate_type="memory_weight",
+            aggregate_id=f"recompute-{ctx._task_id}",
+            aggregate_version=1,
+            payload={"recomputed_count": count, "task_id": ctx._task_id},
+            payload_ref=__import__("json").dumps({"recomputed_count": count}),
+            origin="memory_recompute_weight_handler",
+        ))
         conn.commit()
-        # PLAN-14 R-08: 权重重算完成
-        try:
-            from cogito.domain.events import DomainEvent
-            from cogito.store.repositories import OutboxRepository
-            OutboxRepository(conn).insert(DomainEvent(
-                event_type="MemoryWeightRecomputed",
-                aggregate_type="memory_weight",
-                aggregate_id=f"recompute-{ctx._task_id}",
-                aggregate_version=1,
-                payload={"recomputed_count": count, "task_id": ctx._task_id},
-                payload_ref=__import__("json").dumps({"recomputed_count": count}),
-                origin="memory_recompute_weight_handler",
-            ))
-        except Exception:
-            pass
         return f"memory weights recomputed: {count}"
     except Exception:
         conn.rollback()

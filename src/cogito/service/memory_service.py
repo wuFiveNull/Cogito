@@ -172,25 +172,27 @@ class SqliteMemoryService:
             raise ValueError("Either conn or repo must be provided")
 
     def _emit_memory_event(self, event_type: str, memory_id: str, payload: dict | None = None) -> None:
-        """发布 Memory 领域事件到 Outbox（失败不阻塞事务，PLAN-14 R-08）。"""
-        try:
-            from cogito.domain.events import DomainEvent
-            from cogito.store.repositories import OutboxRepository
-            data = payload or {}
-            OutboxRepository(self._repo._conn).insert(DomainEvent(
-                event_type=event_type,
-                aggregate_type="memory",
-                aggregate_id=memory_id,
-                aggregate_version=1,
-                payload=data,
-                payload_ref=__import__("json").dumps(data, ensure_ascii=False),
-                origin="memory_service",
-            ))
-        except Exception:
-            import logging as _logging
-            _logging.getLogger("cogito.memory_service").debug(
-                "memory event emit failed: %s", event_type, exc_info=True,
-            )
+        """发布 Memory 领域事件到 Outbox（PLAN-16 M2 TX-01/TX-03）。
+
+        与调用方共享同一连接 / 事务：写入失败会向上传播，由调用方
+        决定回滚，确保 Memory 行与 Outbox 事件原子提交。
+        aggregate_version 取 MemoryItem 当前 version（单调递增），
+        同一 aggregate 事件可严格排序。
+        """
+        from cogito.domain.events import DomainEvent
+        from cogito.store.repositories import OutboxRepository
+        data = payload or {}
+        current = self._repo.get(memory_id)
+        version = current.version if current else 1
+        OutboxRepository(self._repo._conn).insert(DomainEvent(
+            event_type=event_type,
+            aggregate_type="memory",
+            aggregate_id=memory_id,
+            aggregate_version=version,
+            payload=data,
+            payload_ref=__import__("json").dumps(data, ensure_ascii=False),
+            origin="memory_service",
+        ))
 
     # ── 写入 ──
 

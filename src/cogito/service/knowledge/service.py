@@ -130,7 +130,8 @@ class KnowledgeService:
             r.resource_id,
             {"resource_id": r.resource_id, "source_version": r.source_version},
         )
-        self._conn.commit()
+        # PLAN-16 M2 TX-05: 不再内部 commit，由调用方（Command/Task 外层）统一提交，
+        # 确保 register + ingest + Outbox 事件原子。
         _LOGGER.info("Registered knowledge resource %s", r.resource_id)
         return r
 
@@ -194,7 +195,7 @@ class KnowledgeService:
             "KnowledgeSegmentsIndexed", resource_id,
             {"resource_id": resource_id, "document_id": doc.document_id, "segment_count": len(segs)},
         )
-        self._conn.commit()
+        # PLAN-16 M2 TX-05: 不再内部 commit，由调用方统一提交。
         _LOGGER.info(
             "Ingested resource %s → document %s, %d segments",
             resource_id, doc.document_id, len(segs),
@@ -300,7 +301,7 @@ class KnowledgeService:
             "KnowledgeResourceInvalidated", resource_id,
             {"resource_id": resource_id, "reason": reason, "segment_count": count},
         )
-        self._conn.commit()
+        # PLAN-16 M2 TX-05: 不再内部 commit，由调用方统一提交。
         return count
 
     def sync_source(
@@ -384,7 +385,9 @@ class KnowledgeService:
             "KnowledgeResourceDeleted", resource_id,
             {"resource_id": resource_id, "reason": reason, "segment_count": count},
         )
-        self._conn.commit()
+        # PLAN-16 M2 TX-05: 不再内部 commit，由调用方统一提交。
+        # NOTE: 此方法会写 memory 表（MemorySourceInvalidated / memory_sources），
+        # 属于跨聚合副作用，详见 KNOW-07 / M5 — 提交边界仍在调用方。
         return count
 
 

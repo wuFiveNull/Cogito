@@ -39,6 +39,8 @@ def sync_resource(
         principal_id=principal_id,
         trust_label=trust_label,
     )
+    # PLAN-16 M2 TX-05: KnowledgeService 不再内部 commit，调用方统一提交。
+    conn.commit()
     _LOGGER.info("Synced resource %s", resource_id)
     return resource_id
 
@@ -55,9 +57,12 @@ def delete_resource(
     - Segment 从默认检索撤销（FTS清理）
     - 幂等：重复删除返回 True
     """
-    return KnowledgeService(conn).delete_source(
+    result = KnowledgeService(conn).delete_source(
         stable_source_id=stable_source_id, principal_id=principal_id,
     )
+    # PLAN-16 M2 TX-05: KnowledgeService 不再内部 commit，调用方统一提交。
+    conn.commit()
+    return result
 
 
 def _find_by_stable_id(

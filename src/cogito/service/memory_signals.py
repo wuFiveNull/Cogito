@@ -52,22 +52,26 @@ class SignalWriter:
         return ok
 
     def _emit_signal_event(self, signal_type: str, memory_id: str, signal_value: int, task_id: str) -> None:
-        """PLAN-14 R-08: MemorySignalRecorded 领域事件（非阻塞）。"""
-        try:
-            from cogito.domain.events import DomainEvent
-            from cogito.store.repositories import OutboxRepository
-            payload = {"signal_type": signal_type, "signal_value": signal_value, "task_id": task_id}
-            OutboxRepository(self._conn).insert(DomainEvent(
-                event_type="MemorySignalRecorded",
-                aggregate_type="memory",
-                aggregate_id=memory_id,
-                aggregate_version=1,
-                payload=payload,
-                payload_ref=__import__("json").dumps(payload, ensure_ascii=False),
-                origin="signal_writer",
-            ))
-        except Exception:
-            pass
+        """PLAN-14/16 R-08: MemorySignalRecorded 领域事件（PLAN-16 M2 TX-02/TX-03）。
+
+        与信号行共享同一连接 / 事务：写入失败向上传播，确保信号与
+        Outbox 事件原子提交。aggregate_version 取 MemoryItem 当前 version。
+        """
+        from cogito.domain.events import DomainEvent
+        from cogito.store.memory_repo import MemoryRepository
+        from cogito.store.repositories import OutboxRepository
+        payload = {"signal_type": signal_type, "signal_value": signal_value, "task_id": task_id}
+        current = MemoryRepository(self._conn).get(memory_id)
+        version = current.version if current else 1
+        OutboxRepository(self._conn).insert(DomainEvent(
+            event_type="MemorySignalRecorded",
+            aggregate_type="memory",
+            aggregate_id=memory_id,
+            aggregate_version=version,
+            payload=payload,
+            payload_ref=__import__("json").dumps(payload, ensure_ascii=False),
+            origin="signal_writer",
+        ))
 
     def record_exposed(self, memory_id: str, **kwargs) -> bool:
         """召回展示信号（不增加 reinforcement）。"""

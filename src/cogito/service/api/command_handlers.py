@@ -9,6 +9,7 @@ ACCESS-DELIVERY §2.3。所有命令：
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import uuid
@@ -267,11 +268,13 @@ def confirm_memory(payload: MemoryConfirmPayload, deps: CommandDeps = Depends(ge
         )
     except sqlite3.IntegrityError:
         pass
-    deps.conn.commit()
+    # PLAN-16 M2 TX-06: 审计与事实（confirm + signal + weight task）在同一事务原子提交。
     write_audit(
         deps.conn, actor_id=ACTOR, action="confirm-memory",
         target_type="memory", target_id=payload.memory_id,
+        commit=False,
     )
+    deps.conn.commit()
     return _ok("confirm-memory", payload.memory_id)
 
 
@@ -304,11 +307,13 @@ def reject_memory(payload: MemoryRejectPayload, deps: CommandDeps = Depends(get_
         )
     except sqlite3.IntegrityError:
         pass
-    deps.conn.commit()
+    # PLAN-16 M2 TX-06: 审计与事实在同一事务原子提交。
     write_audit(
         deps.conn, actor_id=ACTOR, action="reject-memory",
         target_type="memory", target_id=payload.memory_id,
+        commit=False,
     )
+    deps.conn.commit()
     return _ok("reject-memory", payload.memory_id)
 
 
@@ -357,12 +362,14 @@ def correct_memory(payload: MemoryCorrectPayload, deps: CommandDeps = Depends(ge
         )
     except sqlite3.IntegrityError:
         pass
-    deps.conn.commit()
+    # PLAN-16 M2 TX-06: 审计与事实（新记忆 + supersede + signal + weight task）同一事务原子提交。
     write_audit(
         deps.conn, actor_id=ACTOR, action="correct-memory",
         target_type="memory", target_id=corrected.memory_id,
         changes={"supersedes": payload.memory_id},
+        commit=False,
     )
+    deps.conn.commit()
     return _ok("correct-memory", corrected.memory_id, supersedes=payload.memory_id)
 
 
@@ -388,11 +395,13 @@ def delete_memory(payload: MemoryDeletePayload, deps: CommandDeps = Depends(get_
     ok = svc.forget(payload.memory_id)
     if not ok:
         return _fail("delete-memory", payload.memory_id, "not found")
-    deps.conn.commit()
+    # PLAN-16 M2 TX-06: 审计与 forget 事实同一事务原子提交。
     write_audit(
         deps.conn, actor_id=ACTOR, action="delete-memory",
         target_type="memory", target_id=payload.memory_id,
+        commit=False,
     )
+    deps.conn.commit()
     return _ok("delete-memory", payload.memory_id)
 
 
@@ -426,8 +435,10 @@ def _emit_session_completed(
 def delete_session(payload: DeleteSessionPayload, deps: CommandDeps = Depends(get_command_deps)) -> CommandResponse:
     """软删除会话：设置 deleted_at 时间戳，数据保留但页面不再显示。"""
     row = deps.conn.execute(
-        "SELECT session_id, COALESCE(principal_id, 'owner') AS principal_id, "
-        "conversation_id FROM sessions WHERE session_id=? AND deleted_at IS NULL",
+        "SELECT s.session_id, s.conversation_id, "
+        "COALESCE(c.principal_scope, 'owner') AS principal_id "
+        "FROM sessions s LEFT JOIN conversations c ON c.conversation_id=s.conversation_id "
+        "WHERE s.session_id=? AND s.deleted_at IS NULL",
         (payload.session_id,),
     ).fetchone()
     if row is None:
@@ -464,8 +475,9 @@ def delete_sessions_by_conversation(
     """按 conversation_id 软删除其下所有活跃 session。"""
     from datetime import UTC, datetime
     rows = deps.conn.execute(
-        "SELECT session_id, COALESCE(principal_id, 'owner') AS principal_id "
-        "FROM sessions WHERE conversation_id=? AND deleted_at IS NULL",
+        "SELECT s.session_id, COALESCE(c.principal_scope, 'owner') AS principal_id "
+        "FROM sessions s LEFT JOIN conversations c ON c.conversation_id=s.conversation_id "
+        "WHERE s.conversation_id=? AND s.deleted_at IS NULL",
         (payload.conversation_id,),
     ).fetchall()
     if not rows:
@@ -736,13 +748,16 @@ def register_knowledge(
     )
     if payload.content:
         svc.ingest(resource.resource_id, payload.content)
-    deps.conn.commit()
-    _refresh_knowledge_views(deps.conn, deps.config)
+    # PLAN-16 M2 TX-05/06: 审计与事实（register + ingest）同一事务原子提交。
+    # KnowledgeService 不再内部 commit，由 deps.conn.commit() 统一提交。
     write_audit(
         deps.conn, actor_id=ACTOR, action="register-knowledge",
         target_type="knowledge_resource", target_id=resource.resource_id,
         changes={"source_kind": payload.source_kind, "ingested": bool(payload.content)},
+        commit=False,
     )
+    deps.conn.commit()
+    _refresh_knowledge_views(deps.conn, deps.config)
     return _ok("register-knowledge", resource.resource_id,
                source_kind=payload.source_kind)
 
@@ -768,13 +783,15 @@ def refresh_knowledge(
     if payload.content:
         svc.invalidate(resource_id, "refresh")
         svc.ingest(resource_id, payload.content)
-    deps.conn.commit()
-    _refresh_knowledge_views(deps.conn, deps.config)
+    # PLAN-16 M2 TX-05/06: 审计与事实同一事务原子提交。
     write_audit(
         deps.conn, actor_id=ACTOR, action="refresh-knowledge",
         target_type="knowledge_resource", target_id=resource_id,
         changes={"refreshed": bool(payload.content)},
+        commit=False,
     )
+    deps.conn.commit()
+    _refresh_knowledge_views(deps.conn, deps.config)
     return _ok("refresh-knowledge", resource_id)
 
 
@@ -794,13 +811,15 @@ def invalidate_knowledge(
         raise HTTPException(status_code=404, detail=f"knowledge resource {payload.resource_id} not found")
     from cogito.service.knowledge.service import KnowledgeService
     KnowledgeService(deps.conn).invalidate(payload.resource_id, payload.reason)
-    deps.conn.commit()
-    _refresh_knowledge_views(deps.conn, deps.config)
+    # PLAN-16 M2 TX-05/06: 审计与事实同一事务原子提交。
     write_audit(
         deps.conn, actor_id=ACTOR, action="invalidate-knowledge",
         target_type="knowledge_resource", target_id=payload.resource_id,
         changes={"reason": payload.reason},
+        commit=False,
     )
+    deps.conn.commit()
+    _refresh_knowledge_views(deps.conn, deps.config)
     return _ok("invalidate-knowledge", payload.resource_id)
 
 
@@ -820,13 +839,15 @@ def erase_knowledge(
         raise HTTPException(status_code=404, detail=f"knowledge resource {payload.resource_id} not found")
     from cogito.service.knowledge.service import KnowledgeService
     KnowledgeService(deps.conn).erase(payload.resource_id, payload.reason)
-    deps.conn.commit()
-    _refresh_knowledge_views(deps.conn, deps.config)
+    # PLAN-16 M2 TX-05/06: 审计与事实（含跨聚合 MemorySource 清理）同一事务原子提交。
     write_audit(
         deps.conn, actor_id=ACTOR, action="erase-knowledge",
         target_type="knowledge_resource", target_id=payload.resource_id,
         changes={"reason": payload.reason},
+        commit=False,
     )
+    deps.conn.commit()
+    _refresh_knowledge_views(deps.conn, deps.config)
     return _ok("erase-knowledge", payload.resource_id)
 
 
