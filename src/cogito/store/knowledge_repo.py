@@ -216,13 +216,14 @@ def ensure_knowledge_fts(conn: sqlite3.Connection) -> bool:
             "CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts "
             "USING fts5(segment_id UNINDEXED, text, tokenize='unicode61')"
         )
-        _rebuild_knowledge_fts(conn)
+        rebuild_knowledge_fts(conn)
         return True
     except sqlite3.OperationalError:
         return False
 
 
-def _rebuild_knowledge_fts(conn: sqlite3.Connection) -> None:
+def rebuild_knowledge_fts(conn: sqlite3.Connection) -> None:
+    """全量重建知识 FTS 索引（幂等，仅含未删段落地）。PLAN-13 P13-09。"""
     try:
         conn.execute("DELETE FROM knowledge_fts")
         conn.execute(
@@ -249,7 +250,7 @@ def search_knowledge_fts(
         # 延迟同步：如果 FTS 表为空但 segment 有数据，先重建
         cnt = conn.execute("SELECT COUNT(*) c FROM knowledge_fts").fetchone()["c"]
         if cnt == 0:
-            _rebuild_knowledge_fts(conn)
+            rebuild_knowledge_fts(conn)
         rows = conn.execute(
             "SELECT segment_id FROM knowledge_fts WHERE knowledge_fts MATCH ? LIMIT ?",
             (fts_expr, limit),
