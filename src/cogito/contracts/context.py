@@ -13,9 +13,11 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from cogito.contracts.budget import TokenBudgetConfig
 from cogito.contracts.clock import Clock, ProductionClock, epoch_ms
 from cogito.contracts.memory import MemoryReader
 from cogito.contracts.multimodal import MultimodalContextReader
+from cogito.contracts.retrieval import RetrievalCandidate
 
 # 简单 Token 估算器：每字符约 0.25 token
 _CHARS_PER_TOKEN = 4.0
@@ -116,7 +118,7 @@ class ContextBuilder:
     EMERGENCY_THRESHOLD = 0.95
     KEEP_RECENT_COUNT = 10
     KEEP_RECENT_TOKENS = 2000
-    _MEMORY_BUDGET_TOKENS = 2000
+    # PLAN-13/R-12：各源预算统一由 TokenBudgetConfig 管理；此处仅保留兜底默认值。
     _MEMORY_MAX_ITEMS = 50
     _KIND_PRIORITY: dict[str, int] = {
         "constraint": 0,
@@ -137,7 +139,10 @@ class ContextBuilder:
         multimodal_reader: MultimodalContextReader | None = None,
         knowledge_reader: KnowledgeReader | None = None,
         knowledge_top_k: int = 8,
+        # PLAN-13/R-12: knowledge_budget_ratio 保留为兼容参数；
+        # 实际配额由 _budget_config.knowledge_segments_ratio 决定。
         knowledge_budget_ratio: float = 0.20,
+        budget_config: TokenBudgetConfig | None = None,
     ) -> None:
         self._conn = conn
         self._clock = clock or ProductionClock()
@@ -149,6 +154,10 @@ class ContextBuilder:
         self._knowledge_reader = knowledge_reader
         self._knowledge_top_k = knowledge_top_k
         self._knowledge_budget_ratio = knowledge_budget_ratio
+        # PLAN-13/R-12：统一 budget 配置（默认使用 PLAN-13 §13.4 推荐值）
+        self._budget_config = budget_config or TokenBudgetConfig(
+            knowledge_segments_ratio=knowledge_budget_ratio,
+        )
 
     def build(
         self,
@@ -291,7 +300,39 @@ class ContextBuilder:
 
         return snapshot
 
+    def _build_knowledge_candidates(
+        self, results: list[dict],
+    ) -> list[RetrievalCandidate]:
+        """PLAN-13/R-12: 将 KnowledgeReader 返回的 dict 映射为 RetrievalCandidate。"""
+        candidates: list[RetrievalCandidate] = []
+        for value in results:
+            content = str(value.get("text_ref_or_inline", ""))
+            if not content:
+                continue
+            segment_id = str(value.get("segment_id", ""))
+            resource_id = str(value.get("resource_id", ""))
+            score = float(value.get("score", 0.0))
+            retrieval_path = str(value.get("retrieval_path", "keyword"))
+            candidates.append(RetrievalCandidate(
+                candidate_type="knowledge_segment",
+                candidate_id=segment_id,
+                principal_id=str(value.get("principal_id", "")),
+                scope="",
+                content_ref=content,
+                token_estimate=int(value.get("token_count") or estimate_tokens(content)),
+                keyword_score=score if "keyword" in retrieval_path else 0.0,
+                semantic_score=score if "vector" in retrieval_path else 0.0,
+                recency_score=0.0,
+                importance_score=0.0,
+                trust_score=1.0 if value.get("trust_label") in ("internal", "verified") else 0.7,
+                final_score=score,
+                retrieval_path=retrieval_path,
+                policy_version=self._policy_version,
+            ))
+        return candidates
+
     def _inject_knowledge(self, principal_id: str, query: str) -> list[ContextItem]:
+        """PLAN-13/R-12: 构建知识候选 → 按 knowledge 源预算选择 → ContextItem。"""
         if not principal_id or not query.strip() or self._knowledge_reader is None:
             return []
         try:
@@ -300,36 +341,39 @@ class ContextBuilder:
             )
         except Exception:
             return []
-        budget = max(0, int(self._max_input_tokens * self._knowledge_budget_ratio))
-        used = 0
+
+        candidates = self._build_knowledge_candidates(results)
+
+        # PLAN-13/R-12: 按 knowledge_segment 源预算配额选择
+        knowledge_budget = self._budget_config.quota(
+            "knowledge_segment", max(1, self._max_input_tokens),
+        )
+        selected = self._select_candidates_by_budget(candidates, knowledge_budget)
+
         output: list[ContextItem] = []
-        for value in results:
-            content = str(value.get("text_ref_or_inline", ""))
-            tokens = int(value.get("token_count") or estimate_tokens(content))
-            if not content or used + tokens > budget:
-                continue
-            resource_id = str(value.get("resource_id", ""))
+        for c in selected:
+            resource_id = ""
+            # 反查 resource_id（通过 content 匹配原始 dict）
+            for r in results:
+                if str(r.get("segment_id", "")) == c.candidate_id:
+                    resource_id = str(r.get("resource_id", ""))
+                    break
             output.append(ContextItem(
                 item_type="knowledge",
-                item_id=str(value.get("segment_id", "")),
+                item_id=c.candidate_id,
                 source=resource_id,
-                tokens=tokens,
-                trust_label=str(value.get("trust_label", "unverified")),
-                content=(
-                    "<knowledge_segment>\n"
-                    f"{content}\n"
-                    "</knowledge_segment>"
-                ),
+                tokens=max(1, c.token_estimate),
+                trust_label="verified" if c.trust_score >= 1.0 else "unverified",
+                content=f"<knowledge_segment>\n{c.content_ref}\n</knowledge_segment>",
                 role="system",
-                score=float(value.get("score", 0.0)),
-                retrieval_path=str(value.get("retrieval_path", "keyword")),
+                score=c.final_score,
+                retrieval_path=c.retrieval_path,
                 provenance=(
                     ("resource_id", resource_id),
-                    ("source_version", str(value.get("source_version", ""))),
-                    ("heading_path", str(value.get("heading_path", ""))),
+                    ("retrieval_path", c.retrieval_path),
+                    ("policy_version", self._policy_version),
                 ),
             ))
-            used += tokens
         return output
 
     # ── 内部方法（与原始 runtime/context.py 完全一致）──
@@ -379,27 +423,20 @@ class ContextBuilder:
             return "\n".join(lines)
         return f"Session Summary: {content_json[:500]}"
 
-    def _inject_memories(
+    def _build_memory_candidates(
         self,
-        principal_id: str,
+        memories: list,
         session_id: str,
-    ) -> tuple[list[ContextItem], list[str]]:
-        if not principal_id or not self._memory_reader:
-            return [], []
+        conversation_id: str,
+    ) -> list[RetrievalCandidate]:
+        """PLAN-13/R-12: 将 MemoryItem 实体映射为 RetrievalCandidate。
 
-        all_memories = self._memory_reader.retrieve(
-            principal_id=principal_id,
-            limit=self._MEMORY_MAX_ITEMS,
-        )
-        if not all_memories:
-            return [], []
-
-        conversation_id = self._get_session_conversation(session_id)
-
+        保留原有的 session > conversation > global 优先级排序 + canonical_key 去重。
+        """
         session_mems: list = []
         conv_mems: list = []
         global_mems: list = []
-        for m in all_memories:
+        for m in memories:
             if m.scope_type == "session":
                 if m.scope_id == session_id:
                     session_mems.append(m)
@@ -425,43 +462,133 @@ class ContextBuilder:
 
         merged.sort(key=_sort_key)
 
-        lines = ["<relevant_memories>"]
-        memory_ids: list[str] = []
-        budget = self._MEMORY_BUDGET_TOKENS
-        used = 0
-
+        candidates: list[RetrievalCandidate] = []
         for m in merged:
             kind_label = str(m.kind)
-            expl_label = "explicit" if m.explicitness in (
-                "explicit_user_statement", "confirmed_inference"
-            ) else "inferred"
-            entry = (
-                f"- [{kind_label}, {expl_label}, "
+            is_explicit = m.explicitness in (
+                "explicit_user_statement", "confirmed_inference",
+            )
+            kind_source = "goal" if kind_label in ("goal", "constraint") else "memory"
+            entry_text = (
+                f"- [{kind_label}, "
+                f"{'explicit' if is_explicit else 'inferred'}, "
                 f"confidence={m.confidence:.1f}] "
                 f"{m.subject}/{m.predicate} = {m.value}"
             )
-            entry_tokens = estimate_tokens(entry)
-            if used + entry_tokens > budget:
+            candidates.append(RetrievalCandidate(
+                candidate_type="memory",
+                candidate_id=m.memory_id,
+                principal_id=m.principal_id,
+                scope=m.scope_type,
+                content_ref=entry_text,
+                token_estimate=estimate_tokens(entry_text),
+                keyword_score=0.0,
+                semantic_score=0.0,
+                recency_score=0.0,
+                importance_score=m.importance,
+                trust_score=(1.0 if is_explicit else 0.7),
+                final_score=self._memory_candidate_score(m),
+                retrieval_path="list",
+                policy_version=self._policy_version,
+            ))
+        return candidates
+
+    @staticmethod
+    def _memory_candidate_score(m) -> float:
+        """记忆候选综合分 = importance * 0.5 + confidence * 0.3 + trust * 0.2。"""
+        is_explicit = m.explicitness in (
+            "explicit_user_statement", "confirmed_inference",
+        )
+        trust = 1.0 if is_explicit else 0.7
+        return m.importance * 0.5 + m.confidence * 0.3 + trust * 0.2
+
+    def _inject_memories(
+        self,
+        principal_id: str,
+        session_id: str,
+    ) -> tuple[list[ContextItem], list[str]]:
+        """PLAN-13/R-12: 构建记忆候选 → 统一 budget 选择 → 序列化 ContextItem。"""
+        if not principal_id or not self._memory_reader:
+            return [], []
+
+        all_memories = self._memory_reader.retrieve(
+            principal_id=principal_id,
+            limit=self._MEMORY_MAX_ITEMS,
+        )
+        if not all_memories:
+            return [], []
+
+        conversation_id = self._get_session_conversation(session_id)
+        candidates = self._build_memory_candidates(
+            all_memories, session_id, conversation_id,
+        )
+
+        # PLAN-13/R-12: 按 memory 源预算配额选择候选
+        memory_budget = self._memory_budget_tokens()
+        selected = self._select_candidates_by_budget(candidates, memory_budget)
+
+        if not selected:
+            return [], []
+
+        lines = ["<relevant_memories>"]
+        memory_ids: list[str] = []
+        for c in selected:
+            lines.append(f"  {c.content_ref}")
+            memory_ids.append(c.candidate_id)
+        lines.append("</relevant_memories>")
+        content = "\n".join(lines)
+        item = ContextItem(
+            item_type="memory",
+            item_id="_injected_memory",
+            source="memory",
+            tokens=estimate_tokens(content),
+            trust_label="verified",
+            content=content,
+            role="system",
+            score=max(c.final_score for c in selected) if selected else 0.0,
+            retrieval_path="list",
+            provenance=(
+                ("source_count", str(len(selected))),
+                ("pool_size", str(len(candidates))),
+                ("policy_version", self._policy_version),
+            ),
+        )
+        return [item], memory_ids
+
+    def _memory_budget_tokens(self) -> int:
+        """PLAN-13/R-12: 计算记忆源可用 token 配额。
+
+        使用 TokenBudgetConfig.fact_memory_ratio 计算占比；
+        当 max_input_tokens 较小（如测试 1500）导致配额 ≤ 0 时，
+        退化为至少允许 1 条记忆（兜底，兼容旧行为）。
+        """
+        usable = max(1, self._max_input_tokens)
+        ratio = self._budget_config.fact_memory_ratio
+        budget = int(usable * ratio)
+        # 兜底：至少一条最小记忆
+        return max(budget, 200)
+
+    def _select_candidates_by_budget(
+        self,
+        candidates: list[RetrievalCandidate],
+        budget_tokens: int,
+    ) -> list[RetrievalCandidate]:
+        """按 final_score 降序选择候选，累计 token 不超 budget。
+
+        预算 ≤ 0 时返回空（由调用方决定是否兜底）。
+        """
+        if budget_tokens <= 0:
+            return []
+        used = 0
+        selected: list[RetrievalCandidate] = []
+        for c in candidates:  # 已按重要性预排序
+            if c.exclusion_reason:
                 continue
-            lines.append(f"  {entry}")
-            used += entry_tokens
-            memory_ids.append(m.memory_id)
-
-        if len(lines) > 1:
-            lines.append("</relevant_memories>")
-            content = "\n".join(lines)
-            item = ContextItem(
-                item_type="memory",
-                item_id="_injected_memory",
-                source="memory",
-                tokens=estimate_tokens(content),
-                trust_label="verified",
-                content=content,
-                role="system",
-            )
-            return [item], memory_ids
-
-        return [], []
+            if used + max(1, c.token_estimate) > budget_tokens:
+                continue
+            selected.append(c)
+            used += max(1, c.token_estimate)
+        return selected
 
     def _clip_to_budget(
         self,
