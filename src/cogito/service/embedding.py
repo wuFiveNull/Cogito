@@ -2,7 +2,9 @@
 
 设计为可插拔的 Provider 模式：
 - NoopEmbeddingProvider：默认实现，所有方法返回空（适合 FTS-only 模式）
-- OpenAICompatEmbeddingProvider：OpenAI 兼容 API 实现
+- OpenAICompatEmbeddingProvider：基于 openai.OpenAI 客户端的实现
+  使用官方客户端而非 raw aiohttp，因为部分云 API（如 SiliconFlow）依赖
+  TLS 指纹或代理层过滤，仅接受 OpenAI SDK 的 TLS 握手。
 """
 
 from __future__ import annotations
@@ -65,13 +67,13 @@ class NoopEmbeddingProvider:
 
 
 class OpenAICompatEmbeddingProvider:
-    """F2: OpenAI 兼容 Embedding API Provider。
+    """F2: OpenAI 兼容 Embedding API Provider（基于 openai.OpenAI 客户端）。
 
-    支持：
-    - 单条/批量 embedding
-    - timeout、retry-after
-    - model/version/dimensions 校验
-    - API 故障时返回空（不阻塞普通聊天）
+    使用官方 SDK 而非 raw aiohttp，因为 SiliconFlow 等云 API
+    使用 TLS 指纹/代理层过滤，仅接受 OpenAI SDK 的 TLS 握手。
+    支持：单条/批量 embedding、timeout、model/version 追踪、API 故障 fail-open。
+
+    也兼容 self-hosted / 无过滤的 OpenAI 兼容服务。
     """
 
     def __init__(
@@ -90,6 +92,18 @@ class OpenAICompatEmbeddingProvider:
         self._timeout = timeout
         self._max_batch_size = max_batch_size
         self._version = "1"
+        self._client = None  # lazy init (openai.OpenAI is not pickle-safe for multiprocessing)
+
+    def _get_client(self):
+        if self._client is None:
+            from openai import OpenAI
+            self._client = OpenAI(
+                api_key=self._api_key,
+                base_url=self._base_url,
+                timeout=self._timeout,
+                max_retries=2,
+            )
+        return self._client
 
     @property
     def model_name(self) -> str:
@@ -113,48 +127,46 @@ class OpenAICompatEmbeddingProvider:
         if not texts:
             return []
 
+        loop = asyncio.get_event_loop()
         all_results: list[list[float]] = []
         for i in range(0, len(texts), self._max_batch_size):
             batch = texts[i:i + self._max_batch_size]
-            result = await self._embed_batch(batch)
+            result = await loop.run_in_executor(None, self._embed_batch_sync, batch)
             all_results.extend(result)
 
         return all_results
 
-    async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """单批 embedding（≤ max_batch_size）。"""
+    def _embed_batch_sync(self, texts: list[str]) -> list[list[float]]:
+        """同步单批 embedding（在 executor 中运行）。
+
+        请求格式与 requests 官方示例一致：仅 input + model，
+        不传 encoding_format / dimensions，避免部分云 API（如 SiliconFlow）
+        因多余参数返回 400。
+        """
         try:
-            import aiohttp
-
-            headers = {
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            }
-            body: dict = {"model": self._model, "input": texts}
-            if self._dimensions:
-                body["dimensions"] = self._dimensions
-
-            url = f"{self._base_url}/embeddings"
-            timeout = aiohttp.ClientTimeout(total=self._timeout)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, json=body, headers=headers) as resp:
-                    if resp.status != 200:
-                        _LOGGER.warning("Embedding API error: %s", resp.status)
-                        return [[] for _ in texts]
-                    data = await resp.json()
-
-            vectors = []
-            for item in data.get("data", []):
-                vec = item.get("embedding", [])
+            resp = self._get_client().embeddings.create(
+                model=self._model, input=texts,
+            )
+            vectors: list[list[float]] = []
+            for item in resp.data:
+                raw = item.embedding
+                if isinstance(raw, str):
+                    import base64, struct
+                    decoded = base64.b64decode(raw)
+                    n = len(decoded) // 4
+                    vec = list(struct.unpack(f">{n}f", decoded))
+                elif isinstance(raw, (list, tuple)):
+                    vec = [float(x) for x in raw]
+                else:
+                    vec = []
                 vectors.append(vec)
 
-            # 维度校验
-            if self._dimensions and vectors and len(vectors[0]) != self._dimensions:
+            # 维度校验（软：仅警告）
+            if self._dimensions and vectors and vectors[0] and len(vectors[0]) != self._dimensions:
                 _LOGGER.warning(
                     "Embedding dimension mismatch: expected %d, got %d",
-                    self._dimensions, len(vectors[0]) if vectors else 0,
+                    self._dimensions, len(vectors[0]),
                 )
-                return [[] for _ in texts]
 
             return vectors if vectors else [[] for _ in texts]
         except Exception as e:
