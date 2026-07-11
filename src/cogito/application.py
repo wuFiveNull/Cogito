@@ -693,6 +693,7 @@ class RuntimeApplication:
         # 启动启用的 Channel Adapter（如 QQ）
         await self._start_enabled_channels()
 
+        from cogito.service.presence import SqlitePresenceReader
         task_handler_ctx = TaskHandlerContext(
             connection_factory=lambda p=self.config.resolve_db_path(): get_connection(p),
             model_router=self.llm_manager.router if self.llm_manager else None,
@@ -705,6 +706,10 @@ class RuntimeApplication:
             mcp_manager=self.mcp_manager,
             delivery_service=self.delivery_service,
             proactive_config=self.config.capability.proactive,
+            presence_reader=SqlitePresenceReader(
+                connection_factory=lambda p=self.config.resolve_db_path(): get_connection(p),
+            ),
+            config_version_id=self.config.config_version,
         )
         task_registry = _build_registry(task_handler_ctx)
         task_dispatcher = TaskDispatcher(self.conn)

@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from cogito.contracts.clock import epoch_ms
+from cogito.contracts.clock import epoch_ms, now_ms
 
 # ── 数据类（frozen 不可变）──────────────────────────────────────────────────
 
@@ -78,6 +78,10 @@ class ProactiveDecision:
     scheduled_for: int | None = None
     delivery_id: str | None = None
     digest_id: str | None = None
+    # ── M1: 审计与能量闭环 ──
+    last_user_at: int | None = None          # epoch ms；决定时的真实用户活动时间快照
+    energy_model_version: str = "v1"         # 能量模型版本（便于跨版本回放对比）
+    config_version_id: str | None = None     # 决定时生效的配置版本（可追溯 Policy/预算/阈值）
 
 
 # ── Repository ────────────────────────────────────────────────────────────────
@@ -179,7 +183,7 @@ def _row_to_candidate(row: Any) -> ProactiveCandidate:
         source_event_ids=json.loads(row["source_event_ids_json"] or "[]"),
         source_payload_ref=row["source_payload_ref"],
         created_at=row["created_at"],
-        consumed_at=row.get("consumed_at"),
+        consumed_at=row["consumed_at"],
         status=row["status"],
     )
 
@@ -196,7 +200,7 @@ class ProactivePolicyRepository:
             (principal_id,),
         ).fetchone()
         if row is None:
-            now = epoch_ms()
+            now = now_ms()
             pid = uuid.uuid4().hex
             self._conn.execute(
                 "INSERT INTO proactive_policies "
@@ -270,8 +274,9 @@ class ProactiveDecisionRepository:
             "INSERT INTO proactive_decisions_v2 "
             "(decision_id, candidate_id, principal_id, action, rule_results_json, "
             " model_score_json, policy_version, energy_value, dry_run, decided_at, "
-            " scheduled_for, delivery_id, digest_id) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " scheduled_for, delivery_id, digest_id, last_user_at, "
+            " energy_model_version, config_version_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 d.decision_id, d.candidate_id, d.principal_id, d.action,
                 json.dumps(d.rule_results, ensure_ascii=False),
@@ -280,6 +285,7 @@ class ProactiveDecisionRepository:
                 1 if d.dry_run else 0,
                 d.decided_at,
                 d.scheduled_for, d.delivery_id, d.digest_id,
+                d.last_user_at, d.energy_model_version, d.config_version_id,
             ),
         )
 
@@ -306,6 +312,9 @@ class ProactiveDecisionRepository:
             scheduled_for=r.get("scheduled_for"),
             delivery_id=r.get("delivery_id"),
             digest_id=r.get("digest_id"),
+            last_user_at=r["last_user_at"] if "last_user_at" in r.keys() else None,
+            energy_model_version=r["energy_model_version"] if "energy_model_version" in r.keys() else "v1",
+            config_version_id=r["config_version_id"] if "config_version_id" in r.keys() else None,
         )
 
     def count_hourly_sent(self, principal_id: str, epoch_hour: int) -> int:

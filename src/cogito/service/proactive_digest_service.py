@@ -14,7 +14,7 @@ import logging
 import sqlite3
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from cogito.domain.digest import Digest, DigestStatus
 
@@ -160,17 +160,26 @@ def enqueue_digest_publish(
     from cogito.domain.task import Task, TaskStatus
     from cogito.store.task_repo import TaskRepository
     payload = f"{principal_id}|{digest_date}|{topic}"
+    idempotency_key = f"pdp:{payload}"
+    task_repo = TaskRepository(conn)
+    # 幂等去重：同一 (principal, date, topic) 已存在待发布 Task 则跳过，
+    # 避免多个 Candidate 同桶产生重复 Task（UNIQUE(task_type, idempotency_key)）。
+    if task_repo.exists_by_idempotency(idempotency_key):
+        return idempotency_key
+    # scheduled_at 使用 datetime（与 Task.scheduled_at 类型一致）；
+    # task_repo.insert 会调用 epoch_ms() 转为 epoch ms 存储。
+    scheduled_at = datetime.now(UTC) + timedelta(minutes=delay_minutes)
     task = Task(
         task_id=f"task-pdp-{uuid.uuid4().hex[:16]}",
         task_type="proactive.digest.publish",
         payload_ref=payload,
         status=TaskStatus.queued,
         priority=20,
-        scheduled_at=int(time.time() * 1000) + int(delay_minutes) * 60 * 1000,
-        idempotency_key=f"pdp:{payload}",
+        scheduled_at=scheduled_at,
+        idempotency_key=idempotency_key,
         origin="proactive-engine",
     )
-    TaskRepository(conn).insert(task)
+    task_repo.insert(task)
     conn.commit()
     return task.task_id
 

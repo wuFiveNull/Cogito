@@ -100,6 +100,10 @@ class TaskHandlerContext:
     delivery_service: Any = None  # DeliveryService 实现
     # 主动推送配置（来自 config.capability.proactive）
     proactive_config: Any = None  # ProactiveConfig
+    # 用户活动读取（PresenceReader Port）；fail-safe 时返回 None
+    presence_reader: Any = None  # PresenceReader
+    # 决定时生效的配置版本（供 Decision 审计追溯）
+    config_version_id: str = ""
     # 当前 Task 元信息（IngestionBatch 日志需要）
     _task_id: str = ""
     _attempt_id: str = ""
@@ -803,8 +807,18 @@ def _evaluate_candidates_sync(conn, ctx) -> str:
         principal_id=config.default_principal_id,
     )
 
-    # 取 energy (last_user_at=None → E=0)
-    energy_value = compute_energy(None)
+    # ── M1: energy 使用真实用户活动快照（同批固定，避免逐 Candidate 漂移）──
+    now = int(time.time() * 1000)
+    last_user_dt = None
+    if ctx.presence_reader is not None:
+        try:
+            last_user_dt = ctx.presence_reader.get_last_user_activity(
+                config.default_principal_id,
+            )
+        except Exception:
+            last_user_dt = None  # fail-safe: 不按最低能量增强主动性
+    last_user_at = epoch_ms_from_datetime(last_user_dt)
+    energy_value = compute_energy(last_user_dt)
 
     # 取 evaluating candidates
     candidates = ProactiveCandidateRepository(conn).find_evaluating(
@@ -813,8 +827,11 @@ def _evaluate_candidates_sync(conn, ctx) -> str:
     if not candidates:
         return "evaluate: no candidates"
 
-    now = int(time.time() * 1000)
     actions = {"send_now": 0, "send_later": 0, "digest": 0, "silent": 0, "discard": 0, "other": 0}
+    # 本批 dry_run 取自 config 不可变快照；real mode 下才创建真实副作用
+    dry_run = bool(config.dry_run)
+    energy_model_version = "v1"
+
     for c in candidates:
         action, trace = decide(
             c, policy,
@@ -826,15 +843,19 @@ def _evaluate_candidates_sync(conn, ctx) -> str:
                 config.default_principal_id, now // (86400 * 1000),
             ),
         )
-        # 持久化 decision
+        # 持久化 decision（显式 dry_run + 审计字段）
         persist_decision(
             conn, c, policy, action, trace,
+            dry_run=dry_run,
             energy_value=energy_value,
+            last_user_at=last_user_at,
+            energy_model_version=energy_model_version,
+            config_version_id=ctx.config_version_id or None,
         )
         # 根据 action 触发后续
         if action == "send_now":
-            if config.dry_run or ctx.delivery_service is None:
-                pass  # dry_run: 仅记录
+            if dry_run or ctx.delivery_service is None:
+                pass  # dry_run: 仅记录，不创建真实 Delivery
             else:
                 import asyncio
 
@@ -897,3 +918,14 @@ def _evaluate_candidates_sync(conn, ctx) -> str:
 
     conn.commit()
     return f"evaluate: {actions}"
+
+
+def epoch_ms_from_datetime(dt) -> int | None:
+    """将 datetime 转为 epoch ms；None / 非 datetime → None。"""
+    if dt is None:
+        return None
+    from cogito.contracts.clock import epoch_ms
+    try:
+        return epoch_ms(dt)
+    except Exception:
+        return None

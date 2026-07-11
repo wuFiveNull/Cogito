@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from cogito.contracts.clock import from_epoch_ms
 from cogito.store.proactive_repo import (
     ProactiveCandidate,
     ProactiveDecision,
@@ -201,10 +202,14 @@ def enqueue_send_later(
     """
     import uuid
 
+    from datetime import timedelta
+
     from cogito.domain.task import Task, TaskStatus
     from cogito.service.proactive_delivery_service import create_scheduled_request
     from cogito.store.task_repo import TaskRepository
     scheduled_at_ms = now_ms() + int(delay_minutes) * 60 * 1000
+    # Task.scheduled_at 为 datetime 类型，此处转为 datetime 保持一致
+    scheduled_at_dt = from_epoch_ms(scheduled_at_ms) if scheduled_at_ms else None
     request_id = create_scheduled_request(
         conn,
         candidate_id=candidate_id,
@@ -216,14 +221,18 @@ def enqueue_send_later(
     )
     # 创建 proactive.delivery.ready Task
     task_repo = TaskRepository(conn)
+    idempotency_key = f"pdr:{request_id}"
+    # 幂等去重：同一 request 不重复创建 delivery.ready Task
+    if task_repo.exists_by_idempotency(idempotency_key):
+        return request_id
     task = Task(
         task_id=f"task-pdr-{uuid.uuid4().hex[:16]}",
         task_type="proactive.delivery.ready",
         payload_ref=request_id,
         status=TaskStatus.queued,
         priority=30,
-        scheduled_at=scheduled_at_ms,
-        idempotency_key=f"pdr:{request_id}",
+        scheduled_at=scheduled_at_dt,
+        idempotency_key=idempotency_key,
         origin="proactive-engine",
     )
     task_repo.insert(task)
@@ -237,11 +246,20 @@ def persist_decision(
     policy: ProactivePolicy,
     action: str,
     trace: list[DecisionTrace],
+    *,
+    dry_run: bool,
     model_score: dict[str, Any] | None = None,
     energy_value: float | None = None,
     scheduled_for: int | None = None,
+    last_user_at: int | None = None,
+    energy_model_version: str = "v1",
+    config_version_id: str | None = None,
 ) -> ProactiveDecision:
-    """把 decision 持久化到 proactive_decisions_v2。"""
+    """把 decision 持久化到 proactive_decisions_v2。
+
+    dry_run 必须由调用方显式传入（取自 config_snapshot.dry_run），
+    不再默认 True，确保审计与真实发送状态一致。
+    """
     repo = ProactiveDecisionRepository(conn)
     d = ProactiveDecision(
         decision_id=f"dec-{uuid.uuid4().hex[:16]}",
@@ -255,9 +273,12 @@ def persist_decision(
         model_score=model_score,
         policy_version=policy.version,
         energy_value=energy_value,
-        dry_run=True,
+        dry_run=dry_run,
         decided_at=now_ms(),
         scheduled_for=scheduled_for,
+        last_user_at=last_user_at,
+        energy_model_version=energy_model_version,
+        config_version_id=config_version_id,
     )
     repo.insert(d)
     return d

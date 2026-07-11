@@ -57,6 +57,14 @@ class TaskRepository:
         ).fetchall()
         return [self._row_to_task(r) for r in rows]
 
+    def exists_by_idempotency(self, idempotency_key: str) -> bool:
+        """检查已存在相同幂等键的 Task（用于创建前去重）。"""
+        row = self._conn.execute(
+            "SELECT 1 FROM tasks WHERE idempotency_key=? LIMIT 1",
+            (idempotency_key,),
+        ).fetchone()
+        return row is not None
+
     def list_filtered(
         self,
         status: str | None = None,
