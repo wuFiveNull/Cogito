@@ -91,6 +91,7 @@ class TaskHandlerContext:
     model_router: Any = None  # ModelRouter
     vision_service_factory: Callable[[], Any] | None = None
     memory_service_factory: Callable[[sqlite3.Connection], Any] | None = None
+    knowledge_service_factory: Callable[[sqlite3.Connection], Any] | None = None
     workspace_path: str = ""
     logger: logging.Logger = field(default_factory=lambda: _LOGGER)
     # MCP 生命周期（由 application.run_worker 注入；连接器 poll 用）
@@ -132,7 +133,13 @@ def _build_registry(ctx: TaskHandlerContext) -> TaskHandlerRegistry:
     """构建默认注册表，注册所有内置 Handler。"""
     registry = TaskHandlerRegistry()
     registry.register("memory.extract", _handle_memory_extract)
+    registry.register("memory.recompute_weight", _handle_memory_recompute_weight)
     registry.register("memory.consolidate", _handle_memory_consolidate)
+    registry.register("knowledge.ingest", _handle_knowledge_ingest)
+    registry.register("knowledge.embed", _handle_knowledge_embed)
+    registry.register("knowledge.invalidate", _handle_knowledge_invalidate)
+    registry.register("knowledge.rebuild_index", _handle_knowledge_rebuild_index)
+    registry.register("knowledge.sync_source", _handle_knowledge_sync_source)
     registry.register("summary.generate", _handle_summary_generate)
     registry.register("connector.poll", _handle_connector_poll)
     registry.register("mcp_connector.poll", _handle_mcp_connector_poll)
@@ -141,6 +148,107 @@ def _build_registry(ctx: TaskHandlerContext) -> TaskHandlerRegistry:
     registry.register("proactive.evaluate", _handle_proactive_evaluate)
     registry.register("vision.analyze", _handle_vision_analyze)
     return registry
+
+
+def _knowledge_service(ctx: TaskHandlerContext, conn: sqlite3.Connection):
+    if ctx.knowledge_service_factory:
+        return ctx.knowledge_service_factory(conn)
+    from cogito.service.knowledge.service import KnowledgeService
+    return KnowledgeService(conn)
+
+
+def _task_json(task: Task) -> dict[str, Any]:
+    try:
+        value = json.loads(task.payload_ref or "{}")
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid {task.task_type} payload") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"invalid {task.task_type} payload")
+    return value
+
+
+def _handle_knowledge_ingest(task: Task, ctx: TaskHandlerContext) -> str:
+    if not ctx.connection_factory:
+        return "knowledge ingest (skipped: no connection_factory)"
+    data = _task_json(task)
+    conn = ctx.connection_factory()
+    try:
+        service = _knowledge_service(ctx, conn)
+        resource_id = str(data.get("resource_id", ""))
+        raw_text = str(data.get("raw_text", ""))
+        if not resource_id or not raw_text:
+            raise ValueError("knowledge.ingest requires resource_id and raw_text")
+        document, segments = service.ingest(resource_id, raw_text)
+        return f"knowledge ingested: {document.document_id} ({len(segments)} segments)"
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _handle_knowledge_embed(task: Task, ctx: TaskHandlerContext) -> str:
+    if not ctx.connection_factory:
+        return "knowledge embed (skipped: no connection_factory)"
+    conn = ctx.connection_factory()
+    try:
+        import asyncio
+        count = asyncio.run(_knowledge_service(ctx, conn).embed_pending())
+        return f"knowledge embedded: {count}"
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _handle_knowledge_invalidate(task: Task, ctx: TaskHandlerContext) -> str:
+    if not ctx.connection_factory:
+        return "knowledge invalidate (skipped: no connection_factory)"
+    data = _task_json(task)
+    conn = ctx.connection_factory()
+    try:
+        resource_id = str(data.get("resource_id", ""))
+        if not resource_id:
+            raise ValueError("knowledge.invalidate requires resource_id")
+        count = _knowledge_service(ctx, conn).invalidate(resource_id, str(data.get("reason", "")))
+        return f"knowledge invalidated: {resource_id} ({count} segments)"
+    finally:
+        conn.close()
+
+
+def _handle_knowledge_rebuild_index(task: Task, ctx: TaskHandlerContext) -> str:
+    if not ctx.connection_factory:
+        return "knowledge rebuild (skipped: no connection_factory)"
+    conn = ctx.connection_factory()
+    try:
+        from cogito.service.knowledge.embedding import rebuild_index
+        result = rebuild_index(conn, fts=True, embeddings=False)
+        conn.commit()
+        return f"knowledge index rebuilt: {result}"
+    finally:
+        conn.close()
+
+
+def _handle_knowledge_sync_source(task: Task, ctx: TaskHandlerContext) -> str:
+    if not ctx.connection_factory:
+        return "knowledge sync (skipped: no connection_factory)"
+    data = _task_json(task)
+    conn = ctx.connection_factory()
+    try:
+        from cogito.service.knowledge.sync import sync_resource
+        resource_id = sync_resource(
+            conn,
+            stable_source_id=str(data.get("stable_source_id", "")),
+            source_kind=str(data.get("source_kind", "connector")),
+            content_hash=str(data.get("content_hash", "")),
+            raw_text=str(data.get("raw_text", "")),
+            principal_id=str(data.get("principal_id", "")),
+            trust_label=str(data.get("trust_label", "unverified")),
+        )
+        return f"knowledge synced: {resource_id}"
+    finally:
+        conn.close()
 
 
 def _handle_vision_analyze(task: Task, ctx: TaskHandlerContext) -> str:
@@ -337,20 +445,7 @@ def _publish_digest_sync(conn, principal_id, digest_date, topic, delivery_servic
 
 
 def _handle_memory_extract(task: Task, ctx: TaskHandlerContext) -> str:
-    """从会话消息范围提取记忆候选。
-
-    真实流程（B5）：
-    1. 解析 Task Payload
-    2. 校验水位和 input_version
-    3. 读取消息范围
-    4. 调用 memory_extractor 模型角色 → 候选
-    5. 每个候选写入来源范围
-    6. 同事务提交候选和关系
-    7. CAS 推进 memory_extract 水位
-    8. 完成
-
-    当前实现：同步写入单条测试候选，推进水位。
-    """
+    """Run one durable, idempotent memory extraction window."""
     payload = MemoryExtractionPayload.from_payload_ref(task.payload_ref or "{}")
     _LOGGER.info(
         "Task memory.extract: %s session=%s range=[%d..%d]",
@@ -359,98 +454,93 @@ def _handle_memory_extract(task: Task, ctx: TaskHandlerContext) -> str:
     )
 
     if not ctx.connection_factory:
-        _LOGGER.warning("memory.extract: no connection_factory, skipping")
         return "extracted (skipped: no connection_factory)"
+    if ctx.model_router is None:
+        raise RuntimeError("memory.extract model router is not configured")
 
-    # 创建连接 + UoW
     conn = ctx.connection_factory()
     try:
         conn.row_factory = sqlite3.Row
-        with UnitOfWork(conn) as uow:
-            # 校验水位
-            from cogito.store.watermark_repo import PROC_MEMORY_EXTRACT, WatermarkRepository
+        from cogito.service.memory_extractor import ExtractMessage, MemoryExtractor
+        from cogito.service.memory_service import SqliteMemoryService
+        from cogito.store.memory_repo import MemoryRepository
+        from cogito.store.watermark_repo import PROC_MEMORY_EXTRACT, WatermarkRepository
 
-            wm_repo = WatermarkRepository(conn)
+        wm_repo = WatermarkRepository(conn)
+        wm = wm_repo.get(PROC_MEMORY_EXTRACT, payload.conversation_id, payload.session_id)
+        if wm and wm.processed_upto_sequence >= payload.to_sequence:
+            return "extracted (already processed)"
+
+        rows = conn.execute(
+            "SELECT m.message_id, m.role, m.receive_sequence, m.sender_principal_id, "
+            "m.trust_label, cp.inline_data "
+            "FROM messages m LEFT JOIN content_parts cp ON cp.message_id=m.message_id "
+            "WHERE m.session_id=? AND m.receive_sequence BETWEEN ? AND ? "
+            "ORDER BY m.receive_sequence, cp.ordinal, cp.part_id",
+            (payload.session_id, payload.from_sequence, payload.to_sequence),
+        ).fetchall()
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            value = grouped.setdefault(row["message_id"], {
+                "role": row["role"], "sequence": row["receive_sequence"],
+                "principal": row["sender_principal_id"] or "",
+                "trust": row["trust_label"] or "unverified", "parts": [],
+            })
+            if row["inline_data"]:
+                value["parts"].append(row["inline_data"])
+        messages = [
+            ExtractMessage(
+                message_id=mid, role=value["role"], content="\n".join(value["parts"]),
+                receive_sequence=value["sequence"], sender_principal_id=value["principal"],
+                trust_label=value["trust"],
+            )
+            for mid, value in grouped.items()
+        ]
+        messages.sort(key=lambda value: value.receive_sequence)
+
+        service = (
+            ctx.memory_service_factory(conn)
+            if ctx.memory_service_factory else
+            SqliteMemoryService(conn, MemoryRepository(conn))
+        )
+        extractor = MemoryExtractor(
+            conn, service, ctx.model_router,
+            model_role=payload.model_role, watermark_repo=wm_repo, strict=True,
+        )
+        import asyncio
+        written = asyncio.run(extractor.extract_from_messages(
+            messages, principal_id=payload.principal_id,
+            session_id=payload.session_id,
+            from_sequence=payload.from_sequence, to_sequence=payload.to_sequence,
+        ))
+
+        # Zero candidates is still a successfully processed window.
+        latest = wm_repo.get(PROC_MEMORY_EXTRACT, payload.conversation_id, payload.session_id)
+        if latest is None:
             wm_repo.upsert(
-                PROC_MEMORY_EXTRACT,
-                payload.conversation_id,
-                payload.session_id,
+                PROC_MEMORY_EXTRACT, payload.conversation_id, payload.session_id,
+                input_version=payload.input_version,
             )
-            wm = wm_repo.get(
-                PROC_MEMORY_EXTRACT,
-                payload.conversation_id,
-                payload.session_id,
-            )
-
-            if wm and wm.processed_upto_sequence >= payload.to_sequence:
-                _LOGGER.info(
-                    "memory.extract: already processed up to %d (task target %d), skipping",
-                    wm.processed_upto_sequence, payload.to_sequence,
-                )
-                return "extracted (already processed)"
-
-            # 读取消息范围
-            rows = conn.execute(
-                "SELECT m.message_id, m.role, m.sender_principal_id, "
-                "  cp.inline_data, cp.content_type "
-                "FROM messages m "
-                "LEFT JOIN content_parts cp ON cp.message_id = m.message_id "
-                "WHERE m.session_id=? "
-                "AND m.receive_sequence BETWEEN ? AND ? "
-                "ORDER BY m.receive_sequence ASC, cp.part_id ASC",
-                (payload.session_id, payload.from_sequence, payload.to_sequence),
-            ).fetchall()
-
-            if not rows:
-                _LOGGER.info("memory.extract: no messages in range")
-            else:
-                # 按 message_id 聚合
-                msg_texts: dict[str, str] = {}
-                for r in rows:
-                    mid = r["message_id"]
-                    if mid not in msg_texts:
-                        text = r["inline_data"] or ""
-                    else:
-                        text = msg_texts[mid] + "\n" + (r["inline_data"] or "")
-                    msg_texts[mid] = text
-
-                # 模型提取（Stub：模型调用在 turn 层完成，此处占位验证）
-                candidate_count = 0
-                for _mid, text in msg_texts.items():
-                    if len(text) > 20 and "?" not in text[:50]:
-                        # 只写入简单测试候选（后续由 MemoryExtractor 落地）
-                        candidate_count += 1
-
-                _LOGGER.info(
-                    "memory.extract: %d messages, %d candidates",
-                    len(msg_texts), candidate_count,
-                )
-
-            # 推进水位
-            expected_upto = wm.processed_upto_sequence if wm else 0
-            expected_ver = wm.version if wm else 0
+            latest = wm_repo.get(PROC_MEMORY_EXTRACT, payload.conversation_id, payload.session_id)
+        if latest and latest.processed_upto_sequence < payload.to_sequence:
             ok = wm_repo.advance(
-                PROC_MEMORY_EXTRACT,
-                payload.conversation_id,
-                payload.session_id,
-                to_sequence=payload.to_sequence,
-                input_version=payload.input_version or 0,
-                expected_from_sequence=expected_upto,
-                expected_version=expected_ver,
+                PROC_MEMORY_EXTRACT, payload.conversation_id, payload.session_id,
+                to_sequence=payload.to_sequence, input_version=payload.input_version,
+                expected_from_sequence=latest.processed_upto_sequence,
+                expected_version=latest.version,
             )
             if not ok:
-                _LOGGER.warning(
-                    "memory.extract: CAS failed for %s (expected upto=%d ver=%d)",
-                    task.task_id, expected_upto, expected_ver,
+                current = wm_repo.get(
+                    PROC_MEMORY_EXTRACT, payload.conversation_id, payload.session_id,
                 )
-                return "extracted (CAS failed)"
-
-            uow.commit()
-
-        return f"extracted (upto={payload.to_sequence})"
-    except Exception as e:
-        _LOGGER.exception("memory.extract failed: %s", e)
-        return f"extracted (error: {e})"
+                if current is None or current.processed_upto_sequence < payload.to_sequence:
+                    raise RuntimeError("memory.extract watermark CAS failed")
+        conn.commit()
+        return f"extracted: {len(written)} candidates (upto={payload.to_sequence})"
+    except Exception:
+        conn.rollback()
+        _LOGGER.exception("memory.extract failed")
+        raise
     finally:
         try:
             conn.close()
@@ -471,6 +561,30 @@ RETENTION_SCOPE = 0.10
 RETENTION_ACTIVE_THRESHOLD = 0.70
 RETENTION_ARCHIVE_THRESHOLD = 0.45
 RETENTION_CANDIDATE_THRESHOLD = 0.25
+
+
+def _handle_memory_recompute_weight(task: Task, ctx: TaskHandlerContext) -> str:
+    """Recompute cached weights from the versioned policy and append-only signals."""
+    if not ctx.connection_factory:
+        return "memory weights (skipped: no connection_factory)"
+    conn = ctx.connection_factory()
+    try:
+        from cogito.store.memory_repo import MemoryRepository
+        from cogito.store.signal_repo import SignalRepository
+        from cogito.store.weight_policy import MemoryWeightPolicy
+
+        count = MemoryRepository(conn).recompute_all_weights(
+            now=datetime.now(UTC),
+            policy=MemoryWeightPolicy(),
+            signals_repo=SignalRepository(conn),
+        )
+        conn.commit()
+        return f"memory weights recomputed: {count}"
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def _compute_retention_score(
@@ -505,60 +619,14 @@ def _compute_retention_score(
 
 
 def _handle_memory_consolidate(task: Task, ctx: TaskHandlerContext) -> str:
-    """记忆合并与归档。"""
+    """Run canonical maintenance without the retired direct-delete scoring path."""
     if not ctx.connection_factory:
         return "consolidated (skipped: no connection_factory)"
 
     conn = ctx.connection_factory()
     try:
-        conn.row_factory = sqlite3.Row
-        now = datetime.now(UTC)
-        now_iso = now.isoformat()
-
-        rows = conn.execute("""
-            SELECT memory_id, importance, confidence, retrieval_count,
-                   explicitness, created_at, half_life_days
-            FROM memory_items
-            WHERE status='confirmed' AND deleted_at IS NULL
-        """).fetchall()
-
-        archived = 0
-        deleted = 0
-
-        for r in rows:
-            created = r["created_at"]
-            if created:
-                try:
-                    created_dt = datetime.fromisoformat(str(created)) if isinstance(created, str) else created
-                    age_days = abs((now - created_dt).total_seconds() / 86400)
-                except (ValueError, TypeError):
-                    age_days = 365.0
-            else:
-                age_days = 365.0
-
-            score = _compute_retention_score(
-                importance=r["importance"],
-                confidence=r["confidence"],
-                retrieval_count=r["retrieval_count"] or 0,
-                age_days=age_days,
-                explicitness=r["explicitness"],
-            )
-
-            mid = r["memory_id"]
-            if score < RETENTION_CANDIDATE_THRESHOLD:
-                conn.execute(
-                    "UPDATE memory_items SET deleted_at=?, updated_at=?, version=version+1 "
-                    "WHERE memory_id=? AND deleted_at IS NULL",
-                    (now_iso, now_iso, mid),
-                )
-                deleted += 1
-            elif score < RETENTION_ARCHIVE_THRESHOLD:
-                conn.execute(
-                    "UPDATE memory_items SET status='expired', updated_at=?, version=version+1 "
-                    "WHERE memory_id=? AND status='confirmed'",
-                    (now_iso, mid),
-                )
-                archived += 1
+        from cogito.store.memory_repo import MemoryRepository
+        result_data = MemoryRepository(conn).consolidate()
 
         try:
             generator = MemoryViewsGenerator(conn)
@@ -566,12 +634,13 @@ def _handle_memory_consolidate(task: Task, ctx: TaskHandlerContext) -> str:
         except Exception as e:
             _LOGGER.warning("Failed to refresh views after consolidation: %s", e)
 
-        result = f"consolidated: {archived} archived, {deleted} deleted"
+        result = f"consolidated: {result_data}"
         _LOGGER.info("memory.consolidate %s: %s", task.task_id, result)
         return result
-    except Exception as e:
-        _LOGGER.exception("memory.consolidate failed: %s", e)
-        return f"consolidated (error: {e})"
+    except Exception:
+        conn.rollback()
+        _LOGGER.exception("memory.consolidate failed")
+        raise
     finally:
         try:
             conn.close()

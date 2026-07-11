@@ -28,7 +28,7 @@ KNOWN_SECTIONS = frozenset({
     "capability", "sandbox", "worker", "scheduler",
     "connector", "proactive", "security",
     "observability", "retention", "backup", "plugins",
-    "embedding", "multimodal",
+    "embedding", "multimodal", "knowledge",
 })
 
 # ── Channel 子节已知字段（[channel.*] 定型节） ──
@@ -925,6 +925,111 @@ class MultimodalConfig:
 
 
 # =============================================================================
+# Memory / Knowledge (PLAN-14 production wiring)
+# =============================================================================
+
+
+@dataclass
+class MemoryExtractionConfig:
+    enabled: bool = True
+    min_new_messages: int = 4
+    max_window_messages: int = 50
+    on_session_close: bool = True
+    on_explicit_remember: bool = True
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> MemoryExtractionConfig:
+        known = {
+            "enabled", "min_new_messages", "max_window_messages",
+            "on_session_close", "on_explicit_remember",
+        }
+        _check_unknown(raw, frozenset(known), "memory.extraction")
+        cfg = cls(**raw)
+        if cfg.min_new_messages < 1 or cfg.max_window_messages < cfg.min_new_messages:
+            raise ConfigError("memory.extraction", "min_new_messages", "invalid extraction window")
+        return cfg
+
+
+@dataclass
+class MemoryWeightConfig:
+    policy_version: str = "2"
+    recompute_interval_seconds: int = 43200
+    candidate_ttl_days: int = 30
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> MemoryWeightConfig:
+        _check_unknown(
+            raw,
+            frozenset({"policy_version", "recompute_interval_seconds", "candidate_ttl_days"}),
+            "memory.weight",
+        )
+        return cls(**raw)
+
+
+@dataclass
+class MemoryConfig:
+    extraction: MemoryExtractionConfig = field(default_factory=MemoryExtractionConfig)
+    weight: MemoryWeightConfig = field(default_factory=MemoryWeightConfig)
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> MemoryConfig:
+        _check_unknown(raw, frozenset({"extraction", "weight"}), "memory")
+        return cls(
+            extraction=MemoryExtractionConfig._from_raw(dict(raw.get("extraction", {}))),
+            weight=MemoryWeightConfig._from_raw(dict(raw.get("weight", {}))),
+        )
+
+
+@dataclass
+class KnowledgeRetrievalConfig:
+    keyword_enabled: bool = True
+    embedding_enabled: bool = True
+    top_k: int = 8
+    token_budget_ratio: float = 0.20
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> KnowledgeRetrievalConfig:
+        _check_unknown(
+            raw,
+            frozenset({"keyword_enabled", "embedding_enabled", "top_k", "token_budget_ratio"}),
+            "knowledge.retrieval",
+        )
+        cfg = cls(**raw)
+        if cfg.top_k < 1 or not 0.0 <= cfg.token_budget_ratio <= 1.0:
+            raise ConfigError("knowledge.retrieval", "top_k", "invalid retrieval limits")
+        return cfg
+
+
+@dataclass
+class KnowledgeConfig:
+    enabled: bool = False
+    allowed_source_kinds: list[str] = field(
+        default_factory=lambda: ["connector", "explicit_local_file"]
+    )
+    max_resource_bytes: int = 10 * 1024 * 1024
+    parser_version: str = "1"
+    segmenter_version: str = "1"
+    retrieval: KnowledgeRetrievalConfig = field(default_factory=KnowledgeRetrievalConfig)
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> KnowledgeConfig:
+        _check_unknown(
+            raw,
+            frozenset({
+                "enabled", "allowed_source_kinds", "max_resource_bytes",
+                "parser_version", "segmenter_version", "retrieval",
+            }),
+            "knowledge",
+        )
+        data = dict(raw)
+        retrieval = KnowledgeRetrievalConfig._from_raw(dict(data.pop("retrieval", {})))
+        cfg = cls(retrieval=retrieval, **data)
+        if cfg.max_resource_bytes < 1:
+            raise ConfigError("knowledge", "max_resource_bytes", "must be greater than zero")
+        return cfg
+
+
+# =============================================================================
 # 顶层配置
 # =============================================================================
 
@@ -944,6 +1049,8 @@ class Config:
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     channel: ChannelConfig = field(default_factory=ChannelConfig)
     multimodal: MultimodalConfig = field(default_factory=MultimodalConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
+    knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
 
     # ── Plan 06 M2: 配置版本元数据（load() 时计算）──
     content_hash: str = ""
@@ -1106,6 +1213,10 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
             MultimodalConfig._from_raw(multimodal_raw)
             if multimodal_raw else MultimodalConfig()
         )
+        memory_raw = resolved.get("memory", {})
+        memory = MemoryConfig._from_raw(memory_raw) if memory_raw else MemoryConfig()
+        knowledge_raw = resolved.get("knowledge", {})
+        knowledge = KnowledgeConfig._from_raw(knowledge_raw) if knowledge_raw else KnowledgeConfig()
 
         # Plan 06 M2: 跨字段校验（在构建前执行，失败则 ConfigError）
         from cogito.infrastructure.config_version import validate_cross_fields
@@ -1134,6 +1245,8 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
             embedding=embedding,
             channel=channel,
             multimodal=multimodal,
+            memory=memory,
+            knowledge=knowledge,
             content_hash=version_meta.get("content_hash", ""),
             schema_version=version_meta.get("schema_version", "1"),
             config_version=version_meta.get("config_version", "1"),

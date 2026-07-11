@@ -10,6 +10,7 @@ ACCESS-DELIVERY §2.3。所有命令：
 from __future__ import annotations
 
 import logging
+import sqlite3
 import uuid
 from typing import Any
 
@@ -238,6 +239,25 @@ def confirm_memory(payload: MemoryConfirmPayload, deps: CommandDeps = Depends(ge
     ok = svc.confirm(payload.memory_id, confirmed_by=item.principal_id or ACTOR)
     if not ok:
         return _fail("confirm-memory", payload.memory_id, "not candidate")
+    from cogito.service.memory_signals import SignalWriter
+    SignalWriter(deps.conn).record_user_affirmed(
+        payload.memory_id,
+        actor_principal_id=item.principal_id or ACTOR,
+        idempotency_key=f"confirm-memory:{payload.memory_id}:{item.version}",
+        algorithm_version="2",
+    )
+    from cogito.service.task_service import SqliteTaskService
+    try:
+        SqliteTaskService(deps.conn).create(
+            "memory.recompute_weight",
+            "{}",
+            idempotency_key=f"memory.recompute_weight:confirm:{payload.memory_id}:{item.version}",
+            origin="confirm-memory",
+            priority=20,
+            retry_policy={"max_attempts": 3, "backoff_seconds": [5, 30, 120]},
+        )
+    except sqlite3.IntegrityError:
+        pass
     deps.conn.commit()
     write_audit(
         deps.conn, actor_id=ACTOR, action="confirm-memory",

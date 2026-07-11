@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from dataclasses import dataclass, field
 
 
@@ -18,6 +19,7 @@ class SnapshotItem:
     tokens: int | None = None
     trust_label: str | None = None
     retrieval_path: str | None = None
+    provenance: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -36,6 +38,8 @@ class ContextSnapshotRecord:
     created_at: int = 0
     schema_version: str = "1"
     items: list[SnapshotItem] = field(default_factory=list)
+    per_source_tokens: dict[str, int] = field(default_factory=dict)
+    exclusion_stats: dict[str, int] = field(default_factory=dict)
 
 
 class ContextSnapshotRepository:
@@ -48,20 +52,22 @@ class ContextSnapshotRepository:
             "attempt_id, attempt_type, parent_snapshot_id, "
             "message_upper_bound, query_plan_version, "
             "selection_policy_version, token_budget, tokens_used, "
-            "excluded_summary, created_at, schema_version) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "excluded_summary, created_at, schema_version, per_source_tokens_json, "
+            "exclusion_stats_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (record.snapshot_id, record.session_id, record.attempt_id, record.attempt_type,
              record.parent_snapshot_id, record.message_upper_bound, record.query_plan_version,
              record.selection_policy_version, record.token_budget, record.tokens_used,
-             int(record.excluded_summary), record.created_at, record.schema_version),
+             int(record.excluded_summary), record.created_at, record.schema_version,
+             json.dumps(record.per_source_tokens), json.dumps(record.exclusion_stats)),
         )
         for item in record.items:
             self._conn.execute(
                 "INSERT INTO context_snapshot_items (snapshot_id, item_index, source, score, "
-                "tokens, trust_label, retrieval_path, content_ref) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "tokens, trust_label, retrieval_path, content_ref, provenance_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (record.snapshot_id, item.item_index, item.source, item.score,
-                 item.tokens, item.trust_label, item.retrieval_path, item.content_ref),
+                 item.tokens, item.trust_label, item.retrieval_path, item.content_ref,
+                 json.dumps(item.provenance)),
             )
 
     def get(self, snapshot_id: str) -> ContextSnapshotRecord | None:
@@ -108,6 +114,7 @@ class ContextSnapshotRepository:
                 tokens=r["tokens"],
                 trust_label=r["trust_label"],
                 retrieval_path=r["retrieval_path"],
+                provenance=json.loads(r["provenance_json"] or "{}"),
             )
             for r in rows
         ]
@@ -129,4 +136,6 @@ class ContextSnapshotRepository:
             created_at=row["created_at"],
             schema_version=row["schema_version"],
             items=items,
+            per_source_tokens=json.loads(row["per_source_tokens_json"] or "{}"),
+            exclusion_stats=json.loads(row["exclusion_stats_json"] or "{}"),
         )

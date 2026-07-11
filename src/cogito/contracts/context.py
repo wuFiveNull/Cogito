@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from cogito.contracts.clock import Clock, ProductionClock, epoch_ms
 from cogito.contracts.memory import MemoryReader
@@ -88,6 +88,13 @@ class ContextSnapshot:
         object.__setattr__(self, "exclusion_stats", tuple(self.exclusion_stats))
 
 
+class KnowledgeReader(Protocol):
+    def retrieve(
+        self, *, principal_id: str, query: str, limit: int = 8,
+        query_vector: list[float] | None = None,
+    ) -> list[dict]: ...
+
+
 class ContextBuilder:
     """构建不可变 ContextSnapshot。
 
@@ -128,6 +135,9 @@ class ContextBuilder:
         query_plan_version: str = "1",
         memory_reader: MemoryReader | None = None,
         multimodal_reader: MultimodalContextReader | None = None,
+        knowledge_reader: KnowledgeReader | None = None,
+        knowledge_top_k: int = 8,
+        knowledge_budget_ratio: float = 0.20,
     ) -> None:
         self._conn = conn
         self._clock = clock or ProductionClock()
@@ -136,6 +146,9 @@ class ContextBuilder:
         self._query_plan_version = query_plan_version
         self._memory_reader = memory_reader
         self._multimodal_reader = multimodal_reader
+        self._knowledge_reader = knowledge_reader
+        self._knowledge_top_k = knowledge_top_k
+        self._knowledge_budget_ratio = knowledge_budget_ratio
 
     def build(
         self,
@@ -181,6 +194,13 @@ class ContextBuilder:
         # 2. 注入长期记忆（阶段 3）
         memory_items, memory_ids = self._inject_memories(principal_id, session_id)
         items.extend(memory_items)
+
+        # 2b. Authorized content memory.  It is an independent source and can be
+        # disabled without changing the existing fact-memory path.
+        if input_msg and self._knowledge_reader is not None:
+            items.extend(self._inject_knowledge(
+                principal_id, input_msg.get("content", ""),
+            ))
 
         # 3. 上下文压缩（阶段 6）
         history_itemized = [self._message_to_item(m) for m in history]
@@ -239,6 +259,14 @@ class ContextBuilder:
             items = clipped_items
             total_tokens = sum(i.tokens for i in items)
 
+        per_source: dict[str, int] = {}
+        for item in items:
+            per_source[item.item_type] = per_source.get(item.item_type, 0) + item.tokens
+        exclusion_counts: dict[str, int] = {}
+        for value in excluded:
+            kind = value.split(":", 1)[0] if ":" in value else "token_budget"
+            exclusion_counts[kind] = exclusion_counts.get(kind, 0) + 1
+
         snapshot = ContextSnapshot(
             snapshot_id=uuid.uuid4().hex,
             turn_id=turn_id,
@@ -257,9 +285,52 @@ class ContextBuilder:
             ),
             total_tokens=total_tokens,
             created_at=epoch_ms(self._clock.now()),
+            per_source_tokens=tuple(sorted(per_source.items())),
+            exclusion_stats=tuple(sorted(exclusion_counts.items())),
         )
 
         return snapshot
+
+    def _inject_knowledge(self, principal_id: str, query: str) -> list[ContextItem]:
+        if not principal_id or not query.strip() or self._knowledge_reader is None:
+            return []
+        try:
+            results = self._knowledge_reader.retrieve(
+                principal_id=principal_id, query=query, limit=self._knowledge_top_k,
+            )
+        except Exception:
+            return []
+        budget = max(0, int(self._max_input_tokens * self._knowledge_budget_ratio))
+        used = 0
+        output: list[ContextItem] = []
+        for value in results:
+            content = str(value.get("text_ref_or_inline", ""))
+            tokens = int(value.get("token_count") or estimate_tokens(content))
+            if not content or used + tokens > budget:
+                continue
+            resource_id = str(value.get("resource_id", ""))
+            output.append(ContextItem(
+                item_type="knowledge",
+                item_id=str(value.get("segment_id", "")),
+                source=resource_id,
+                tokens=tokens,
+                trust_label=str(value.get("trust_label", "unverified")),
+                content=(
+                    "<knowledge_segment>\n"
+                    f"{content}\n"
+                    "</knowledge_segment>"
+                ),
+                role="system",
+                score=float(value.get("score", 0.0)),
+                retrieval_path=str(value.get("retrieval_path", "keyword")),
+                provenance=(
+                    ("resource_id", resource_id),
+                    ("source_version", str(value.get("source_version", ""))),
+                    ("heading_path", str(value.get("heading_path", ""))),
+                ),
+            ))
+            used += tokens
+        return output
 
     # ── 内部方法（与原始 runtime/context.py 完全一致）──
 

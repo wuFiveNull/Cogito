@@ -12,6 +12,7 @@ from collections.abc import Callable
 
 from cogito.capability.registry import CapabilityRegistry
 from cogito.contracts.memory import MemoryReader, MemoryWriter
+from cogito.contracts.context import KnowledgeReader
 from cogito.contracts.multimodal import StickerService, VisionToolService
 
 # 全局默认注册表
@@ -27,6 +28,7 @@ def discover_builtin_tools(
     make_memory_reader: Callable[[], MemoryReader] | None = None,
     make_vision_service: Callable[[], VisionToolService] | None = None,
     make_sticker_service: Callable[[], StickerService] | None = None,
+    knowledge_reader: KnowledgeReader | None = None,
 ) -> CapabilityRegistry:
     """发现并注册所有内置工具。
 
@@ -66,6 +68,11 @@ def discover_builtin_tools(
     # 读工具使用共享 reader 或工厂
     r.register(_create_recall(reader=memory_reader))
 
+    if knowledge_reader is not None:
+        from cogito.tools.search_knowledge import create_tool_def as _create_knowledge_search
+
+        r.register(_create_knowledge_search(reader=knowledge_reader))
+
     if make_vision_service is not None:
         from cogito.tools.analyze_multimodal_asset import create_tool_def as _create_vision
 
@@ -97,6 +104,7 @@ def assemble_default_registry(
     make_memory_reader: Callable[[], MemoryReader] | None = None,
     make_vision_service: Callable[[], VisionToolService] | None = None,
     make_sticker_service: Callable[[], StickerService] | None = None,
+    knowledge_reader: KnowledgeReader | None = None,
 ) -> CapabilityRegistry:
     """创建 CapabilityRegistry 并注册所有内置工具。
 
@@ -113,5 +121,6 @@ def assemble_default_registry(
         make_memory_reader=make_memory_reader,
         make_vision_service=make_vision_service,
         make_sticker_service=make_sticker_service,
+        knowledge_reader=knowledge_reader,
     )
     return registry

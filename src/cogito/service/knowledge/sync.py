@@ -8,10 +8,6 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import UTC, datetime
-
-from cogito.domain.knowledge import ResourceStatus
-from cogito.service.knowledge.embedding import invalidate_resource_segments
 from cogito.service.knowledge.service import KnowledgeService
 
 _LOGGER = logging.getLogger("cogito.knowledge.sync")
@@ -35,29 +31,16 @@ def sync_resource(
 
     返回 resource_id。
     """
-    svc = KnowledgeService(conn)
-    existing = _find_by_stable_id(conn, stable_source_id, principal_id)
-
-    if existing and existing.get("content_hash") == content_hash:
-        # unchanged
-        return existing["resource_id"]
-
-    if existing:
-        # modified: 标 stale + 新建
-        _mark_stale(conn, existing["resource_id"])
-        invalidate_resource_segments(conn, existing["resource_id"])
-
-    r = svc.register_resource(
-        source_uri_hash=stable_source_id,
+    resource_id = KnowledgeService(conn).sync_source(
+        stable_source_id=stable_source_id,
         source_kind=source_kind,
         content_hash=content_hash,
+        raw_text=raw_text,
         principal_id=principal_id,
         trust_label=trust_label,
-        source_version=content_hash[:8],
     )
-    svc.ingest(r.resource_id, raw_text)
-    _LOGGER.info("Synced resource %s (modified=%s)", r.resource_id, bool(existing))
-    return r.resource_id
+    _LOGGER.info("Synced resource %s", resource_id)
+    return resource_id
 
 
 def delete_resource(
@@ -72,18 +55,9 @@ def delete_resource(
     - Segment 从默认检索撤销（FTS清理）
     - 幂等：重复删除返回 True
     """
-    existing = _find_by_stable_id(conn, stable_source_id, principal_id)
-    if existing is None:
-        return True  # 已不存在，幂等成功
-    rid = existing["resource_id"]
-    invalidate_resource_segments(conn, rid)
-    conn.execute(
-        "UPDATE knowledge_resources SET status=?, deleted_at=? WHERE resource_id=?",
-        (ResourceStatus.deleted.value, datetime.now(UTC).isoformat(), rid),
+    return KnowledgeService(conn).delete_source(
+        stable_source_id=stable_source_id, principal_id=principal_id,
     )
-    conn.commit()
-    _LOGGER.info("Deleted resource %s", rid)
-    return True
 
 
 def _find_by_stable_id(
@@ -101,11 +75,3 @@ def _find_by_stable_id(
     return {"resource_id": row[0], "content_hash": row[1]}
 
 
-def _mark_stale(conn: sqlite3.Connection, resource_id: str) -> None:
-    from cogito.store import knowledge_repo
-    knowledge_repo.update_resource_status(conn, resource_id, ResourceStatus.stale.value)
-    conn.execute(
-        "UPDATE knowledge_documents SET status='stale' WHERE resource_id=?",
-        (resource_id,),
-    )
-    conn.commit()

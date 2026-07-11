@@ -99,6 +99,8 @@ class RuntimeApplication:
         self.llm_manager = llm_manager
         self.vision_service: Any = None
         self.vision_service_factory: Any = None
+        self.knowledge_service: Any = None
+        self.knowledge_service_factory: Any = None
         self._terminal_seq = 0
         self._instance_id = uuid.uuid4().hex
         self._closed = False
@@ -201,6 +203,37 @@ class RuntimeApplication:
         # ── PLAN-09 M4a/C2 破环：注册表在组合根预装配（service→tools 切断）──
         memory_service = SqliteMemoryService(conn=conn)
 
+        knowledge_service = None
+        knowledge_factory = None
+        if config.knowledge.enabled:
+            from cogito.service.embedding import (
+                NoopEmbeddingProvider,
+                OpenAICompatEmbeddingProvider,
+            )
+            from cogito.service.knowledge.service import (
+                EmbeddingProviderAdapter,
+                KnowledgeService,
+            )
+
+            if config.embedding.is_configured():
+                shared_embedding_provider = OpenAICompatEmbeddingProvider(
+                    model=config.embedding.model,
+                    api_key=config.resolve_secret(config.embedding.api_key),
+                    base_url=config.embedding.base_url,
+                    dimensions=config.embedding.dimensions,
+                    timeout=float(config.embedding.timeout),
+                    max_batch_size=config.embedding.max_batch_size,
+                )
+            else:
+                shared_embedding_provider = NoopEmbeddingProvider()
+            knowledge_embedder = EmbeddingProviderAdapter(shared_embedding_provider)
+            knowledge_service = KnowledgeService(conn, embedder=knowledge_embedder)
+
+            def _make_knowledge_service(knowledge_conn):
+                return KnowledgeService(knowledge_conn, embedder=knowledge_embedder)
+
+            knowledge_factory = _make_knowledge_service
+
         def _make_memory_writer() -> MemoryWriter:
             return make_unit_of_work_memory_writer(config.resolve_db_path())
 
@@ -288,6 +321,7 @@ class RuntimeApplication:
 
         pre_assembled_registry = assemble_default_registry(
             memory_reader=memory_service,
+            knowledge_reader=knowledge_service,
             memory_writer=memory_service,
             make_memory_writer=_make_memory_writer,
             make_memory_reader=_make_memory_reader,
@@ -305,6 +339,7 @@ class RuntimeApplication:
             streaming_enabled=config.agent.streaming_enabled,
             vision_service=shared_vision_service,
             multimodal_reader=multimodal_reader,
+            knowledge_reader=knowledge_service,
         )
 
         # 唤醒事件：入站新建 Turn 时置位，worker idle 睡眠改为等待该事件，
@@ -328,6 +363,8 @@ class RuntimeApplication:
         )
         app.vision_service = shared_vision_service
         app.vision_service_factory = vision_factory
+        app.knowledge_service = knowledge_service
+        app.knowledge_service_factory = knowledge_factory
         app.multimodal_metrics = multimodal_metrics
         app._wakeup_event = wakeup_event
         app._recovery_counts = recovery_counts
@@ -650,6 +687,10 @@ class RuntimeApplication:
             connection_factory=lambda p=self.config.resolve_db_path(): get_connection(p),
             model_router=self.llm_manager.router if self.llm_manager else None,
             vision_service_factory=self.vision_service_factory,
+            memory_service_factory=lambda c: __import__(
+                "cogito.service.memory_service", fromlist=["SqliteMemoryService"]
+            ).SqliteMemoryService(c),
+            knowledge_service_factory=self.knowledge_service_factory,
             workspace_path=self.config.workspace_path,
             mcp_manager=self.mcp_manager,
             delivery_service=self.delivery_service,

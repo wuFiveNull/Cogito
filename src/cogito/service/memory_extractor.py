@@ -145,6 +145,7 @@ class MemoryExtractor:
         model_role: str = "memory_extractor",
         trigger_policy: ExtractionTriggerPolicy | None = None,
         watermark_repo=None,
+        strict: bool = False,
     ) -> None:
         self._conn = conn
         self._service = service
@@ -152,6 +153,7 @@ class MemoryExtractor:
         self._model_role = model_role
         self._trigger_policy = trigger_policy or ExtractionTriggerPolicy()
         self._watermark_repo = watermark_repo
+        self._strict = strict
 
     async def extract_from_messages(
         self,
@@ -312,10 +314,14 @@ class MemoryExtractor:
             response = await self._router.generate(request, model_role=self._model_role)
         except Exception as e:
             _LOGGER.warning("Memory extraction model call failed: %s", e)
+            if self._strict:
+                raise
             return []
 
         if response.finish_reason in (FinishReason.error, FinishReason.content_filter):
             _LOGGER.warning("Memory extraction failed: finish_reason=%s", response.finish_reason)
+            if self._strict:
+                raise RuntimeError(f"memory extraction failed: {response.finish_reason}")
             return []
 
         # 解析 JSON 输出

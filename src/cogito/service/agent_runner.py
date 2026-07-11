@@ -36,7 +36,6 @@ from cogito.model.router import ModelRouter
 from cogito.runtime.loop import AgentLoop, LoopResultType
 from cogito.service.completion import TurnCompletionService
 from cogito.service.dispatcher import Dispatcher
-from cogito.service.memory_extractor import MemoryExtractor
 from cogito.service.memory_service import SqliteMemoryService
 from cogito.service.streaming_delivery import (
     StreamingDeliveryController,
@@ -100,6 +99,9 @@ class AgentRunner:
         stream_policy: StreamPolicy | None = None,
         vision_service: Any | None = None,
         multimodal_reader: Any | None = None,
+        knowledge_reader: Any | None = None,
+        knowledge_top_k: int = 8,
+        knowledge_budget_ratio: float = 0.20,
     ) -> None:
         self._conn = conn
         self._router = router
@@ -117,6 +119,9 @@ class AgentRunner:
             conn, clock=self._clock, max_input_tokens=max_input_tokens,
             memory_reader=memory_service,
             multimodal_reader=multimodal_reader,
+            knowledge_reader=knowledge_reader,
+            knowledge_top_k=knowledge_top_k,
+            knowledge_budget_ratio=knowledge_budget_ratio,
         )
         self._vision_service = vision_service
         # 记录每次 Provider 调用到 model_calls（可观察性 / 链路追踪）
@@ -129,10 +134,6 @@ class AgentRunner:
             toolsets=toolsets,
         )
         self._completion = TurnCompletionService(conn, clock=self._clock)
-        self._memory_extractor = MemoryExtractor(
-            conn, memory_service, router,
-        ) if memory_service and router else None
-
         # ── Plan 05 M4：流式投递依赖（由组合根注入）──
         self.channel_gateway = channel_gateway
         self.channel_manager = channel_manager
@@ -182,6 +183,7 @@ class AgentRunner:
             input_message_id=turn.input_message_id,
             system_policy=self._system_prompt,
         )
+        self._persist_context_snapshot(context, attempt)
         _bench_timing.checkpoint("context:built")
 
         # ── 2a. 预读输入消息元数据（流式 / 非流式都可能用来向浏览器回推） ──
@@ -254,12 +256,6 @@ class AgentRunner:
             # 否则依赖 WS 的 chat 页面永远看不到回复（占位气泡也不会出现）。
             self._push_reply_event(stream_meta, loop_result.text)
             _bench_timing.checkpoint("completion:pushed_to_ws")
-
-            # Turn 成功后异步触发记忆提取（不阻塞当前回复）
-            if self._memory_extractor and context.principal_id:
-                asyncio.ensure_future(
-                    self._run_extraction(context, turn)
-                )
 
             _bench_timing.finalize()
             return RunOutcome.completed
@@ -418,9 +414,6 @@ class AgentRunner:
             _bench_timing.checkpoint("streaming:finalized", extra={
                 "final_message_id": final_message_id,
             })
-            # 流式成功后异步触发记忆提取（与非流式路径一致）
-            if self._memory_extractor and context.principal_id:
-                asyncio.ensure_future(self._run_extraction(context, turn))
             _bench_timing.finalize()
             return RunOutcome.completed
         if self._is_cancelled(turn.turn_id):
@@ -513,6 +506,43 @@ class AgentRunner:
         except Exception:
             _LOGGER.warning("model_call insert failed", exc_info=True)
 
+    def _persist_context_snapshot(self, context, attempt) -> None:
+        """Persist the exact immutable context selected for this RunAttempt."""
+        from cogito.store.context_snapshot_repo import (
+            ContextSnapshotRecord,
+            ContextSnapshotRepository,
+            SnapshotItem,
+        )
+        record = ContextSnapshotRecord(
+            snapshot_id=context.snapshot_id,
+            session_id=context.session_id,
+            attempt_id=attempt.attempt_id,
+            message_upper_bound=context.message_upper_bound,
+            query_plan_version=context.query_plan_version,
+            selection_policy_version=context.selection_policy_version,
+            token_budget=self._context_builder._max_input_tokens,
+            tokens_used=context.total_tokens,
+            excluded_summary=bool(context.excluded_summary),
+            created_at=context.created_at,
+            per_source_tokens=dict(context.per_source_tokens),
+            exclusion_stats=dict(context.exclusion_stats),
+            items=[
+                SnapshotItem(
+                    item_index=index,
+                    source=item.source,
+                    content_ref=f"{item.item_type}:{item.item_id}",
+                    score=item.score,
+                    tokens=item.tokens,
+                    trust_label=item.trust_label,
+                    retrieval_path=item.retrieval_path,
+                    provenance=dict(item.provenance),
+                )
+                for index, item in enumerate(context.items)
+            ],
+        )
+        ContextSnapshotRepository(self._conn).insert(record)
+        self._conn.commit()
+
     # ── 非流式路径：通过网关把回复/错误推入浏览器 WS 队列 ────────────────
 
     def _build_target_json(self, meta: Any) -> str | None:
@@ -562,25 +592,6 @@ class AgentRunner:
         except Exception:
             _LOGGER.warning("reply error push failed", exc_info=True)
 
-    async def _run_extraction(self, context, turn) -> None:
-        """Turn 完成后异步运行记忆提取。失败不阻塞后续流程。"""
-        try:
-            # 加载当前 session 的消息（用于提取）
-            messages = self._context_builder._load_session_messages(
-                context.session_id,
-            )
-            if not messages:
-                return
-
-            await self._memory_extractor.extract_from_messages(
-                messages,
-                principal_id=context.principal_id,
-            )
-        except Exception:
-            # 提取失败不影响主流程
-            pass
-
-
 # =============================================================================
 # 组装入口
 # =============================================================================
@@ -601,6 +612,7 @@ def build_agent_runner(
     llm_manager: LLMManager | None = None,
     vision_service: Any | None = None,
     multimodal_reader: Any | None = None,
+    knowledge_reader: Any | None = None,
 ) -> AgentRunner:
     """构建 AgentRunner。
 
@@ -664,6 +676,9 @@ def build_agent_runner(
         stream_policy=stream_policy,
         vision_service=vision_service,
         multimodal_reader=multimodal_reader,
+        knowledge_reader=knowledge_reader,
+        knowledge_top_k=config.knowledge.retrieval.top_k,
+        knowledge_budget_ratio=config.knowledge.retrieval.token_budget_ratio,
     )
 
 

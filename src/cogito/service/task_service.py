@@ -45,6 +45,8 @@ class TaskService(Protocol):
         scheduled_at: datetime | None = None,
         idempotency_key: str = "",
         origin: str = "system",
+        priority: int = 0,
+        retry_policy: dict[str, Any] | None = None,
     ) -> Task:
         """创建并排队一个新 Task。"""
         ...
@@ -106,6 +108,8 @@ class SqliteTaskService:
         scheduled_at: datetime | None = None,
         idempotency_key: str = "",
         origin: str = "system",
+        priority: int = 0,
+        retry_policy: dict[str, Any] | None = None,
     ) -> Task:
         task = Task(
             task_type=task_type,
@@ -114,6 +118,8 @@ class SqliteTaskService:
             scheduled_at=scheduled_at,
             idempotency_key=idempotency_key,
             origin=origin,
+            priority=priority,
+            retry_policy=retry_policy or {},
         )
         return self._task_repo.insert(task)
 

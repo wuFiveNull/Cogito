@@ -41,6 +41,24 @@ class EmbeddingPort(Protocol):
     async def embed(self, texts: list[str]) -> list[list[float]]: ...
 
 
+class EmbeddingProviderAdapter:
+    """Adapt the shared EmbeddingProvider contract to the Knowledge port."""
+
+    def __init__(self, provider) -> None:
+        self._provider = provider
+
+    @property
+    def model_id(self) -> str:
+        return self._provider.model_name
+
+    @property
+    def model_version(self) -> str:
+        return self._provider.model_version
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        return await self._provider.embed_many(texts)
+
+
 class KnowledgeService:
     """内容记忆聚合唯一写入者（PLAN-13 M4）。"""
 
@@ -53,6 +71,27 @@ class KnowledgeService:
         self._conn = conn
         self._parser = parser or MarkdownParser()
         self._embedder = embedder
+
+    def _emit(self, event_type: str, aggregate_id: str, payload: dict | None = None) -> None:
+        from cogito.domain.events import DomainEvent
+        from cogito.store.repositories import OutboxRepository
+        row = self._conn.execute(
+            "SELECT COALESCE(MAX(aggregate_version), 0) FROM outbox_events "
+            "WHERE aggregate_type='knowledge_resource' AND aggregate_id=?",
+            (aggregate_id,),
+        ).fetchone()
+        version = int(row[0] if row else 0) + 1
+        data = payload or {}
+        import json
+        OutboxRepository(self._conn).insert(DomainEvent(
+            event_type=event_type,
+            aggregate_type="knowledge_resource",
+            aggregate_id=aggregate_id,
+            aggregate_version=version,
+            payload=data,
+            payload_ref=json.dumps(data, ensure_ascii=False),
+            origin="knowledge_service",
+        ))
 
     # ── Resource ──
 
@@ -86,6 +125,11 @@ class KnowledgeService:
             status=ResourceStatus.queued.value,
         )
         knowledge_repo.insert_resource(self._conn, r)
+        self._emit(
+            "KnowledgeResourceChanged" if existing else "KnowledgeResourceDiscovered",
+            r.resource_id,
+            {"resource_id": r.resource_id, "source_version": r.source_version},
+        )
         self._conn.commit()
         _LOGGER.info("Registered knowledge resource %s", r.resource_id)
         return r
@@ -124,6 +168,10 @@ class KnowledgeService:
             parser_version=self._parser.parser_version,
         )
         knowledge_repo.insert_document(self._conn, doc)
+        self._emit(
+            "KnowledgeDocumentParsed", resource_id,
+            {"resource_id": resource_id, "document_id": doc.document_id},
+        )
         # 切分 segments
         segs = []
         for i, b in enumerate(blocks):
@@ -142,6 +190,10 @@ class KnowledgeService:
             segs.append(seg)
         # 更新 resource 状态
         knowledge_repo.update_resource_status(self._conn, resource_id, ResourceStatus.active.value)
+        self._emit(
+            "KnowledgeSegmentsIndexed", resource_id,
+            {"resource_id": resource_id, "document_id": doc.document_id, "segment_count": len(segs)},
+        )
         self._conn.commit()
         _LOGGER.info(
             "Ingested resource %s → document %s, %d segments",
@@ -173,6 +225,112 @@ class KnowledgeService:
         """知识检索（FTS + LIKE 降级）。"""
         return knowledge_repo.search_knowledge_fts(self._conn, query, limit)
 
+    async def embed_pending(self, limit: int = 1000) -> int:
+        """Embed pending segments with the configured provider; noop is a safe FTS fallback."""
+        if self._embedder is None:
+            return 0
+        pending = knowledge_repo.list_unembedded_segments(
+            self._conn, model=self._embedder.model_id, limit=limit,
+        )
+        if not pending:
+            return 0
+        segment_rows = [knowledge_repo.get_segment_context(self._conn, segment_id) for segment_id in pending]
+        texts = [str(item.get("text_ref_or_inline", "")) if item else "" for item in segment_rows]
+        vectors = await self._embedder.embed(texts)
+        written = 0
+        for segment_id, vector in zip(pending, vectors, strict=False):
+            if not vector:
+                continue
+            knowledge_repo.write_embedding(
+                self._conn, segment_id, vector,
+                model=self._embedder.model_id,
+                version=self._embedder.model_version,
+            )
+            self._conn.execute(
+                "UPDATE knowledge_segments SET embedding_status='ready' WHERE segment_id=?",
+                (segment_id,),
+            )
+            written += 1
+        self._conn.commit()
+        return written
+
+    def retrieve(
+        self,
+        *,
+        principal_id: str,
+        query: str,
+        limit: int = 8,
+        query_vector: list[float] | None = None,
+    ) -> list[dict]:
+        """Return authorized FTS/vector results with safe provenance metadata."""
+        merged: dict[str, tuple[float, str]] = {}
+        for segment_id, score in knowledge_repo.search_knowledge_fts(self._conn, query, limit):
+            merged[segment_id] = (score, "keyword")
+        if query_vector:
+            model = self._embedder.model_id if self._embedder else ""
+            for segment_id, score in knowledge_repo.search_knowledge_vector(
+                self._conn, query_vector, principal_id=principal_id,
+                model=model, limit=limit,
+            ):
+                old = merged.get(segment_id)
+                merged[segment_id] = (
+                    max(score, old[0]) if old else score,
+                    "keyword+vector" if old else "vector",
+                )
+        results: list[dict] = []
+        for segment_id, (score, path) in sorted(
+            merged.items(), key=lambda item: item[1][0], reverse=True,
+        ):
+            value = knowledge_repo.get_segment_context(self._conn, segment_id)
+            if not value or value.get("principal_id") != principal_id:
+                continue
+            value["score"] = score
+            value["retrieval_path"] = path
+            results.append(value)
+            if len(results) >= limit:
+                break
+        return results
+
+    def invalidate(self, resource_id: str, reason: str = "") -> int:
+        """Invalidate a resource and all derived indexes through the owning service."""
+        from cogito.service.knowledge.embedding import invalidate_resource_segments
+        count = invalidate_resource_segments(self._conn, resource_id)
+        knowledge_repo.update_resource_status(self._conn, resource_id, ResourceStatus.stale.value)
+        self._emit(
+            "KnowledgeResourceInvalidated", resource_id,
+            {"resource_id": resource_id, "reason": reason, "segment_count": count},
+        )
+        self._conn.commit()
+        return count
+
+    def sync_source(
+        self, *, stable_source_id: str, raw_text: str,
+        source_kind: str = "connector", content_hash: str = "",
+        principal_id: str = "", trust_label: str = "unverified",
+    ) -> str:
+        existing = self._find_resource_by_uri(principal_id, stable_source_id)
+        if existing and existing.content_hash == content_hash:
+            return existing.resource_id
+        if existing:
+            self.invalidate(existing.resource_id, "source_modified")
+        resource = self.register_resource(
+            source_uri_hash=stable_source_id,
+            source_kind=source_kind,
+            content_hash=content_hash,
+            principal_id=principal_id,
+            trust_label=trust_label,
+            source_version=content_hash[:8],
+        )
+        self.ingest(resource.resource_id, raw_text)
+        return resource.resource_id
+
+    def delete_source(self, *, stable_source_id: str, principal_id: str = "") -> bool:
+        existing = self._find_resource_by_uri(principal_id, stable_source_id)
+        if existing is None:
+            return True
+        self.erase(existing.resource_id, "source_deleted")
+        return True
+
     def erase(self, resource_id: str, reason: str = "") -> int:
         """擦除资源的所有数据（PLAN-13 M4）。"""
         docs = knowledge_repo.list_documents_for_resource(self._conn, resource_id)
@@ -186,6 +344,46 @@ class KnowledgeService:
                 )
                 count += 1
         knowledge_repo.update_resource_status(self._conn, resource_id, ResourceStatus.deleted.value)
+        now = datetime.now(UTC).isoformat()
+        affected = self._conn.execute(
+            "SELECT DISTINCT memory_id FROM memory_sources "
+            "WHERE source_type='knowledge_resource' AND source_id=? AND deleted_at IS NULL",
+            (resource_id,),
+        ).fetchall()
+        self._conn.execute(
+            "UPDATE memory_sources SET deleted_at=? "
+            "WHERE source_type='knowledge_resource' AND source_id=? AND deleted_at IS NULL",
+            (now, resource_id),
+        )
+        for row in affected:
+            memory_id = row["memory_id"]
+            remaining = self._conn.execute(
+                "SELECT 1 FROM memory_sources WHERE memory_id=? AND deleted_at IS NULL LIMIT 1",
+                (memory_id,),
+            ).fetchone()
+            if remaining is None:
+                self._conn.execute(
+                    "UPDATE memory_items SET status='expired', valid_to=?, updated_at=?, version=version+1 "
+                    "WHERE memory_id=? AND status='confirmed' AND deleted_at IS NULL",
+                    (now, now, memory_id),
+                )
+            from cogito.domain.events import DomainEvent
+            from cogito.store.repositories import OutboxRepository
+            import json
+            data = {"memory_id": memory_id, "resource_id": resource_id, "reason": reason}
+            OutboxRepository(self._conn).insert(DomainEvent(
+                event_type="MemorySourceInvalidated",
+                aggregate_type="memory",
+                aggregate_id=memory_id,
+                aggregate_version=1,
+                payload=data,
+                payload_ref=json.dumps(data, ensure_ascii=False),
+                origin="knowledge_service",
+            ))
+        self._emit(
+            "KnowledgeResourceDeleted", resource_id,
+            {"resource_id": resource_id, "reason": reason, "segment_count": count},
+        )
         self._conn.commit()
         return count
 

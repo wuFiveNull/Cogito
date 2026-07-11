@@ -214,16 +214,22 @@ class TurnCompletionService:
 
             # 3. 写入 TurnCompleted Event Outbox
             now = self._clock.now()
+            turn_completed_payload = {
+                "turn_id": turn.turn_id,
+                "message_id": message.message_id,
+                "delivery_id": delivery_id,
+                "conversation_id": message.conversation_id,
+                "session_id": message.session_id,
+                "principal_id": principal_id,
+                "input_message_id": turn.input_message_id,
+            }
             uow.outbox.insert(DomainEvent(
                 event_type="TurnCompleted",
                 aggregate_type="turn",
                 aggregate_id=turn.turn_id,
                 aggregate_version=turn.version + 1,
-                payload={
-                    "turn_id": turn.turn_id,
-                    "message_id": message.message_id,
-                    "delivery_id": delivery_id,
-                },
+                payload_ref=json.dumps(turn_completed_payload, ensure_ascii=False),
+                payload=turn_completed_payload,
                 occurred_at=now,
                 correlation_id=turn.turn_id,
                 causation_id=turn.turn_id,

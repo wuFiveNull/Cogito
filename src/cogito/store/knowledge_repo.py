@@ -269,7 +269,13 @@ def search_knowledge_fts(
         if cnt == 0:
             rebuild_knowledge_fts(conn)
         rows = conn.execute(
-            "SELECT segment_id FROM knowledge_fts WHERE knowledge_fts MATCH ? LIMIT ?",
+            "SELECT f.segment_id FROM knowledge_fts AS f "
+            "JOIN knowledge_segments AS s ON s.segment_id=f.segment_id "
+            "JOIN knowledge_documents AS d ON d.document_id=s.document_id "
+            "JOIN knowledge_resources AS r ON r.resource_id=d.resource_id "
+            "WHERE knowledge_fts MATCH ? "
+            "AND s.deleted_at IS NULL AND d.status='active' "
+            "AND r.status='active' AND r.deleted_at IS NULL LIMIT ?",
             (fts_expr, limit),
         ).fetchall()
         if rows:
@@ -287,3 +293,61 @@ def search_knowledge_fts(
         return [(r["segment_id"], 0.5) for r in rows]
     except sqlite3.OperationalError:
         return []
+
+
+def search_knowledge_vector(
+    conn: sqlite3.Connection,
+    query_vector: list[float],
+    *,
+    principal_id: str = "",
+    model: str = "",
+    limit: int = 8,
+) -> list[tuple[str, float]]:
+    """Brute-force cosine recall over active, authorized knowledge segments."""
+    if not query_vector:
+        return []
+    import json
+    from cogito.service.embedding import cosine_similarity
+
+    conditions = ["ks.deleted_at IS NULL", "kr.deleted_at IS NULL", "kr.status='active'"]
+    params: list[Any] = []
+    if principal_id:
+        conditions.append("kr.principal_id=?")
+        params.append(principal_id)
+    if model:
+        conditions.append("ke.embedding_model=?")
+        params.append(model)
+    rows = conn.execute(
+        "SELECT ks.segment_id, ke.vector FROM knowledge_segments ks "
+        "JOIN knowledge_documents kd ON kd.document_id=ks.document_id "
+        "JOIN knowledge_resources kr ON kr.resource_id=kd.resource_id "
+        "JOIN knowledge_embeddings ke ON ke.segment_id=ks.segment_id "
+        "WHERE " + " AND ".join(conditions),
+        params,
+    ).fetchall()
+    scored: list[tuple[str, float]] = []
+    for row in rows:
+        raw = row["vector"]
+        try:
+            vector = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            continue
+        score = cosine_similarity(query_vector, vector)
+        if score > 0:
+            scored.append((row["segment_id"], score))
+    scored.sort(key=lambda item: item[1], reverse=True)
+    return scored[:limit]
+
+
+def get_segment_context(conn: sqlite3.Connection, segment_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT ks.*, kd.title, kd.resource_id, kr.principal_id, kr.scope_type, "
+        "kr.scope_id, kr.trust_label, kr.source_version, kr.source_kind "
+        "FROM knowledge_segments ks "
+        "JOIN knowledge_documents kd ON kd.document_id=ks.document_id "
+        "JOIN knowledge_resources kr ON kr.resource_id=kd.resource_id "
+        "WHERE ks.segment_id=? AND ks.deleted_at IS NULL AND kd.status='active' "
+        "AND kr.status='active' AND kr.deleted_at IS NULL",
+        (segment_id,),
+    ).fetchone()
+    return dict(row) if row else None
