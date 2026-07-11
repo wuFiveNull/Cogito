@@ -39,6 +39,7 @@ class Task:
         task_id: str | None = None,
         task_type: str = "",
         payload_ref: str | None = None,
+        result_ref: str | None = None,
         status: TaskStatus = TaskStatus.created,
         priority: int = 40,
         scheduled_at: datetime | None = None,
@@ -53,6 +54,7 @@ class Task:
         self.task_id = task_id or uuid.uuid4().hex
         self.task_type = task_type
         self.payload_ref = payload_ref
+        self.result_ref = result_ref
         self.status = TaskStatus(status)
         self.priority = priority
         self.scheduled_at = scheduled_at
@@ -69,6 +71,7 @@ class Task:
             "task_id": self.task_id,
             "task_type": self.task_type,
             "payload_ref": self.payload_ref,
+            "result_ref": self.result_ref,
             "status": self.status.value,
             "priority": self.priority,
             "scheduled_at": self.scheduled_at.isoformat() if self.scheduled_at else None,
@@ -87,6 +90,7 @@ class Task:
             task_id=data["task_id"],
             task_type=data.get("task_type", ""),
             payload_ref=data.get("payload_ref"),
+            result_ref=data.get("result_ref"),
             status=TaskStatus(data.get("status", "created")),
             priority=data.get("priority", 40),
             scheduled_at=datetime.fromisoformat(data["scheduled_at"]) if data.get("scheduled_at") else None,

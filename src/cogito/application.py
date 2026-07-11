@@ -244,6 +244,11 @@ class RuntimeApplication:
             from cogito.service.task_service import SqliteTaskService
             return SqliteTaskService(get_connection(config.resolve_db_path()))
 
+        # PLAN-16 M3 MEM-02: recall_memory 工具召回命中后写 exposed 信号
+        def _make_memory_service():
+            from cogito.service.memory_service import SqliteMemoryService
+            return SqliteMemoryService(get_connection(config.resolve_db_path()))
+
         def _make_memory_reader() -> MemoryReader:
             from cogito.store.connection import get_connection as _gc
             reader_conn = _gc(config.resolve_db_path())
@@ -335,6 +340,7 @@ class RuntimeApplication:
             make_vision_service=vision_factory,
             make_sticker_service=sticker_factory,
             make_task_service=_make_task_service,
+            make_memory_service=_make_memory_service,
         )
 
         runner = build_agent_runner(
@@ -722,6 +728,7 @@ class RuntimeApplication:
             presence_reader=presence_reader,
             drift_config=self.config.drift,
             config_version_id=self.config.config_version,
+            memory_config=self.config.memory.weight,
         )
 
         # 启动启用的 Channel Adapter（如 QQ）

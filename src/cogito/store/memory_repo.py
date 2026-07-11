@@ -945,6 +945,50 @@ class MemoryRepository:
         )
         return cursor.rowcount > 0
 
+    # ── 擦除 tombstone（PLAN-16 M3 MEM-05）──
+
+    def tombstone(
+        self,
+        memory_id: str,
+        *,
+        receipt_id: str,
+        reason: str = "user_request",
+        expected_version: int | None = None,
+        principal_id: str | None = None,
+    ) -> bool:
+        """擦除一条记忆为最小 tombstone。
+
+        清空 value / subject / predicate / 敏感来源引用 / FTS / embedding，
+        置 status='expired' + deleted_at，保留 memory_id / principal_id / scope /
+        时间戳 / receipt_id / erasure_reason 供对账审计。
+
+        返回 True 表示记忆存在且已被擦除；不存在返回 False。
+        重复擦除（已 deleted_at）视为幂等成功，不重复写入 Receipt 引用。
+        """
+        row = self.get(memory_id)
+        if row is None or row.deleted_at is not None:
+            return row is not None  # 已擦除 → 幂等成功；不存在 → False
+        if expected_version is not None and row.version != expected_version:
+            from cogito.domain.errors import ConcurrencyConflictError
+            raise ConcurrencyConflictError("memory", memory_id, expected_version, row.version)
+        if principal_id is not None and row.principal_id != principal_id:
+            from cogito.domain.errors import EntityNotFoundError
+            raise EntityNotFoundError("memory", memory_id)
+
+        now = datetime.now(UTC).isoformat()
+        self._sync_fts_delete(memory_id)
+        self._sync_embedding_delete(memory_id)
+        self._conn.execute(
+            "UPDATE memory_items SET "
+            "  subject='', predicate='', value='', "
+            "  source_type='', source_id='', "
+            "  status='expired', deleted_at=?, updated_at=?, version=version+1, "
+            "  erasure_reason=?, receipt_id=? "
+            "WHERE memory_id=? AND deleted_at IS NULL",
+            (now, now, reason, receipt_id, memory_id),
+        )
+        return True
+
     # ── 计数 ──
 
     def count_active(self, principal_id: str = "") -> int:

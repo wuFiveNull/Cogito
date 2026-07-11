@@ -31,6 +31,16 @@ from cogito.contracts.clock import epoch_ms
 
 _LOGGER = logging.getLogger(__name__)
 
+# PLAN-16 M3 MEM-07: 维护周期默认值（与 config.MemoryWeightConfig 一致）
+
+
+class _DefaultMemoryWeightConfig:
+    recompute_interval_seconds: int = 600
+    consolidate_interval_seconds: int = 3600
+
+
+_DEFAULT_MEMORY_WEIGHT_CONFIG = _DefaultMemoryWeightConfig()
+
 POLL_TASK_TYPE = "connector.poll"
 MCP_POLL_TASK_TYPE = "mcp_connector.poll"
 PROACTIVE_EVALUATE_TASK_TYPE = "proactive.evaluate"
@@ -50,6 +60,7 @@ class Scheduler:
         rng: Any = None,                   # random.Random (可注入，测试可复现)
         drift_config: Any = None,          # DriftConfig
         config_version_id: str = "",
+        memory_config: Any = None,         # MemoryWeightConfig (PLAN-16 M3 MEM-07)
     ) -> None:
         self._conn = conn
         self._clock = clock or ProductionClock()
@@ -61,6 +72,7 @@ class Scheduler:
         self._rng = rng
         self._drift_config = drift_config          # DriftConfig
         self._config_version_id = config_version_id
+        self._memory_config = memory_config or _DEFAULT_MEMORY_WEIGHT_CONFIG
 
     @staticmethod
     def task_type_for_connector(connector_type: str) -> str:
@@ -101,17 +113,18 @@ class Scheduler:
             return None
 
     def tick_memory_maintenance(self) -> list[Task]:
-        """PLAN-14 R-06: 定期创建 memory.recompute_weight / memory.consolidate 任务。
+        """PLAN-14 R-06 / PLAN-16 M3 MEM-07: 定期创建 memory.recompute_weight / memory.consolidate。
 
         每次 process_background_once 调用一次。幂等键基于任务类型 + 时间窗口，
-        窗口内不重复创建。窗口大小由配置决定（默认 600s recompute / 3600s consolidate）。
+        窗口大小由配置 memory.weight.* 决定（可配置化，不再硬编码）。
         """
         now = self._now()
         now_ms = epoch_ms(now)
         tasks: list[Task] = []
+        cfg = self._memory_config
 
-        # memory.recompute_weight —— 窗口：每 600s（10 分钟）一次
-        recompute_window = now_ms // (10 * 60 * 1000)
+        # memory.recompute_weight —— 窗口：recompute_interval_seconds
+        recompute_window = now_ms // max(cfg.recompute_interval_seconds * 1000, 1)
         idemp_recompute = f"memory-maintenance:recompute:{recompute_window}"
         t = self._try_create_unique_task(
             MEMORY_RECOMPUTE_WEIGHT_TASK_TYPE, idemp_recompute,
@@ -120,8 +133,8 @@ class Scheduler:
         if t:
             tasks.append(t)
 
-        # memory.consolidate —— 窗口：每 3600s（1 小时）一次
-        consolidate_window = now_ms // (60 * 60 * 1000)
+        # memory.consolidate —— 窗口：consolidate_interval_seconds
+        consolidate_window = now_ms // max(cfg.consolidate_interval_seconds * 1000, 1)
         idemp_consolidate = f"memory-maintenance:consolidate:{consolidate_window}"
         t = self._try_create_unique_task(
             MEMORY_CONSOLIDATE_TASK_TYPE, idemp_consolidate,

@@ -8,10 +8,14 @@ PLAN-09 M4a: registry 不再依赖 SqliteMemoryService；记忆工具
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
 from cogito.capability.registry import CapabilityRegistry
+
+_LOGGER = logging.getLogger("cogito.tools.registry")
+
 from cogito.contracts.memory import MemoryReader, MemoryWriter
 from cogito.contracts.context import KnowledgeReader
 from cogito.contracts.multimodal import StickerService, VisionToolService
@@ -30,6 +34,7 @@ def discover_builtin_tools(
     make_vision_service: Callable[[], VisionToolService] | None = None,
     make_sticker_service: Callable[[], StickerService] | None = None,
     make_task_service: Callable[[], Any] | None = None,
+    make_memory_service: Callable[[], Any] | None = None,
     knowledge_reader: KnowledgeReader | None = None,
 ) -> CapabilityRegistry:
     """发现并注册所有内置工具。
@@ -68,8 +73,12 @@ def discover_builtin_tools(
         reader=memory_reader,
         writer=memory_writer,
     ))
-    # 读工具使用共享 reader 或工厂
-    r.register(_create_recall(reader=memory_reader))
+    # 读工具使用共享 reader 或工厂；召回命中后写 exposed 信号（MEM-02）
+    # MEM-02: 工具召回命中 → exposed 信号（可观察）
+    r.register(_create_recall(
+        reader=memory_reader,
+        on_exposed=_make_on_exposed_handler(make_memory_service=make_memory_service),
+    ))
 
     if knowledge_reader is not None:
         from cogito.tools.search_knowledge import create_tool_def as _create_knowledge_search
@@ -108,6 +117,7 @@ def assemble_default_registry(
     make_vision_service: Callable[[], VisionToolService] | None = None,
     make_sticker_service: Callable[[], StickerService] | None = None,
     make_task_service: Callable[[], Any] | None = None,
+    make_memory_service: Callable[[], Any] | None = None,
     knowledge_reader: KnowledgeReader | None = None,
 ) -> CapabilityRegistry:
     """创建 CapabilityRegistry 并注册所有内置工具。
@@ -126,6 +136,34 @@ def assemble_default_registry(
         make_vision_service=make_vision_service,
         make_sticker_service=make_sticker_service,
         make_task_service=make_task_service,
+        make_memory_service=make_memory_service,
         knowledge_reader=knowledge_reader,
     )
     return registry
+
+
+def _make_on_exposed_handler(
+    make_memory_service: Callable[[], Any] | None,
+) -> Callable[[list[str]], None] | None:
+    """构建 recall_memory 的 exposed 信号回调（PLAN-16 M3 MEM-02）。
+
+    每次命中以独立连接写信号，失败仅记录日志，不影响召回结果本身。
+    """
+    if make_memory_service is None:
+        return None
+
+    def _on_exposed(memory_ids: list[str]) -> None:
+        svc = make_memory_service()
+        from cogito.service.memory_signals import SignalWriter
+        writer = SignalWriter(svc.conn if hasattr(svc, "conn") else svc._conn)
+        for mid in memory_ids:
+            try:
+                writer.record_exposed(
+                    mid,
+                    idempotency_key=f"recall-exposed:{mid}",
+                    algorithm_version="2",
+                )
+            except Exception as e:
+                _LOGGER.warning("recall_memory exposed signal failed for %s: %s", mid, e)
+
+    return _on_exposed

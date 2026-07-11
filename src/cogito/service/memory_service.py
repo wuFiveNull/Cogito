@@ -135,6 +135,40 @@ class MemoryService(Protocol):
         """拒绝候选记忆。"""
         ...
 
+    def supersede(self, old_id: str, new_id: str) -> bool:
+        """标旧记忆被新记忆覆盖。"""
+        ...
+
+    def correct(
+        self,
+        *,
+        memory_id: str,
+        expected_version: int | None = None,
+        kind: str | None = None,
+        subject: str | None = None,
+        predicate: str | None = None,
+        value: str | None = None,
+        scope_type: str | None = None,
+        scope_id: str | None = None,
+        confidence: float | None = None,
+        importance: float | None = None,
+        corrected_by: str = "",
+    ) -> MemoryItem:
+        """修正记忆：创建新 confirmed 记忆 + 标旧记忆 superseded。"""
+        ...
+
+    def erase(
+        self,
+        *,
+        memory_id: str,
+        receipt_id: str,
+        reason: str = "user_request",
+        expected_version: int | None = None,
+        principal_id: str | None = None,
+    ) -> bool:
+        """擦除一条记忆为最小 tombstone（含 Receipt + MemoryErased 事件）。"""
+        ...
+
 
 class SqliteMemoryService:
     """SqliteMemoryService — SQLite 实现的长期记忆服务。
@@ -485,6 +519,46 @@ class SqliteMemoryService:
             return False
         return self._repo.soft_delete(existing.memory_id)
 
+    # ── Erase（PLAN-16 M3 MEM-05）──
+
+    def erase(
+        self,
+        *,
+        memory_id: str,
+        receipt_id: str,
+        reason: str = "user_request",
+        expected_version: int | None = None,
+        principal_id: str | None = None,
+    ) -> bool:
+        """擦除一条记忆为最小 tombstone（value/subject/predicate/来源/FTS/embedding 清空）。
+
+        写入 Erasure Receipt 引用 + MemoryErased 事件；调用方负责 commit
+        并落审计（Audit）。重复擦除（已 deleted_at）幂等返回 True。
+        """
+        from cogito.domain.errors import EntityNotFoundError
+        target = self.get(memory_id)
+        if target is None:
+            raise EntityNotFoundError("memory", memory_id)
+
+        # 幂等：已擦除则直接返回，不再重复写 Receipt / 事件
+        if target.deleted_at is not None:
+            return True
+
+        ok = self._repo.tombstone(
+            memory_id,
+            receipt_id=receipt_id,
+            reason=reason,
+            expected_version=expected_version,
+            principal_id=principal_id,
+        )
+        if ok:
+            self._emit_memory_event("MemoryErased", memory_id, {
+                "reason": reason,
+                "receipt_id": receipt_id,
+                "principal_id": target.principal_id,
+            })
+        return ok
+
     # ── 读取 ──
 
     def retrieve(
@@ -549,3 +623,119 @@ class SqliteMemoryService:
                 "superseded_by": new_id,
             })
         return ok
+
+    # ── Correct（PLAN-16 M3 MEM-03/04/06）──
+
+    def correct(
+        self,
+        *,
+        memory_id: str,
+        expected_version: int | None = None,
+        kind: str | None = None,
+        subject: str | None = None,
+        predicate: str | None = None,
+        value: str | None = None,
+        scope_type: str | None = None,
+        scope_id: str | None = None,
+        confidence: float | None = None,
+        importance: float | None = None,
+        corrected_by: str = "",
+    ) -> MemoryItem:
+        """修正记忆：创建新 confirmed 记忆 + 标旧记忆 superseded。
+
+        统一写入口（MEM-03：不再由 Command 直写 svc._repo）；
+        expected_version 乐观锁（MEM-06）；
+        正向 signal/event 落在新事实上（MEM-04）。
+        返回新建的记忆；调用方负责 commit。
+        """
+        old = self.get(memory_id)
+        if old is None:
+            from cogito.domain.errors import EntityNotFoundError
+            raise EntityNotFoundError("memory", memory_id)
+        if expected_version is not None and old.version != expected_version:
+            from cogito.domain.errors import ConcurrencyConflictError
+            raise ConcurrencyConflictError("memory", memory_id, expected_version, old.version)
+
+        now = datetime.now(UTC)
+        corrected = MemoryItem(
+            kind=MemoryKind(kind) if kind else old.kind,
+            subject=subject if subject is not None else old.subject,
+            predicate=predicate if predicate is not None else old.predicate,
+            value=value if value is not None else old.value,
+            principal_id=old.principal_id,
+            scope_type=scope_type if scope_type is not None else old.scope_type,
+            scope_id=scope_id if scope_id is not None else old.scope_id,
+            scope=old.scope,
+            canonical_key=_make_canonical_key(
+                old.principal_id,
+                subject if subject is not None else old.subject,
+                predicate if predicate is not None else old.predicate,
+                scope_type=scope_type if scope_type is not None else old.scope_type,
+                scope_id=scope_id if scope_id is not None else old.scope_id,
+                value=value if value is not None else old.value,
+            ),
+            source_type="manual",
+            source_id=f"correct:{memory_id}",
+            explicitness=Explicitness.user_corrected,
+            confidence=float(confidence) if confidence is not None else old.confidence,
+            importance=float(importance) if importance is not None else old.importance,
+            status=MemoryStatus.confirmed,
+            confirmation_method="manual",
+            confirmed_by=corrected_by,
+            confirmed_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        created = self._repo.insert(corrected)
+
+        # 重建可信来源（可追溯到被修正的旧记忆）
+        self._write_memory_sources(
+            created.memory_id,
+            source_type="manual",
+            source_id=f"correct:{memory_id}",
+            trust_label=_trust_label_for_correction(),
+        )
+
+        # 标旧记忆 superseded + supersedes 关系
+        self._repo.supersede(old.memory_id, created.memory_id)
+        self._repo.insert_relation(
+            from_memory_id=created.memory_id,
+            to_memory_id=old.memory_id,
+            relation_type="supersedes",
+            source_type="manual",
+            source_id=f"correct:{memory_id}",
+        )
+
+        # PLAN-13/16: 确认事件（新记忆）+ superseded 事件（旧记忆）
+        self._emit_memory_event("MemoryConfirmed", created.memory_id, {
+            "kind": created.kind.value,
+            "status": created.status.value,
+            "principal_id": old.principal_id,
+            "corrected": True,
+        })
+        self._emit_memory_event("MemorySuperseded", old.memory_id, {
+            "superseded_by": created.memory_id,
+        })
+
+        # MEM-04: 正向 user_corrected 信号落在新事实上（而非旧记忆）
+        from cogito.service.memory_signals import SignalWriter
+        SignalWriter(self._repo._conn).record_signal(
+            "user_corrected", created.memory_id,
+            actor_principal_id=old.principal_id,
+            idempotency_key=_user_corrected_idempotency_key(memory_id, created.memory_id),
+            algorithm_version="2",
+        )
+        return created
+
+
+# ── helpers ────────────────────────────────────────────────────────────────
+
+
+def _trust_label_for_correction() -> str:
+    """手动修正后的来源可信度：用户主动纠正 → 高可信。"""
+    return "high"
+
+
+def _user_corrected_idempotency_key(memory_id: str, new_memory_id: str) -> str:
+    """user_corrected 信号的稳定幂等键。"""
+    return f"user-corrected:{memory_id}:{new_memory_id}"

@@ -1086,14 +1086,21 @@ class MemoryExtractionConfig:
 @dataclass
 class MemoryWeightConfig:
     policy_version: str = "2"
-    recompute_interval_seconds: int = 43200
+    recompute_interval_seconds: int = 600
+    consolidate_interval_seconds: int = 3600
     candidate_ttl_days: int = 30
+    batch_size: int = 500
+    algorithm_version: str = "v2"
 
     @classmethod
     def _from_raw(cls, raw: dict[str, Any]) -> MemoryWeightConfig:
         _check_unknown(
             raw,
-            frozenset({"policy_version", "recompute_interval_seconds", "candidate_ttl_days"}),
+            frozenset({
+                "policy_version", "recompute_interval_seconds",
+                "consolidate_interval_seconds", "candidate_ttl_days",
+                "batch_size", "algorithm_version",
+            }),
             "memory.weight",
         )
         return cls(**raw)

@@ -107,6 +107,8 @@ class TaskWorker:
                 "Task handler completed: %s => %s",
                 task.task_type, (result or "")[:100],
             )
+            # MEM-01: 将 handler 声明的记忆依赖持久化到 task.result_ref
+            self._persist_declared_dependencies(task)
         except Exception as e:
             _LOGGER.exception("Task handler failed: %s", e)
             heartbeat_task.cancel()
@@ -144,7 +146,61 @@ class TaskWorker:
             _LOGGER.warning("Task complete failed (lease lost): %s", task.task_id)
             return TaskRunOutcome.lost
 
+        # PLAN-16 M3 MEM-01: Task 成功后，按 handler 声明的 memory_dependencies
+        # 写出 task_succeeded 信号（禁止从任意文本猜测依赖）。
+        self._emit_task_succeeded_signals(task)
+
         return TaskRunOutcome.completed
+
+    def _emit_task_succeeded_signals(self, task: Any) -> None:
+        """读取任务 result_ref 中声明的 memory_dependencies 并写 task_succeeded。
+
+        handler 在 result_ref 中以 JSON {"memory_dependencies": [mid, ...]} 声明
+        其使用并强化的记忆；失败仅记录日志，不影响 Task 完成状态本身。
+        """
+        import json
+
+        result_ref = getattr(task, "result_ref", None)
+        if not result_ref:
+            return
+        try:
+            data = json.loads(result_ref)
+        except (json.JSONDecodeError, TypeError):
+            return
+        deps = data.get("memory_dependencies")
+        if not deps:
+            return
+        try:
+            from cogito.service.memory_signals import SignalWriter
+            conn = getattr(self._dispatcher, "_conn", None)
+            if conn is None:
+                return
+            writer = SignalWriter(conn)
+            for mid in deps:
+                try:
+                    writer.record_task_succeeded(
+                        str(mid),
+                        task_id=task.task_id,
+                        idempotency_key=f"task-succeeded:{task.task_id}:{mid}",
+                        algorithm_version="2",
+                    )
+                except Exception as e:
+                    _LOGGER.warning(
+                        "task_succeeded signal failed for %s: %s", mid, e)
+        except Exception as e:
+            _LOGGER.warning("emit_task_succeeded_signals failed: %s", e)
+
+    def _persist_declared_dependencies(self, task: Any) -> None:
+        """把 handler 声明的记忆依赖写入 task.result_ref（PLAN-16 M3 MEM-01）。"""
+        import json
+
+        deps = getattr(self._handler_ctx, "declared_memory_dependencies", None)
+        if not deps:
+            return
+        try:
+            task.result_ref = json.dumps({"memory_dependencies": list(deps)})
+        except Exception as e:
+            _LOGGER.warning("persist_declared_dependencies failed: %s", e)
 
     async def _heartbeat_loop(
         self, task_id: str, attempt_id: str,

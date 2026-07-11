@@ -17,6 +17,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from cogito.domain.errors import ConcurrencyConflictError
 from cogito.domain.events import DomainEvent
 from cogito.service.api.audit import write_audit
 from cogito.service.api.command_service import (
@@ -43,6 +44,7 @@ from cogito.contracts.models import (
     MemoryConfirmPayload,
     MemoryCorrectPayload,
     MemoryDeletePayload,
+    MemoryErasePayload,
     MemoryRejectPayload,
     ProactiveNegativeFeedbackPayload,
     PauseConnectorPayload,
@@ -101,6 +103,34 @@ def _conflict(action: str, target_id: str, current_version: int) -> CommandRespo
         message=f"{action} conflict: expected version mismatch",
         details={"target_id": target_id, "current_version": current_version},
     )
+
+
+def _write_erasure_receipt(
+    conn: sqlite3.Connection, *, memory_id: str, reason: str,
+) -> str:
+    """为 memory erase 写入一条 Erasure Receipt（PLAN-16 M3 MEM-05）。
+
+    返回 receipt_id，供 tombstone 引用与审计对账。
+    """
+    import hashlib
+    import uuid as _uuid
+    from cogito.contracts.clock import epoch_ms
+    from cogito.store.receipt_repo import ReceiptRecord, SideEffectReceiptRepository
+    receipt_id = f"rcpt-erase-{memory_id[:8]}-{_uuid.uuid4().hex[:8]}"
+    request_hash = hashlib.sha256(f"erase:{memory_id}:{reason}".encode()).hexdigest()[:16]
+    SideEffectReceiptRepository(conn).insert(ReceiptRecord(
+        receipt_id=receipt_id,
+        capability_id="memory",
+        operation_id=memory_id,
+        request_hash=request_hash,
+        side_effect_class="erasure",
+        status="applied",
+        reconcile_status="not_needed",
+        summary=f"memory erased: {reason}",
+        attempt_type="run",
+        created_at=epoch_ms(),
+    ))
+    return receipt_id
 
 
 def _check_idempotency(
@@ -319,40 +349,33 @@ def reject_memory(payload: MemoryRejectPayload, deps: CommandDeps = Depends(get_
 
 @router.post("/correct-memory", response_model=CommandResponse)
 def correct_memory(payload: MemoryCorrectPayload, deps: CommandDeps = Depends(get_command_deps)) -> CommandResponse:
-    """修正记忆：创建新记忆 + 标旧记忆为 superseded + user_corrected 信号。"""
+    """修正记忆（PLAN-16 M3 MEM-03/04/06）：统一走 svc.correct() 写入口 + 乐观锁。"""
     cached = _check_idempotency(deps.conn, ACTOR, "correct-memory", payload.idempotency_key)
-    if cached:
+    if cached and cached.status == "ok":
         return cached
     svc = SqliteMemoryService(deps.conn)
-    old = svc.get(payload.memory_id)
-    if old is None:
-        raise HTTPException(status_code=404, detail=f"memory {payload.memory_id} not found")
-    import uuid
-    from cogito.domain.memory import MemoryItem
-    from cogito.domain.memory import Explicitness
-    corrected = MemoryItem(
-        memory_id=uuid.uuid4().hex,
-        principal_id=old.principal_id,
-        kind=payload.kind if payload.kind else old.kind,
-        subject=payload.subject if payload.subject else old.subject,
-        predicate=payload.predicate if payload.predicate else old.predicate,
-        value=payload.value if payload.value else old.value,
-        scope_type=payload.scope_type if payload.scope_type != "global" else old.scope_type,
-        scope_id=payload.scope_id if payload.scope_id else old.scope_id,
-        confidence=payload.confidence,
-        importance=payload.importance,
-        explicitness=Explicitness.user_corrected,
-        status="confirmed",
-    )
-    svc._repo.insert(corrected)
-    svc.supersede(old.memory_id, corrected.memory_id)
-    from cogito.service.memory_signals import SignalWriter
-    SignalWriter(deps.conn).record_signal(
-        "user_corrected", payload.memory_id,
-        actor_principal_id=old.principal_id or ACTOR,
-        idempotency_key=f"correct-memory:{payload.memory_id}:{corrected.memory_id}",
-        algorithm_version="2",
-    )
+    existing = svc.get(payload.memory_id)
+    if existing is None:
+        return _fail("correct-memory", payload.memory_id, "not found")
+    # MEM-06: expected_version 校验
+    if payload.expected_version is not None and existing.version != payload.expected_version:
+        return _conflict("correct-memory", payload.memory_id, existing.version)
+    try:
+        corrected = svc.correct(
+            memory_id=payload.memory_id,
+            expected_version=payload.expected_version,
+            kind=payload.kind or None,
+            subject=payload.subject or None,
+            predicate=payload.predicate or None,
+            value=payload.value or None,
+            scope_type=payload.scope_type if payload.scope_type != "global" else None,
+            scope_id=payload.scope_id or None,
+            confidence=payload.confidence,
+            importance=payload.importance,
+            corrected_by=existing.principal_id or ACTOR,
+        )
+    except ConcurrencyConflictError:
+        return _conflict("correct-memory", payload.memory_id, existing.version)
     try:
         SqliteTaskService(deps.conn).create(
             "memory.recompute_weight", "{}",
@@ -362,7 +385,7 @@ def correct_memory(payload: MemoryCorrectPayload, deps: CommandDeps = Depends(ge
         )
     except sqlite3.IntegrityError:
         pass
-    # PLAN-16 M2 TX-06: 审计与事实（新记忆 + supersede + signal + weight task）同一事务原子提交。
+    # PLAN-16 M2/M3: 审计与事实（新记忆 + supersede + signal + weight task）同一事务原子提交。
     write_audit(
         deps.conn, actor_id=ACTOR, action="correct-memory",
         target_type="memory", target_id=corrected.memory_id,
@@ -391,6 +414,7 @@ def proactive_negative_feedback(
 
 @router.post("/delete-memory", response_model=CommandResponse)
 def delete_memory(payload: MemoryDeletePayload, deps: CommandDeps = Depends(get_command_deps)) -> CommandResponse:
+    """软删除记忆（deprecated: 保留向后兼容，新语义请使用 erase-memory）。"""
     svc = SqliteMemoryService(deps.conn)
     ok = svc.forget(payload.memory_id)
     if not ok:
@@ -403,6 +427,49 @@ def delete_memory(payload: MemoryDeletePayload, deps: CommandDeps = Depends(get_
     )
     deps.conn.commit()
     return _ok("delete-memory", payload.memory_id)
+
+
+@router.post("/erase-memory", response_model=CommandResponse)
+def erase_memory(payload: MemoryErasePayload, deps: CommandDeps = Depends(get_command_deps)) -> CommandResponse:
+    """擦除记忆：最小 tombstone + Erasure Receipt + Audit + MemoryErased 事件（PLAN-16 M3 MEM-05）。"""
+    cached = _check_idempotency(deps.conn, ACTOR, "erase-memory", payload.idempotency_key)
+    if cached and cached.status == "ok":
+        return cached
+    svc = SqliteMemoryService(deps.conn)
+    existing = svc.get(payload.memory_id)
+    if existing is None:
+        return _fail("erase-memory", payload.memory_id, "not found")
+    # expected_version 校验（MEM-06）：乐观锁防并发覆盖
+    if payload.expected_version is not None and existing.version != payload.expected_version:
+        return _conflict("erase-memory", payload.memory_id, existing.version)
+    # 幂等：已擦除（deleted_at 非空）直接返回成功，不重复写 Receipt
+    if existing.deleted_at is not None:
+        return _ok("erase-memory", payload.memory_id, reason="already_erased")
+    receipt_id = _write_erasure_receipt(
+        deps.conn, memory_id=payload.memory_id, reason=payload.reason,
+    )
+    try:
+        ok = svc.erase(
+            memory_id=payload.memory_id,
+            receipt_id=receipt_id,
+            reason=payload.reason,
+            expected_version=payload.expected_version,
+            principal_id=None,
+        )
+    except ConcurrencyConflictError:
+        return _conflict("erase-memory", payload.memory_id, existing.version)
+    if not ok:
+        return _fail("erase-memory", payload.memory_id, "not found")
+    # PLAN-16 M2/3: 审计与事实 + 事件 + Receipt 同一事务原子提交
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="erase-memory",
+        target_type="memory", target_id=payload.memory_id,
+        changes={"reason": payload.reason, "receipt_id": receipt_id},
+        commit=False,
+    )
+    deps.conn.commit()
+    return _ok("erase-memory", payload.memory_id,
+               reason=payload.reason, receipt_id=receipt_id)
 
 
 # ── delete-session (软删除，仅标记 deleted_at) ────────────────

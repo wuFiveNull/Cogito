@@ -107,6 +107,16 @@ class TaskHandlerContext:
     # 当前 Task 元信息（IngestionBatch 日志需要）
     _task_id: str = ""
     _attempt_id: str = ""
+    # PLAN-16 M3 MEM-01: handler 主动声明的记忆依赖（成功后被强化）
+    declared_memory_dependencies: list[str] = field(default_factory=list)
+
+    def declare_memory_dependencies(self, memory_ids: list[str]) -> None:
+        """声明本 Task 使用并强化的记忆（PLAN-16 M3 MEM-01）。
+
+        禁止从任意文本猜测依赖：handler 必须显式传入受影响的 memory_id。
+        """
+        if memory_ids:
+            self.declared_memory_dependencies = list(memory_ids)
 
 
 # Handler 签名：async 函数，接收 Task 和上下文，返回结果文本
@@ -564,6 +574,9 @@ def _handle_memory_extract(task: Task, ctx: TaskHandlerContext) -> str:
             session_id=payload.session_id,
             from_sequence=payload.from_sequence, to_sequence=payload.to_sequence,
         ))
+
+        # MEM-01: 声明本 Task 实际创建的记忆（成功后写 task_succeeded 信号）
+        ctx.declare_memory_dependencies(extractor.created_memory_ids)
 
         # Zero candidates is still a successfully processed window.
         latest = wm_repo.get(PROC_MEMORY_EXTRACT, payload.conversation_id, payload.session_id)

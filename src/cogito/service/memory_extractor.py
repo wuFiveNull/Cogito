@@ -19,6 +19,7 @@ from cogito.model.contracts import (
     FinishReason,
     ModelRequest,
 )
+from cogito.domain.memory import MemoryItem
 from cogito.model.router import ModelRouter
 from cogito.service.memory_service import SqliteMemoryService
 
@@ -244,6 +245,8 @@ class MemoryExtractor:
         self._model_role = model_role
         self._trigger_policy = trigger_policy or ExtractionTriggerPolicy()
         self._strict = strict
+        # PLAN-16 M3 MEM-01: 上次提取实际创建的记忆 ID（供 handler 声明依赖）
+        self.created_memory_ids: list[str] = []
 
     async def extract_from_messages(
         self,
@@ -296,10 +299,13 @@ class MemoryExtractor:
         # strict 模式：任意候选写入失败必须中止整个窗口（事务回滚、不推进 watermark）；
         # non-strict 模式：才允许单条跳过，避免整窗口因单条脏数据丢失。
         written = []
+        self.created_memory_ids = []
         for c in candidates:
             evidence = self._validate_evidence(c, ctx.allowed_message_ids)
             try:
                 item = self._write_candidate(c, ctx, evidence=evidence)
+            except MemoryExtractionWriteError:
+                raise
             except Exception as e:
                 if self._strict:
                     raise MemoryExtractionWriteError(
@@ -307,8 +313,10 @@ class MemoryExtractor:
                     ) from e
                 _LOGGER.warning("Failed to write memory candidate (non-strict, skipping): %s", e)
                 continue
-            if item:
+            if item is not None:
                 written.append(c)
+                if item.memory_id:
+                    self.created_memory_ids.append(item.memory_id)
 
         _LOGGER.info("Extracted %d memory candidates", len(written))
         return written
@@ -460,7 +468,7 @@ class MemoryExtractor:
     def _write_candidate(
         self, c: dict[str, Any], ctx: ExtractionContext,
         evidence: list[dict[str, Any]] | None = None,
-    ) -> bool:
+    ) -> "MemoryItem | None":
         """将一条候选写入 memory_items（D4 + PLAN-13 精确来源）。
 
         - explicit_user_statement → confirmed，覆盖旧推断
@@ -484,7 +492,7 @@ class MemoryExtractor:
         # 而是提取任务 ID；精确 evidence 由 propose() 写入 memory_sources
         source_id = ctx.extraction_id if ctx else ""
 
-        result = self._service.propose(
+        return self._service.propose(
             kind=kind,
             subject=subject,
             predicate=predicate,
@@ -501,7 +509,6 @@ class MemoryExtractor:
             evidence=evidence,
             extraction_id=ctx.extraction_id,
         )
-        return result is not None
 
     @staticmethod
     def _format_messages(messages: list[ExtractMessage]) -> str:

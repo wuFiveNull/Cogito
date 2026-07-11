@@ -64,6 +64,7 @@ class MemoryCorrectPayload(BaseModel):
 
 class MemoryDeletePayload(BaseModel):
     memory_id: str
+    # 旧语义：soft forget（保留 deprecated，由 erase-memory 取代）。
 
 
 class ProactiveNegativeFeedbackPayload(BaseModel):
@@ -154,6 +155,12 @@ class BaseCommandPayload(BaseModel):
     """命令基类：统一幂等键 + 预期版本（APPROVAL-COMMANDS §2）。"""
     idempotency_key: str = ""
     expected_version: int | None = None
+
+
+class MemoryErasePayload(BaseCommandPayload):
+    """擦除记忆（PLAN-16 M3 MEM-05）：最小 tombstone + Receipt + Audit。"""
+    memory_id: str
+    reason: str = "user_request"
 
 
 class ReviewProactiveCandidatePayload(BaseCommandPayload):
