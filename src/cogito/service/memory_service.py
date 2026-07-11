@@ -189,13 +189,20 @@ class SqliteMemoryService:
         confidence: float = 0.5,
         importance: float = 0.5,
         status: str = "candidate",
+        evidence=None,
+        extraction_id: str = "",
     ) -> MemoryItem | None:
-        """提议新记忆（冲突感知写入，D4）。
+        """提议新记忆（冲突感知写入，D4；PLAN-13: 精确来源）。
 
         冲突处理规则：
         - 同 canonical_key + 同值 → 不创建，追加 supports 关系
         - 同 canonical_key + 新明确值 → supersedes
         - 同 canonical_key + 两个低置信推断冲突 → 两者保留为 candidate + contradicts
+
+        Args:
+            evidence: 精确来源列表，每项为 dict，至少含 message_id；
+                     服务端会验证其属于当前 session。
+            extraction_id: 提取任务 ID（如 session:from:to:version），用于 memory_sources。
         """
         canonical_key = _make_canonical_key(
             principal_id, subject, predicate,
@@ -244,6 +251,13 @@ class SqliteMemoryService:
 
         created = self._repo.insert(memory)
 
+        # PLAN-13 P13-02: 同事务写入精确来源（memory_sources）
+        self._write_memory_sources(
+            created.memory_id, source_type=source_type, source_id=source_id,
+            evidence=evidence, extraction_id=extraction_id,
+            trust_label=self._trust_from_explicitness(explicitness),
+        )
+
         # 冲突关系：与已有记忆建立 contradicts（仅低置信推断之间）
         if existing and existing.status == MemoryStatus.candidate:
             self._repo.insert_relation(
@@ -269,6 +283,56 @@ class SqliteMemoryService:
             created.confirmed_at = now
 
         return created
+
+    def _write_memory_sources(
+        self,
+        memory_id: str,
+        source_type: str,
+        source_id: str,
+        evidence=None,
+        extraction_id: str = "",
+        trust_label: str = "unverified",
+    ) -> None:
+        """写入精确来源到 memory_sources（PLAN-13 P13-02）。
+
+        - 有 evidence → 为每条 evidence message 建立一条 MemorySource
+        - 无 evidence但有 source_id → 建立一条范围来源
+        """
+        from cogito.domain.memory import MemorySource
+        if evidence:
+            for ev in (evidence or []):
+                if not isinstance(ev, dict):
+                    continue
+                ev_id = ev.get("message_id", "")
+                if not ev_id:
+                    continue
+                self._repo.insert_source(MemorySource(
+                    memory_source_id="",
+                    memory_id=memory_id,
+                    source_type=source_type or "message",
+                    source_id=ev_id,
+                    evidence_ref=ev.get("evidence_ref", ""),
+                    evidence_hash=ev.get("evidence_hash", ""),
+                    trust_label=ev.get("trust_label", trust_label),
+                    extraction_id=extraction_id,
+                ))
+        elif source_id:
+            self._repo.insert_source(MemorySource(
+                memory_source_id="",
+                memory_id=memory_id,
+                source_type=source_type or "message",
+                source_id=source_id,
+                trust_label=trust_label,
+                extraction_id=extraction_id,
+            ))
+
+    @staticmethod
+    def _trust_from_explicitness(explicitness: str) -> str:
+        """由 explicitness 推导 trust_label。"""
+        return {
+            "explicit_user_statement": "high",
+            "confirmed_inference": "high",
+        }.get(explicitness, "unverified")
 
     def remember(
         self,

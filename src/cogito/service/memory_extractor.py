@@ -3,11 +3,8 @@
 在 Turn 完成后异步运行，从当前会话的未提取消息中分析
 并生成 MemoryItem 候选（candidate 状态），不阻塞用户回复。
 
-第一阶段策略：
-- 使用主模型，通过 Tool Calling 机制或 JSON 文本输出提取
-- 显式用户陈述 → confirmed，模型推断 → candidate
-- 同 canonical_key 已存在同值 → 跳过
-- 提取失败不阻塞后续流程
+PLAN-13 P13-02: 提取来源可追溯到具体 Message（精确 evidence），
+不再写死 source_id="auto_extract"。
 """
 
 from __future__ import annotations
@@ -15,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from dataclasses import dataclass, field
 from typing import Any
 
 from cogito.model.contracts import (
@@ -30,6 +28,8 @@ _LOGGER = logging.getLogger("cogito.memory_extractor")
 EXTRACT_MIN_MESSAGES = 4
 # 每次提取最多处理的消息数
 EXTRACT_MAX_MESSAGES = 50
+# 提取器版本（用于 watermark + 来源追溯）
+EXTRACTOR_VERSION = "2"
 
 # 提取提示词
 EXTRACT_PROMPT = """You are a memory extraction assistant. Your job is to identify important, stable facts from the conversation that are worth remembering across sessions.
@@ -47,6 +47,12 @@ Do NOT extract:
 3. Information that is only relevant to this single conversation
 4. Speculative or inferred preferences
 
+CRITICAL: Every candidate MUST include evidence_message_ids — the message IDs in the
+conversation that support this extraction, so the source can be precisely traced.
+If you cannot point to specific messages, lower the confidence accordingly.
+
+Each message in the conversation is prefixed with its message id like "[msg_id]: role: content".
+
 Return a JSON object with the following schema:
 {
   "candidates": [
@@ -58,12 +64,43 @@ Return a JSON object with the following schema:
       "explicitness": "explicit_user_statement" | "model_inference",
       "confidence": 0.0-1.0,
       "importance": 0.0-1.0,
-      "reason": "string explaining why this should be remembered"
+      "reason": "string explaining why this should be remembered",
+      "evidence_message_ids": ["msg_1", "msg_2"]
     }
   ]
 }
 
 Return {"candidates": []} if nothing worth extracting."""
+
+
+@dataclass(frozen=True)
+class ExtractMessage:
+    """单条消息的不可变 DTO（PLAN-13 P13-02 evidence）。
+
+    相比旧的 {role, dict}，新版本携带 message_id 和 receive_sequence，
+    使提取来源可精确追溯。
+    """
+    message_id: str
+    role: str
+    content: str
+    receive_sequence: int = 0
+    sender_principal_id: str = ""
+    trust_label: str = "unverified"
+
+
+@dataclass
+class ExtractionContext:
+    """单次提取任务的上下文（PLAN-13 P13-02）。"""
+    session_id: str
+    principal_id: str
+    from_sequence: int = 0
+    to_sequence: int = 0
+    extractor_version: str = EXTRACTOR_VERSION
+    allowed_message_ids: set[str] = field(default_factory=set)
+
+    @property
+    def extraction_id(self) -> str:
+        return f"{self.session_id}:{self.from_sequence}:{self.to_sequence}:{self.extractor_version}"
 
 
 class MemoryExtractor:
@@ -83,10 +120,20 @@ class MemoryExtractor:
 
     async def extract_from_messages(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[ExtractMessage],
         principal_id: str,
+        session_id: str = "",
+        from_sequence: int = 0,
+        to_sequence: int = 0,
     ) -> list[dict[str, Any]]:
-        """从消息列表中提取记忆候选。
+        """从消息列表中提取记忆候选（PLAN-13 P13-02: 精确 evidence）。
+
+        Args:
+            messages: 含 message_id/sequence 的 ExtractMessage 列表
+            principal_id: 所有者 principal
+            session_id: 当前会话 ID（用于来源追溯和 watermark）
+            from_sequence: 窗口起始 receive_sequence
+            to_sequence: 窗口结束 receive_sequence
 
         返回实际写入的候选列表（不含跳过的重复项）。
         """
@@ -99,7 +146,18 @@ class MemoryExtractor:
                           len(messages), EXTRACT_MIN_MESSAGES)
             return []
 
-        # 构建消息文本
+        # 构建提取上下文（PLAN-13 P13-02）
+        allowed_ids = {m.message_id for m in messages}
+        ctx = ExtractionContext(
+            session_id=session_id,
+            principal_id=principal_id,
+            from_sequence=from_sequence,
+            to_sequence=to_sequence,
+            extractor_version=EXTRACTOR_VERSION,
+            allowed_message_ids=allowed_ids,
+        )
+
+        # 构建消息文本（带 msg_id 前缀，帮助模型返回 evidence）
         conversation_text = self._format_messages(messages)
 
         # 调用模型
@@ -107,11 +165,13 @@ class MemoryExtractor:
         if not candidates:
             return []
 
-        # 写入记忆
+        # 写入记忆（带精确来源）
         written = []
         for c in candidates:
             try:
-                item = self._write_candidate(c, principal_id)
+                # PLAN-13 P13-02: 服务端校验 evidence 必须属于当前窗口
+                evidence = self._validate_evidence(c, ctx.allowed_message_ids)
+                item = self._write_candidate(c, ctx, evidence=evidence)
                 if item:
                     written.append(c)
             except Exception as e:
@@ -153,6 +213,14 @@ class MemoryExtractor:
                                     "confidence": {"type": "number"},
                                     "importance": {"type": "number"},
                                     "reason": {"type": "string"},
+                                    "evidence_message_ids": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": (
+                                            "Message IDs from the conversation "
+                                            "that support this extraction."
+                                        ),
+                                    },
                                     "scope_type": {
                                         "type": "string",
                                         "enum": [
@@ -209,14 +277,37 @@ class MemoryExtractor:
             return []
         return candidates
 
+    def _validate_evidence(
+        self, c: dict[str, Any], allowed_ids: set[str],
+    ) -> list[dict[str, Any]]:
+        """校验 evidence_message_ids 必须属于当前 session 窗口。
+
+        模型返回窗口外 ID 将被过滤，防止伪造来源。
+        PLAN-13 P13-02: 服务端是来源真实性的权威校验方。
+        """
+        raw = c.get("evidence_message_ids", [])
+        if not raw:
+            return []
+        validated = []
+        for mid in raw:
+            if mid in allowed_ids:
+                validated.append({"message_id": mid, "trust_label": "verified"})
+            else:
+                _LOGGER.debug(
+                    "Evidence id %s not in allowed window, filtered", mid
+                )
+        return validated
+
     def _write_candidate(
-        self, c: dict[str, Any], principal_id: str,
+        self, c: dict[str, Any], ctx: ExtractionContext,
+        evidence: list[dict[str, Any]] | None = None,
     ) -> bool:
-        """将一条候选写入 memory_items（D4: 冲突感知写入）。
+        """将一条候选写入 memory_items（D4 + PLAN-13 精确来源）。
 
         - explicit_user_statement → confirmed，覆盖旧推断
         - model_inference → candidate，与已有冲突建立 contradicts 关系
         - scope_type/scope_id 从候选中读取（如有）
+        - 精确来源写入 memory_sources（evidence 验证后）
         """
         kind = c.get("kind", "fact")
         subject = c.get("subject", "")
@@ -230,29 +321,33 @@ class MemoryExtractor:
 
         status = "confirmed" if explicitness == "explicit_user_statement" else "candidate"
 
+        # PLAN-13 P13-02: source_id 不再写死 auto_extract，
+        # 而是提取任务 ID；精确 evidence 由 propose() 写入 memory_sources
+        source_id = ctx.extraction_id if ctx else ""
+
         result = self._service.propose(
             kind=kind,
             subject=subject,
             predicate=predicate,
             value=value,
-            principal_id=principal_id,
+            principal_id=ctx.principal_id,
             scope_type=scope_type,
             scope_id=scope_id,
-            source_type="extractor",
-            source_id="auto_extract",
+            source_type="message",
+            source_id=source_id,
             explicitness=explicitness,
             confidence=min(confidence, 1.0),
             importance=min(importance, 1.0),
             status=status,
+            evidence=evidence,
+            extraction_id=ctx.extraction_id,
         )
         return result is not None
 
     @staticmethod
-    def _format_messages(messages: list[dict[str, Any]]) -> str:
-        """将消息列表格式化为模型可读的文本。"""
+    def _format_messages(messages: list[ExtractMessage]) -> str:
+        """将消息列表格式化为模型可读的文本（带 msg_id 前缀）。"""
         lines = []
         for msg in messages[-EXTRACT_MAX_MESSAGES:]:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            lines.append(f"[{role}]: {content}")
+            lines.append(f"[{msg.message_id}]: {msg.role}: {msg.content}")
         return "\n\n".join(lines)

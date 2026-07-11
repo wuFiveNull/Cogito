@@ -297,8 +297,8 @@ class MemorySource:
     DOMAIN-CONTRACTS / 1.13：来源集合替代单引用 source_type/source_id。
     """
 
-    memory_source_id: str
-    memory_id: str
+    memory_source_id: str = ""
+    memory_id: str = ""
     source_type: str = "message"
     source_id: str = ""
     source_revision: str = ""
