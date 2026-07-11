@@ -316,12 +316,13 @@ class SqliteMemoryService:
                     trust_label=ev.get("trust_label", trust_label),
                     extraction_id=extraction_id,
                 ))
-        elif source_id:
+        else:
+            # 无精确 evidence 时，记录一条范围/手动来源，确保可追踪率 100%
             self._repo.insert_source(MemorySource(
                 memory_source_id="",
                 memory_id=memory_id,
                 source_type=source_type or "message",
-                source_id=source_id,
+                source_id=source_id or extraction_id or "unknown",
                 trust_label=trust_label,
                 extraction_id=extraction_id,
             ))
@@ -401,6 +402,17 @@ class SqliteMemoryService:
 
         # 新建
         created = self._repo.insert(memory)
+
+        # PLAN-13 P13-03: 手工写入也记录精确来源
+        # remember() 默认 source_type="message"，由 remember_memory 工具传入；
+        # 此处若未被显式设为非 message，则归为 manual 以区分自动提取
+        effective_source_type = source_type if source_type not in ("", "message") else "manual"
+        self._write_memory_sources(
+            created.memory_id, source_type=effective_source_type,
+            source_id=source_id,
+            trust_label=self._trust_from_explicitness(explicitness),
+            extraction_id=f"manual:{principal_id}",
+        )
 
         # 覆盖旧记忆 + 插入关系链
         if existing:
