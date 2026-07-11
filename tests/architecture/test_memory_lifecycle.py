@@ -58,9 +58,19 @@ def test_decay_reduces_weight(db: Any) -> None:
 
 
 def test_fact_decays_slower_than_episode(db: Any) -> None:
-    """fact 衰减比 episode 慢（更固化的知识保持更久）。"""
+    """fact 衰减比 episode 慢（更固化的知识保持更久）。
+
+    PLAN-13 P13-05: 指数衰减公式下，fact(kind_decay=0.001) 比
+    episode(kind_decay=0.02) 衰减慢。需要足够时间窗口让差异显现。
+    """
+    from datetime import timedelta
     fact_id = _insert_confirmed(db, kind="fact", subject="pi", predicate="value", value="3.14")
     ep_id = _insert_confirmed(db, kind="episode", subject="lunch", predicate="where", value="cafe")
+    # 设置 last_retrieved_at 为 30 天前，让 kind_decay_rate 差异显现
+    old = (__import__("datetime").datetime.now(__import__("datetime").UTC) - timedelta(days=30)).isoformat()
+    db.execute("UPDATE memory_items SET last_retrieved_at=? WHERE memory_id=?", (old, fact_id))
+    db.execute("UPDATE memory_items SET last_retrieved_at=? WHERE memory_id=?", (old, ep_id))
+    db.commit()
     repo = __import__("cogito.store.memory_repo", fromlist=["MemoryRepository"]).MemoryRepository(db)
     repo.apply_decay()
     fact_w = db.execute("SELECT retrieval_weight FROM memory_items WHERE memory_id=?", (fact_id,)).fetchone()[0]

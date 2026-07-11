@@ -965,44 +965,118 @@ class MemoryRepository:
         ).fetchone()
         return row[0] if row else 0
 
-    # ── 检索权重衰减 (Plan 02 M7) ────────────────────────────────
+    # ── 检索权重 (Plan 02 M7 → PLAN-13 P13-05) ─────────────────────
 
-    # 各 kind 的默认衰减因子（越"固化的"事实衰减越慢）
+    # Deprecated: 旧乘法因子，PLAN-13 P13-05 已由 memory_weight 模块指数公式取代。
+    # 保留作为历史参考，不再被任何代码路径使用。
     _KIND_DECAY: dict[str, float] = {
-        "fact": 0.999,       # 事实几乎不衰减
-        "preference": 0.995,  # 偏好缓慢衰减
-        "episode": 0.95,      # 事件较快衰减（随时间失去相关性）
-        "goal": 0.99,         # 目标中等衰减
-        "constraint": 0.999,  # 约束几乎不衰减
+        "fact": 0.999,
+        "preference": 0.995,
+        "episode": 0.95,
+        "goal": 0.99,
+        "constraint": 0.999,
     }
 
-    def apply_decay(self, principal_id: str = "") -> int:
-        """对所有确认记忆应用 retrieval_weight 衰减（幂等维护任务）。
+    def recompute_weight(
+        self,
+        *,
+        memory_id: str,
+        now: datetime,
+        policy=None,
+        signals_repo=None,
+    ) -> float:
+        """重算单条记忆的 retrieval_weight（PLAN-13 P13-05）。
 
-        公式: retrieval_weight *= decay_rate * kind_factor
-        decay_rate 从记忆自身的 decay_rate 字段读取（支持 per-item 覆盖）。
-        下限 0.1（superseded 条目退出默认检索但不归零）。
+        使用 MEMORY-LIFECYCLE §4 指数衰减纯函数，
+        从 memory_signals 聚合 reinforcement，结果写回缓存。
+
+        返回新的 retrieval_weight。
+        """
+        from cogito.store.weight_policy import (
+            MemoryWeightPolicy,
+            compute_weight_for_item,
+        )
+        policy = policy or MemoryWeightPolicy()
+        row = self._conn.execute(
+            "SELECT * FROM memory_items WHERE memory_id=? AND deleted_at IS NULL",
+            (memory_id,),
+        ).fetchone()
+        if row is None:
+            return 0.0
+        d = dict(row)
+
+        # 从 signals 聚合 reinforcement（P13-04）
+        reinforcement = d.get("reinforcement", 0) or 0
+        if signals_repo is not None:
+            reinforcement = signals_repo.aggregate_reinforcement(memory_id)
+
+        weight = compute_weight_for_item(
+            importance=d.get("importance", 0.5),
+            explicitness=d.get("explicitness", "model_inference"),
+            status=d.get("status", "candidate"),
+            kind=d.get("kind", "fact"),
+            last_active_at=dt_from_str(d.get("last_retrieved_at")),
+            now=now,
+            reinforcement=reinforcement,
+            emotional_weight=d.get("emotional_weight", 0.5),
+            policy=policy,
+        )
+
+        now_iso = now.isoformat()
+        try:
+            self._conn.execute(
+                "UPDATE memory_items SET "
+                "  retrieval_weight=?, reinforcement=?, "
+                "  last_weight_update=?, algorithm_version=?, updated_at=? "
+                "WHERE memory_id=? AND deleted_at IS NULL",
+                (weight, reinforcement, now_iso, policy.version, now_iso, memory_id),
+            )
+        except sqlite3.OperationalError:
+            pass
+        return weight
+
+    def recompute_all_weights(
+        self,
+        *,
+        now: datetime,
+        principal_id: str = "",
+        policy=None,
+        signals_repo=None,
+        batch_size: int = 100,
+    ) -> int:
+        """批量重算 retrieval_weight（memory.recompute_weight Task 入口）。
 
         返回更新的行数。
         """
-        now = datetime.now(UTC).isoformat()
-        kind_factors = " ".join(
-            f"WHEN '{k}' THEN {v}" for k, v in self._KIND_DECAY.items()
-        )
-        sql = (
-            "UPDATE memory_items SET retrieval_weight = "
-            "  MAX(0.1, retrieval_weight * decay_rate * "
-            f"(CASE kind {kind_factors} ELSE 0.99 END))"
-            " WHERE status='confirmed' AND deleted_at IS NULL"
-            " AND (valid_to IS NULL OR valid_to > ?)"
-        )
-        params: list[Any] = [now]
+        conditions = ["deleted_at IS NULL", "status IN ('confirmed','candidate')"]
+        params: list[Any] = []
         if principal_id:
-            sql += " AND principal_id=?"
+            conditions.append("principal_id=?")
             params.append(principal_id)
-        cur = self._conn.execute(sql, params)
+        rows = self._conn.execute(
+            "SELECT memory_id FROM memory_items WHERE " + " AND ".join(conditions),
+            params,
+        ).fetchall()
+        count = 0
+        for r in rows:
+            self.recompute_weight(
+                memory_id=r["memory_id"], now=now,
+                policy=policy, signals_repo=signals_repo,
+            )
+            count += 1
+            if count % batch_size == 0:
+                self._conn.commit()
         self._conn.commit()
-        return cur.rowcount
+        return count
+
+    def apply_decay(self, principal_id: str = "") -> int:
+        """[Deprecated] 旧乘法衰减路径，PLAN-13 P13-05 已被 recompute_all_weights 取代。
+
+        保留此方法作为兼容 shim，内部委托给纯函数重算。
+        """
+        return self.recompute_all_weights(
+            now=datetime.now(UTC), principal_id=principal_id,
+        )
 
     # ── 索引全量重建 (Plan 02 M7) ──────────────────────────────
 
