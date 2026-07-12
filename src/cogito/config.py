@@ -1198,6 +1198,9 @@ class Config:
     schema_version: str = "1"
     config_version: str = "1"
 
+    # ── PLAN-16 M7 OPS-04: Memory/Knowledge 专项运行指标（进程内计数器）──
+    _cognition_metrics: Any = None
+
     def __repr__(self) -> str:
         return (
             f"Config(workspace_path={self.workspace_path!r}, "

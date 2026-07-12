@@ -152,21 +152,41 @@ class QueryService:
         q: str = "",
         limit: int = 50,
         principal_id: str = "owner",
+        status: str = "confirmed",
     ) -> dict[str, Any]:
+        """记忆检索（PLAN-16 M7 OPS-02）。
+
+        status 过滤：confirmed（默认）/ candidate（待确认候选）/ all（全部未删）。
+        """
+        statuses = None
+        if status == "confirmed":
+            statuses = ("confirmed",)
+        elif status == "candidate":
+            statuses = ("candidate",)
+        # else "all": 不过滤 status
         if q:
             scored = self._retrieval.retrieve(
                 principal_id=principal_id, query=q, limit=limit,
             )
             items = [sm.to_dict() for sm in scored]
         else:
-            rows = self._conn.execute(
-                "SELECT * FROM memory_items "
-                "WHERE deleted_at IS NULL AND status='confirmed' "
-                "ORDER BY importance DESC, created_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            if statuses:
+                placeholders = ",".join("?" for _ in statuses)
+                rows = self._conn.execute(
+                    f"SELECT * FROM memory_items "
+                    f"WHERE deleted_at IS NULL AND status IN ({placeholders}) "
+                    f"ORDER BY importance DESC, created_at DESC LIMIT ?",
+                    (*statuses, limit),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM memory_items "
+                    "WHERE deleted_at IS NULL "
+                    "ORDER BY importance DESC, created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
             items = [dict(r) for r in rows]
-        return {"items": items, "query": q, "count": len(items)}
+        return {"items": items, "query": q, "count": len(items), "status": status}
 
     # ── connectors ─────────────────────────────────────────────
 
@@ -1429,6 +1449,86 @@ class QueryService:
         """获取记忆详情安全摘要。"""
         from cogito.service.explain import ExplainService
         return ExplainService(self._conn).get_memory_detail(memory_id)
+
+    # ── PLAN-16 M7 OPS-04: Memory/Knowledge 专项指标 ───────────
+
+    def cognition_metrics(self) -> dict[str, Any]:
+        """Memory/Knowledge 专项运行指标（PLAN-16 M7 OPS-04）。"""
+        from cogito.service.cognition_metrics_service import CognitionMetricsService
+        provider = getattr(self._config, "_cognition_metrics", None)
+        return CognitionMetricsService(self._conn, metrics=provider).snapshot()
+
+    # ── Context Snapshot 查询（PLAN-16 M7 OPS-03）──────────────
+
+    def get_context_snapshot(self, snapshot_id: str) -> dict | None:
+        """返回某次 Turn 构建的上下文快照（含 items / 来源 / 分数 / 排除统计）。"""
+        from cogito.store.context_snapshot_repo import ContextSnapshotRepository
+        record = ContextSnapshotRepository(self._conn).get(snapshot_id)
+        if record is None:
+            return None
+        return {
+            "snapshot_id": record.snapshot_id,
+            "session_id": record.session_id,
+            "attempt_id": record.attempt_id,
+            "attempt_type": record.attempt_type,
+            "message_upper_bound": record.message_upper_bound,
+            "query_plan_version": record.query_plan_version,
+            "selection_policy_version": record.selection_policy_version,
+            "token_budget": record.token_budget,
+            "tokens_used": record.tokens_used,
+            "excluded_summary": record.excluded_summary,
+            "per_source_tokens": record.per_source_tokens,
+            "exclusion_stats": record.exclusion_stats,
+            "created_at": record.created_at,
+            "items": [
+                {
+                    "index": it.item_index,
+                    "source": it.source,
+                    "score": it.score,
+                    "tokens": it.tokens,
+                    "trust_label": it.trust_label,
+                    "retrieval_path": it.retrieval_path,
+                    "provenance": it.provenance,
+                }
+                for it in record.items
+            ],
+        }
+
+    def explain_context_selection(self, snapshot_id: str) -> dict | None:
+        """解释某次 Turn 选中/排除的原因（PLAN-16 M7 OPS-03）。
+
+        通过快照已存储的来源版本 / 分数 / 检索路径 / policy version 给出可解释摘要。
+        """
+        snap = self.get_context_snapshot(snapshot_id)
+        if snap is None:
+            return None
+        selected_by_source: dict[str, list[dict]] = {}
+        for it in snap["items"]:
+            selected_by_source.setdefault(it["source"], []).append(it)
+        return {
+            "snapshot_id": snap["snapshot_id"],
+            "session_id": snap["session_id"],
+            "query_plan_version": snap["query_plan_version"],
+            "selection_policy_version": snap["selection_policy_version"],
+            "token_budget": snap["token_budget"],
+            "tokens_used": snap["tokens_used"],
+            "per_source_tokens": snap["per_source_tokens"],
+            "exclusion_stats": snap["exclusion_stats"],
+            "selected_by_source": {
+                src: [
+                    {
+                        "index": it["index"],
+                        "score": it["score"],
+                        "retrieval_path": it["retrieval_path"],
+                        "trust_label": it["trust_label"],
+                        "provenance": it["provenance"],
+                    }
+                    for it in items
+                ]
+                for src, items in selected_by_source.items()
+            },
+            "total_selected": len(snap["items"]),
+        }
 
 
 # ── PLAN-09 M4b 兼容别名：保留 QueryService 类名，同时暴露

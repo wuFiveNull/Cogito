@@ -92,9 +92,22 @@ def get_task(task_id: str, deps: CommandDeps = Depends(get_command_deps)) -> dic
 def search_memory(
     q: str = "",
     limit: int = Query(50, ge=1, le=200),
+    status: str = Query("confirmed", pattern="^(confirmed|candidate|all)$"),
     deps: CommandDeps = Depends(get_command_deps),
 ) -> dict:
-    return _svc(deps).search_memory(q=q, limit=limit)
+    return _svc(deps).search_memory(q=q, limit=limit, status=status)
+
+
+# ── PLAN-16 M7 OPS-02: pending-memory 查询（候选集中审核）──
+
+
+@router.get("/memory/pending")
+def list_pending_memory(
+    limit: int = Query(50, ge=1, le=200),
+    deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    """待确认记忆候选列表（Dashboard 集中审核）。"""
+    return _svc(deps).search_memory(q="", limit=limit, status="candidate")
 
 
 # ── connectors / channels / conversations ─────────────────────
@@ -524,6 +537,37 @@ def get_memory_detail(
     out = _svc(deps).get_memory_detail(memory_id)
     if out is None:
         raise HTTPException(status_code=404, detail=f"memory {memory_id} not found")
+    return out
+
+
+# ── PLAN-16 M7 OPS-03: Context Snapshot 查询 + Explain ────────
+
+
+@router.get("/context-snapshots/{snapshot_id}")
+def get_context_snapshot(
+    snapshot_id: str, deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    """某次 Turn 的上下文快照（含 items / 来源 / 分数）。"""
+    out = _svc(deps).get_context_snapshot(snapshot_id)
+    if out is None:
+        raise HTTPException(status_code=404, detail=f"context snapshot {snapshot_id} not found")
+    return out
+
+
+@router.get("/cognition/metrics")
+def cognition_metrics(deps: CommandDeps = Depends(get_command_deps)) -> dict:
+    """Memory/Knowledge 专项运行指标（PLAN-16 M7 OPS-04）。"""
+    return _svc(deps).cognition_metrics()
+
+
+@router.get("/context-snapshots/{snapshot_id}/explain")
+def explain_context_selection(
+    snapshot_id: str, deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    """解释某次 Turn 选中/排除的原因。"""
+    out = _svc(deps).explain_context_selection(snapshot_id)
+    if out is None:
+        raise HTTPException(status_code=404, detail=f"context snapshot {snapshot_id} not found")
     return out
 
 

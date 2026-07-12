@@ -258,8 +258,11 @@ class RuntimeApplication:
 
         # Process-wide vision counters shared by the inline path and the durable
         # Task path; exposed on the runtime so the Query API can report them.
+        from cogito.infrastructure.cognition_metrics import CognitionMetrics
         from cogito.infrastructure.multimodal_metrics import MultimodalMetrics
         multimodal_metrics = MultimodalMetrics()
+        # PLAN-16 M7 OPS-04: Memory/Knowledge 专项运行指标（进程内计数器）
+        cognition_metrics = CognitionMetrics()
 
         def _make_vision_service() -> VisionAnalysisService:
             from cogito.store.connection import get_connection as _gc
@@ -380,6 +383,9 @@ class RuntimeApplication:
         app.knowledge_service = knowledge_service
         app.knowledge_service_factory = knowledge_factory
         app.multimodal_metrics = multimodal_metrics
+        # PLAN-16 M7 OPS-04: 注入 Memory/Knowledge 专项指标（config 持有供 QueryService 读取）
+        config._cognition_metrics = cognition_metrics
+        app.cognition_metrics = cognition_metrics
         app._wakeup_event = wakeup_event
         app._recovery_counts = recovery_counts
 
