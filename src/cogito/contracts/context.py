@@ -28,6 +28,58 @@ def estimate_tokens(text: str) -> int:
     return max(1, int(len(text) / _CHARS_PER_TOKEN))
 
 
+def normalize_scores(candidates: list[RetrievalCandidate]) -> list[RetrievalCandidate]:
+    """按 candidate_type 组内 min-max 标准化 final_score（PLAN-16 M6 RET-04）。
+
+    不同来源（memory / knowledge_segment / ...）的原始 score 量纲不同，
+    直接比较会被高基来源主导。组内标准化后 final_score ∈ [0,1]，可跨源比较。
+    仅有一条候选的组保持原值（无法标准化）。
+    """
+    if not candidates:
+        return candidates
+    by_type: dict[str, list[tuple[int, float]]] = {}
+    for idx, c in enumerate(candidates):
+        by_type.setdefault(c.candidate_type, []).append((idx, c.final_score))
+    new_scores: dict[int, float] = {}
+    for group in by_type.values():
+        if len(group) <= 1:
+            if group:
+                new_scores[group[0][0]] = group[0][1]
+            continue
+        vals = [s for _, s in group]
+        lo, hi = min(vals), max(vals)
+        span = hi - lo
+        for idx, s in group:
+            new_scores[idx] = (s - lo) / span if span > 0 else 0.0
+    if not new_scores:
+        return candidates
+    out = []
+    for idx, c in enumerate(candidates):
+        ns = new_scores.get(idx)
+        if ns is None or ns == c.final_score:
+            out.append(c)
+        else:
+            out.append(RetrievalCandidate(
+                candidate_type=c.candidate_type,
+                candidate_id=c.candidate_id,
+                principal_id=c.principal_id,
+                scope=c.scope,
+                content_ref=c.content_ref,
+                source_refs=c.source_refs,
+                keyword_score=c.keyword_score,
+                semantic_score=c.semantic_score,
+                recency_score=c.recency_score,
+                importance_score=c.importance_score,
+                trust_score=c.trust_score,
+                final_score=ns,
+                token_estimate=c.token_estimate,
+                retrieval_path=c.retrieval_path,
+                policy_version=c.policy_version,
+                exclusion_reason=c.exclusion_reason,
+            ))
+    return out
+
+
 @dataclass(frozen=True)
 class ContextItem:
     """Snapshot 中的单个上下文条目。
@@ -344,6 +396,9 @@ class ContextBuilder:
 
         candidates = self._build_knowledge_candidates(results)
 
+        # PLAN-16 M6 RET-04: 组内标准化，使 knowledge 分数可与其他源比较
+        candidates = normalize_scores(candidates)
+
         # PLAN-13/R-12: 按 knowledge_segment 源预算配额选择
         knowledge_budget = self._budget_config.quota(
             "knowledge_segment", max(1, self._max_input_tokens),
@@ -370,8 +425,14 @@ class ContextBuilder:
                 retrieval_path=c.retrieval_path,
                 provenance=(
                     ("resource_id", resource_id),
+                    ("segment_id", c.candidate_id),
+                    ("keyword_score", f"{c.keyword_score:.3f}"),
+                    ("semantic_score", f"{c.semantic_score:.3f}"),
+                    ("final_score", f"{c.final_score:.3f}"),
                     ("retrieval_path", c.retrieval_path),
+                    ("token_estimate", str(c.token_estimate)),
                     ("policy_version", self._policy_version),
+                    ("query_plan_version", self._query_plan_version),
                 ),
             ))
         return output
@@ -523,6 +584,9 @@ class ContextBuilder:
             all_memories, session_id, conversation_id,
         )
 
+        # PLAN-16 M6 RET-04: 组内标准化，使 memory 分数可与其他源比较
+        candidates = normalize_scores(candidates)
+
         # PLAN-13/R-12: 按 memory 源预算配额选择候选
         memory_budget = self._memory_budget_tokens()
         selected = self._select_candidates_by_budget(candidates, memory_budget)
@@ -532,11 +596,23 @@ class ContextBuilder:
 
         lines = ["<relevant_memories>"]
         memory_ids: list[str] = []
-        for c in selected:
+        for position, c in enumerate(selected, 1):
             lines.append(f"  {c.content_ref}")
             memory_ids.append(c.candidate_id)
         lines.append("</relevant_memories>")
         content = "\n".join(lines)
+        # PLAN-16 M6 RET-05: Snapshot provenance 增加 score 分项与选择位置
+        selected_score = max(c.final_score for c in selected) if selected else 0.0
+        provenance = (
+            ("source_count", str(len(selected))),
+            ("pool_size", str(len(candidates))),
+            ("top_score", f"{selected_score:.3f}"),
+            ("avg_score", f"{(sum(c.final_score for c in selected) / len(selected)):.3f}"
+             if selected else "0.0"),
+            ("retrieval_path", "list"),
+            ("policy_version", self._policy_version),
+            ("query_plan_version", self._query_plan_version),
+        )
         item = ContextItem(
             item_type="memory",
             item_id="_injected_memory",
@@ -545,13 +621,9 @@ class ContextBuilder:
             trust_label="verified",
             content=content,
             role="system",
-            score=max(c.final_score for c in selected) if selected else 0.0,
+            score=selected_score,
             retrieval_path="list",
-            provenance=(
-                ("source_count", str(len(selected))),
-                ("pool_size", str(len(candidates))),
-                ("policy_version", self._policy_version),
-            ),
+            provenance=provenance,
         )
         return [item], memory_ids
 
