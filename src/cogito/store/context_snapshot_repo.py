@@ -40,6 +40,8 @@ class ContextSnapshotRecord:
     items: list[SnapshotItem] = field(default_factory=list)
     per_source_tokens: dict[str, int] = field(default_factory=dict)
     exclusion_stats: dict[str, int] = field(default_factory=dict)
+    # PLAN-16 M6 #14 完整：每条被排除候选的完整 provenance (score 分项 + 排除原因)
+    excluded: list[dict[str, Any]] = field(default_factory=list)
 
 
 class ContextSnapshotRepository:

@@ -122,12 +122,12 @@ def insert_segment(conn: sqlite3.Connection, seg: KnowledgeSegment) -> Knowledge
     conn.execute(
         "INSERT OR REPLACE INTO knowledge_segments ("
         "  segment_id, document_id, ordinal, segment_kind, text_ref_or_inline, "
-        "  content_hash, token_count, heading_path, start_offset, end_offset, "
-        "  embedding_status, created_at, updated_at, deleted_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "  payload_ref, content_hash, token_count, heading_path, start_offset, "
+        "  end_offset, embedding_status, created_at, updated_at, deleted_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             seg.segment_id, seg.document_id, seg.ordinal, seg.segment_kind,
-            seg.text_ref_or_inline, seg.content_hash, seg.token_count,
+            seg.text_ref_or_inline, seg.payload_ref, seg.content_hash, seg.token_count,
             seg.heading_path, seg.start_offset, seg.end_offset,
             seg.embedding_status, seg.created_at.isoformat(),
             seg.updated_at.isoformat() if seg.updated_at else None,
@@ -181,6 +181,7 @@ def _row_to_segment(d: dict[str, Any]) -> KnowledgeSegment:
         ordinal=int(d.get("ordinal", 0)),
         segment_kind=d.get("segment_kind", "paragraph"),
         text_ref_or_inline=d.get("text_ref_or_inline", ""),
+        payload_ref=d.get("payload_ref", ""),
         content_hash=d.get("content_hash", ""),
         token_count=int(d.get("token_count", 0)),
         heading_path=d.get("heading_path", ""),
@@ -239,15 +240,21 @@ def ensure_knowledge_fts(conn: sqlite3.Connection) -> bool:
         return False
 
 
-def rebuild_knowledge_fts(conn: sqlite3.Connection) -> None:
-    """全量重建知识 FTS 索引（幂等，仅含未删段落地）。PLAN-13 P13-09。"""
+def rebuild_knowledge_fts(conn: sqlite3.Connection, make_payload_store=None) -> None:
+    """全量重建知识 FTS 索引（幂等，仅含未删段落地）。PLAN-13 P13-09 + PLAN-16 完整。"""
     try:
+        from cogito.service.knowledge.resolver import resolve_segment_text
         conn.execute("DELETE FROM knowledge_fts")
-        conn.execute(
-            "INSERT INTO knowledge_fts (segment_id, text) "
-            "SELECT segment_id, text_ref_or_inline FROM knowledge_segments "
-            "WHERE deleted_at IS NULL AND text_ref_or_inline != ''"
-        )
+        rows = conn.execute(
+            "SELECT * FROM knowledge_segments WHERE deleted_at IS NULL"
+        ).fetchall()
+        for r in rows:
+            text = resolve_segment_text(conn, dict(r), make_payload_store)
+            if text:
+                conn.execute(
+                    "INSERT INTO knowledge_fts (segment_id, text) VALUES (?, ?)",
+                    (r["segment_id"], text),
+                )
     except sqlite3.OperationalError:
         pass
 
@@ -288,8 +295,12 @@ def purge_segments_for_resource(
 
 def search_knowledge_fts(
     conn: sqlite3.Connection, query: str, limit: int = 8,
+    make_payload_store=None,
 ) -> list[tuple[str, float]]:
-    """全文检索知识段落，返回 (segment_id, score)。"""
+    """全文检索知识段落，返回 (segment_id, score)。
+
+    PLAN-16 完整：make_payload_store 提供时 resolver 化 payload 段落。
+    """
     import re
     if not query:
         return []
@@ -301,7 +312,7 @@ def search_knowledge_fts(
         # 延迟同步：如果 FTS 表为空但 segment 有数据，先重建
         cnt = conn.execute("SELECT COUNT(*) c FROM knowledge_fts").fetchone()["c"]
         if cnt == 0:
-            rebuild_knowledge_fts(conn)
+            rebuild_knowledge_fts(conn, make_payload_store=make_payload_store)
         rows = conn.execute(
             "SELECT f.segment_id FROM knowledge_fts AS f "
             "JOIN knowledge_segments AS s ON s.segment_id=f.segment_id "
@@ -316,15 +327,21 @@ def search_knowledge_fts(
             return [(r["segment_id"], 1.0) for r in rows]
     except sqlite3.OperationalError:
         pass
-    # LIKE 降级
+    # LIKE 降级（PLAN-16 完整：resolver 化 payload 段落后匹配）
     like = f"%{query}%"
     try:
-        rows = conn.execute(
-            "SELECT segment_id FROM knowledge_segments "
-            "WHERE text_ref_or_inline LIKE ? AND deleted_at IS NULL LIMIT ?",
-            (like, limit),
+        from cogito.service.knowledge.resolver import resolve_segment_text
+        candidates = conn.execute(
+            "SELECT * FROM knowledge_segments WHERE deleted_at IS NULL",
         ).fetchall()
-        return [(r["segment_id"], 0.5) for r in rows]
+        out = []
+        for r in candidates:
+            text = resolve_segment_text(conn, dict(r), make_payload_store)
+            if text and like.strip("%") in text:
+                out.append((r["segment_id"], 0.5))
+            if len(out) >= limit:
+                break
+        return out
     except sqlite3.OperationalError:
         return []
 

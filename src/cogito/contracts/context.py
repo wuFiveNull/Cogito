@@ -190,7 +190,10 @@ class ContextSnapshot:
         object.__setattr__(self, "memory_ids", tuple(self.memory_ids))
         object.__setattr__(self, "per_source_tokens", tuple(self.per_source_tokens))
         object.__setattr__(self, "exclusion_stats", tuple(self.exclusion_stats))
-        object.__setattr__(self, "excluded", tuple(self.excluded))
+        if not hasattr(self, "excluded"):
+            object.__setattr__(self, "excluded", ())
+        else:
+            object.__setattr__(self, "excluded", tuple(self.excluded))
 
 
 class KnowledgeReader(Protocol):

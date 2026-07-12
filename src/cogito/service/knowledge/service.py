@@ -92,10 +92,13 @@ class KnowledgeService:
         conn: sqlite3.Connection,
         parser: ContentParser | None = None,
         embedder: EmbeddingPort | None = None,
+        payload_store_factory=None,
     ) -> None:
         self._conn = conn
         self._parser = parser or MarkdownParser()
         self._embedder = embedder
+        # PLAN-16 M4 完整 payload 边界：PayloadStore 工厂（供 ingest/embed/search 使用）
+        self._payload_store_factory = payload_store_factory
 
     def _emit(self, event_type: str, aggregate_id: str, payload: dict | None = None) -> None:
         from cogito.domain.events import DomainEvent
@@ -173,9 +176,14 @@ class KnowledgeService:
     # ── Ingest ──
 
     def ingest(
-        self, resource_id: str, raw_text: str,
+        self, resource_id: str, raw_text: str, payload_threshold: int = 4096,
     ) -> tuple[KnowledgeDocument, list[KnowledgeSegment]]:
-        """解析 + 切分段落地（PLAN-13 M4）。"""
+        """解析 + 切分段落地（PLAN-13 M4, PLAN-16 M4 完整 payload 边界）。
+
+        当段落正文超过 payload_threshold（默认 4096 字节）且提供 PayloadStore 工厂时，
+        正文写入 PayloadStore（content-addressed sha256），段落的 text_ref_or_inline=''、
+        仅保留 payload_ref 引用；否则内联（兼容旧行为）。
+        """
         r = knowledge_repo.get_resource(self._conn, resource_id)
         if r is None:
             raise ValueError(f"Resource not found: {resource_id}")
@@ -194,20 +202,37 @@ class KnowledgeService:
             "KnowledgeDocumentParsed", resource_id,
             {"resource_id": resource_id, "document_id": doc.document_id},
         )
-        # 切分 segments
+        # 切分 segments（PLAN-16 完整：大正文写入 PayloadStore，仅保留 payload_ref）
         segs = []
         for i, b in enumerate(blocks):
             seg = KnowledgeSegment(
                 document_id=doc.document_id,
                 ordinal=i,
                 segment_kind=self._map_kind(b.kind),
-                text_ref_or_inline=b.text[:2000],  # 首版内联（避免额外 payload store）
+                text_ref_or_inline=b.text[:2000],  # 默认内联
                 content_hash=self._hash_text(b.text),
                 token_count=max(1, len(b.text) // 4),
                 heading_path=b.heading_path,
                 start_offset=b.start_offset,
                 end_offset=b.end_offset,
             )
+            # PLAN-16 M4 完整 payload 边界：大正文 → PayloadStore
+            if (self._payload_store_factory is not None
+                    and len(b.text.encode("utf-8")) > payload_threshold):
+                try:
+                    store = self._payload_store_factory(self._conn)
+                    obj = store.put(
+                        b.text.encode("utf-8"),
+                        content_type="text/plain; charset=utf-8",
+                        retention_class="hot",
+                    )
+                    seg.text_ref_or_inline = ""
+                    seg.payload_ref = obj.payload_id
+                    seg.token_count = max(1, len(b.text) // 4)
+                except Exception as e:  # 写入失败降级内联（不断路）
+                    import logging as _logging
+                    _logging.getLogger("cogito.knowledge.service").warning(
+                        "payload store write failed, falling back to inline: %s", e)
             knowledge_repo.insert_segment(self._conn, seg)
             segs.append(seg)
         # 更新 resource 状态
@@ -256,8 +281,11 @@ class KnowledgeService:
         )
         if not pending:
             return 0
+        # PLAN-16 M4 完整 payload 边界：resolver 化 payload 段落为文本
+        from cogito.service.knowledge.resolver import resolve_segment_text
         segment_rows = [knowledge_repo.get_segment_context(self._conn, segment_id) for segment_id in pending]
-        texts = [str(item.get("text_ref_or_inline", "")) if item else "" for item in segment_rows]
+        texts = [resolve_segment_text(self._conn, item, self._payload_store_factory) if item else ""
+                 for item in segment_rows]
         vectors = await self._embedder.embed(texts)
         written = 0
         for segment_id, vector in zip(pending, vectors, strict=False):
@@ -290,7 +318,9 @@ class KnowledgeService:
         自动生成 query vector 走 hybrid retrieval（FTS + vector），不再仅 FTS-only。
         """
         merged: dict[str, tuple[float, str]] = {}
-        for segment_id, score in knowledge_repo.search_knowledge_fts(self._conn, query, limit):
+        # PLAN-16 完整：search/resolver 化 payload 段落
+        for segment_id, score in knowledge_repo.search_knowledge_fts(
+                self._conn, query, limit, make_payload_store=self._payload_store_factory):
             merged[segment_id] = (score, "keyword")
         # KNOW-06 完整：自动 query embedding（Adapter 现提供真正的同步实现）
         used_path = "keyword"

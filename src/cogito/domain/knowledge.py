@@ -95,12 +95,17 @@ class KnowledgeDocument:
 
 @dataclass
 class KnowledgeSegment:
-    """文档切分后的可检索段落地。"""
+    """文档切分后的可检索段落地。
+
+    PLAN-16 M4 完整 payload 边界：大正文写入 PayloadStore 时
+    text_ref_or_inline=''，payload_ref 保存 sha256 引用（resolver 读取）。
+    """
     segment_id: str = ""
     document_id: str = ""
     ordinal: int = 0
     segment_kind: str = SegmentKind.paragraph.value
     text_ref_or_inline: str = ""
+    payload_ref: str = ""  # PLAN-16 完整：指向 PayloadStore 的 sha256 引用
     content_hash: str = ""
     token_count: int = 0
     heading_path: str = ""
