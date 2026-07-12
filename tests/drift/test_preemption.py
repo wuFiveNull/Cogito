@@ -109,7 +109,7 @@ class TestShouldPreemptStep:
 
 class TestCheckpoint:
     def test_write_returns_json_and_updates_drift_runs(self, memory_db):
-        # 预备 drift_run 行
+        # 预备 drift_run 行 + TaskAttempt (真实 attempt_id)
         memory_db.execute(
             "INSERT INTO tasks (task_id, task_type, status, priority, idempotency_key, created_at) "
             "VALUES (?,?,?,?,?,?)",
@@ -123,6 +123,14 @@ class TestCheckpoint:
             ("dr-cp", "t-cp", "owner", "s", "1.0", "running",
              "{}", int(time.time()*1000)),
         )
+        memory_db.execute(
+            "INSERT INTO task_attempts "
+            "(task_attempt_id, task_id, attempt_no, status, lease_owner, "
+            " lease_version, lease_expires_at, started_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("att-1", "t-cp", 1, "running", "wkr", 1, int(time.time()*1000),
+             int(time.time()*1000)),
+        )
         memory_db.commit()
         ck_json = write_checkpoint(
             memory_db, drift_run_id="dr-cp", task_id="t-cp",
@@ -133,10 +141,31 @@ class TestCheckpoint:
         assert data["schema_version"] == 1
         assert data["step_index"] == 3
         assert data["cursor"] == {"i": 5}
+        assert data["attempt_id"] == "att-1"
+        # drift_runs.result_ref 指向 checkpoint
         row = memory_db.execute(
             "SELECT result_ref FROM drift_runs WHERE drift_run_id='dr-cp'"
         ).fetchone()
         assert row["result_ref"] == "drift-check:dr-cp:3"
+        # P0-03 真实持久化验证：task_checkpoints 内嵌 JSON + hash
+        ck_row = memory_db.execute(
+            "SELECT payload_json, payload_hash "
+            "FROM task_checkpoints WHERE task_id='t-cp' "
+            "ORDER BY created_at DESC LIMIT 1").fetchone()
+        assert ck_row is not None, "必须写入 task_checkpoints 行"
+        assert json.loads(ck_row["payload_json"])["step_index"] == 3
+        from cogito.store.task_checkpoint_repo import _hash_json
+        assert ck_row["payload_hash"] == _hash_json(ck_row["payload_json"])
+        # 真实 attempt 被绑定：task_attempts.checkpoint_ref 指向该 checkpoint
+        att_row = memory_db.execute(
+            "SELECT checkpoint_ref FROM task_attempts WHERE task_attempt_id='att-1'"
+        ).fetchone()
+        assert att_row["checkpoint_ref"] == "drift-check:dr-cp:3"
+        # tasks.checkpoint_ref 同步最新
+        task_row = memory_db.execute(
+            "SELECT checkpoint_ref FROM tasks WHERE task_id='t-cp'"
+        ).fetchone()
+        assert task_row["checkpoint_ref"] == "drift-check:dr-cp:3"
 
     def test_validate_compatible(self, memory_db):
         ck = json.dumps({

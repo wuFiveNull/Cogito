@@ -61,6 +61,7 @@ class Scheduler:
         drift_config: Any = None,          # DriftConfig
         config_version_id: str = "",
         memory_config: Any = None,         # MemoryWeightConfig (PLAN-16 M3 MEM-07)
+        workspace_path: str = "",          # 工作区根（扫描 workspace Skills）
     ) -> None:
         self._conn = conn
         self._clock = clock or ProductionClock()
@@ -73,6 +74,7 @@ class Scheduler:
         self._drift_config = drift_config          # DriftConfig
         self._config_version_id = config_version_id
         self._memory_config = memory_config or _DEFAULT_MEMORY_WEIGHT_CONFIG
+        self._workspace_path = workspace_path
 
     @staticmethod
     def task_type_for_connector(connector_type: str) -> str:
@@ -271,15 +273,43 @@ class Scheduler:
             _LOGGER.warning("insert drift.run task failed")
             return None
 
-        # 写 drift_runs 记录
+        # ── 选择真实 Skill（替换 "(selected-at-run)" 占位符，PLAN-17 R1 P0-01）──
+        from cogito.service.drift_skill_catalog import resolve_catalog
+        from cogito.service.drift_selector import select_skill, WEIGHTS_VERSION
+        from cogito.store.drift_repo import DriftSkillStateRepository
+
+        catalog = resolve_catalog(self._workspace_path or
+                                  getattr(self._drift_config, "workspace_path", "") or "",
+                                  self._drift_config.allow_workspace_skills)
+        skill_states = {
+            row["skill_name"]: row
+            for row in DriftSkillStateRepository(self._conn).all_states(
+                self._drift_config.default_principal_id)
+        }
+        selected = select_skill(catalog, skill_states)
+        if selected is None:
+            self._conn.rollback()
+            _LOGGER.warning("drift admission: no selectable skill; deny admission")
+            return None
+        skill_name, scores = selected
+        manifest = catalog[skill_name].manifest
+
+        # 写 drift_runs 记录（真实 skill_name + selection trace）
         repo = DriftRunRepository(self._conn)
         try:
+            selection_trace = {
+                "weights_version": WEIGHTS_VERSION,
+                "scores": {k: float(v) for k, v in scores.items()},
+                "selected": skill_name,
+            }
             run_id = repo.insert(
                 task_id=task.task_id,
                 principal_id=self._drift_config.default_principal_id,
-                skill_name="(selected-at-run)",
-                skill_version="1.0",
+                skill_name=skill_name,
+                skill_version=manifest.version,
                 admission_snapshot=result.snapshot.to_dict(),
+                selection_trace_json=selection_trace,
+                selector_version=WEIGHTS_VERSION,
             )
         except Exception:
             self._conn.rollback()

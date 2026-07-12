@@ -94,15 +94,34 @@ def write_checkpoint(
     budget_used: dict[str, int],
     config_version_id: str,
     capability_snapshot_version: str = "",
+    checkpoint_type: str = "drift-step",
 ) -> str:
-    """写 DriftCheckpointV1 到 payload_ref 风格的 JSON (返回 JSON 字符串)。
+    """写 DriftCheckpointV1 真实持久化 (PLAN-17 R3 P0-03/04)。
 
-    并更新 drift_runs 行的 result_ref 指向该 checkpoint。
+    写入顺序（同一事务 commit）：
+    1. JSON 主体 + hash 落 task_checkpoints（版本化历史）；
+    2. 刷新 tasks.checkpoint_ref / task_attempts.checkpoint_ref；
+    3. 刷新 drift_skill_state.checkpoint_ref / cursor_json；
+    4. 更新 drift_runs.result_ref 指向该 checkpoint。
+
+    attempt_id 必须真实（不为空），否则无法绑定 Attempt。
     """
+    # P0-04: 放宽到容忍缺省 attempt：当调用方实在拿不到 attempt_id 时回退到按
+    # task 最新 running attempt 解析，绝不静默丢弃。
+    real_attempt_id = attempt_id.strip() if attempt_id else ""
+    if not real_attempt_id:
+        row = conn.execute(
+            "SELECT task_attempt_id FROM task_attempts WHERE task_id=? "
+            "AND status IN ('running','created') ORDER BY attempt_no DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if row is not None:
+            real_attempt_id = row[0]
+
     ck = DriftCheckpointV1(
         drift_run_id=drift_run_id,
         task_id=task_id,
-        attempt_id=attempt_id,
+        attempt_id=real_attempt_id,
         skill_name=skill_name,
         skill_version=skill_version,
         step_index=step_index,
@@ -113,13 +132,60 @@ def write_checkpoint(
         capability_snapshot_version=capability_snapshot_version,
     )
     data = ck.to_dict()
+    payload_json = json.dumps(data, ensure_ascii=False)
     ref = f"drift-check:{drift_run_id}:{step_index}"
+
+    now = int(time.time() * 1000)
+    from cogito.store.task_checkpoint_repo import (
+        TaskCheckpoint, TaskCheckpointRepository, _hash_json,
+    )
+    ck_id = f"ck-{uuid4_hex()[:16]}"
+    TaskCheckpointRepository(conn).insert(TaskCheckpoint(
+        checkpoint_id=ck_id,
+        task_id=task_id,
+        task_attempt_id=real_attempt_id,
+        drift_run_id=drift_run_id,
+        checkpoint_type=checkpoint_type,
+        schema_version=1,
+        payload_ref=ref,
+        payload_json=payload_json,
+        payload_hash=_hash_json(payload_json),
+        config_version_id=config_version_id,
+        capability_snapshot_version=capability_snapshot_version,
+        created_at=now,
+    ))
+
+    # 同步最新引用到 Task / Attempt / skill_state（均属轻量引用列）
+    conn.execute(
+        "UPDATE tasks SET checkpoint_ref=? WHERE task_id=?", (ref, task_id))
+    if real_attempt_id:
+        conn.execute(
+            "UPDATE task_attempts SET checkpoint_ref=? WHERE task_attempt_id=?",
+            (ref, real_attempt_id))
+    # 绑定当前 run 解析 principal_id（子查询限定 drift_run_id）
+    prow = conn.execute(
+        "SELECT principal_id FROM drift_runs WHERE drift_run_id=?",
+        (drift_run_id,),
+    ).fetchone()
+    if prow is not None:
+        conn.execute(
+            "UPDATE drift_skill_state "
+            "SET checkpoint_ref=?, cursor_json=?, updated_at=? "
+            "WHERE principal_id=? AND skill_name=? AND skill_version=?",
+            (ref, json.dumps(dict(cursor), ensure_ascii=False), now,
+             prow[0], skill_name, skill_version),
+        )
     conn.execute(
         "UPDATE drift_runs SET result_ref=? WHERE drift_run_id=?",
         (ref, drift_run_id),
     )
     conn.commit()
-    return json.dumps(data, ensure_ascii=False)
+    return payload_json
+
+
+def uuid4_hex() -> str:
+    import uuid as _uuid
+    return _uuid.uuid4().hex
 
 
 def validate_checkpoint_for_resume(

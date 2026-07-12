@@ -761,6 +761,7 @@ class RuntimeApplication:
             drift_config=self.config.drift,
             config_version_id=self.config.config_version,
             memory_config=self.config.memory.weight,
+            workspace_path=self.config.workspace_path,
         )
 
         # 启动启用的 Channel Adapter（如 QQ）

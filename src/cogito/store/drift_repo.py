@@ -23,16 +23,22 @@ class DriftRunRepository:
 
     def insert(self, *, task_id: str, principal_id: str, skill_name: str,
                skill_version: str, admission_snapshot: dict[str, Any],
-               status: str = "admitted") -> str:
+               status: str = "admitted",
+               selection_trace_json: dict[str, Any] | None = None,
+               selector_version: str | None = None) -> str:
         now = int(time.time() * 1000)
         run_id = f"dr-{uuid.uuid4().hex[:16]}"
         self._conn.execute(
             "INSERT INTO drift_runs "
             "(drift_run_id, task_id, principal_id, skill_name, skill_version, "
-            " status, admission_snapshot_json, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?)",
+            " status, admission_snapshot_json, created_at, "
+            " selection_trace_json, selector_version) "
+            "VALUES (?,?,?,?,?,?,?,?, ?,?)",
             (run_id, task_id, principal_id, skill_name, skill_version,
-             status, json.dumps(admission_snapshot, ensure_ascii=False), now),
+             status, json.dumps(admission_snapshot, ensure_ascii=False), now,
+             json.dumps(selection_trace_json, ensure_ascii=False)
+             if selection_trace_json is not None else None,
+             selector_version),
         )
         self._conn.commit()
         return run_id

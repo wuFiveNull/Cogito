@@ -88,13 +88,18 @@ def handle_drift_run(task: Task, ctx: Any) -> str:
 
 
 def _start_drift_run(run: _RunContext) -> str:
-    """从 step 0 启动多步循环。"""
+    """从 step 0 启动多步循环；resume 时由 run.resume_* 恢复状态 (P0-04)。"""
     from cogito.service.drift_preemption import should_preempt_step, write_checkpoint
 
-    step_index = 0
-    completed_actions: list[str] = []
-    budget_used: dict[str, int] = {"tool_calls": 0, "model_calls": 0}
-    cursor: dict[str, Any] = {}
+    # P0-04：resume 时从 checkpoint 恢复 step/cursor/budget/actions
+    step_index = run.resume_from_step
+    completed_actions: list[str] = list(run.resume_completed_actions)
+    budget_used: dict[str, int] = dict(run.resume_budget)
+    if not budget_used:
+        # 确保工具/模型计数器基准存在，避免后续累加 KeyError
+        budget_used.setdefault("tool_calls", 0)
+        budget_used.setdefault("model_calls", 0)
+    cursor: dict[str, Any] = dict(run.resume_cursor)
     started_ms = int(time.time() * 1000)
     max_steps = max(1, run.manifest.max_steps)
     max_runtime_ms = max(1, run.manifest.max_runtime_seconds) * 1000
@@ -124,7 +129,7 @@ def _start_drift_run(run: _RunContext) -> str:
             lease_valid=lease_ok, budget_remaining=_budget_remaining(run, budget_used),
         )
         if preempted:
-            ck_json = write_checkpoint(
+            write_checkpoint(
                 run.conn, drift_run_id=run.drift_run_id, task_id=run.task.task_id,
                 attempt_id="", skill_name=run.manifest.name,
                 skill_version=run.manifest.version, step_index=step_index,
@@ -136,8 +141,19 @@ def _start_drift_run(run: _RunContext) -> str:
                           reason_code=reason,
                           budget_used=budget_used, steps_taken=step_index,
                           result_ref=f"drift-check:{run.drift_run_id}:{step_index}")
-            # 释放 Lease：通过正常返回让 TaskWorker complete() 释放
-            return f"drift.run {run.drift_run_id}: paused ({reason}, step {step_index})"
+            # P0-02：在暂停同一事务里创建 follow-up 任务（绕过 admission
+            # 的 already-active 守门，因为 paused 状态会 block 重入）。
+            if reason != DriftReasonCode.paused_budget_exhausted:
+                _create_resume_followup(
+                    run.conn,
+                    resume_drift_run_id=run.drift_run_id,
+                    resume_step=step_index, resume_cursor=cursor,
+                    resume_budget=budget_used, completed_actions=completed_actions,
+                    skill_name=run.manifest.name,
+                    config_version_id=run.config_version_id,
+                )
+            reason_label = reason.value if hasattr(reason, "value") else str(reason)
+            return f"drift.run {run.drift_run_id}: paused ({reason_label}, step {step_index})"
 
         # ② 执行单步
         try:
@@ -188,49 +204,85 @@ def _start_drift_run(run: _RunContext) -> str:
 
 
 def _resume_drift_run(run: _RunContext, run_row: Any) -> str:
-    """真正的 resume：读 checkpoint → 校验版本 → 从 step_index+1 续跑 (R7)。"""
+    """真正的 resume：读持久化 checkpoint 校验版本 → 从 pause step 续跑 (P0-02/04)。
+
+    版本权威的 checkpoint 来源优先级：
+    1. 持久化 task_checkpoints 表（写入时 snapshot，不受当前 config_version 影响）；
+    2. follow-up Task payload_ref（P0-02 follow-up 携带）。
+    当前 config_version 只作为「当前值」用于与历史做 diff，不可回退用作历史值，
+   否则版本变化永远被掩盖。
+    """
+    from cogito.service.drift_preemption import DriftCheckpointV1
     from cogito.service.drift_preemption import validate_checkpoint_for_resume
     from cogito.store.drift_repo import DriftRunRepository
+    from cogito.store.task_checkpoint_repo import TaskCheckpointRepository
 
-    result_ref = run_row["result_ref"]  # e.g., drift-check:{run_id}:{step}
-    # 解析 step index
-    try:
-        resume_step = int(result_ref.rsplit(":", 1)[-1])
-    except Exception:
-        resume_step = (run_row["steps_taken"] or 0)
+    stored = TaskCheckpointRepository(run.conn).latest_for_task(run.task.task_id)
+    # follow-up payload（P0-02）；仅作兜底，config_version 以 stored 为准
+    payload: dict[str, Any] = {}
+    payload_ref = getattr(run.task, "payload_ref", None)
+    if payload_ref:
+        try:
+            payload = json.loads(payload_ref)
+        except Exception:
+            payload = {}
 
-    # 读 checkpoint JSON（从 result_ref 或 drift_runs 行）
-    ck_row = run.conn.execute(
-        "SELECT result_ref FROM drift_runs WHERE drift_run_id=?", (run.drift_run_id,),
-    ).fetchone()
-    # checkpoint 实际 JSON 以 result_ref 为引用标识，内容存于 DriftCheckpointV1 ——
-    # 简化：resume 时由调用方把 checkpoint JSON 通过 Task payload_ref 传入；
-    # 此处做版本校验（基于 config_version_id / skill_version）。
-    compatible, reason = validate_checkpoint_for_resume(
-        "{}",  # 占位：真正的 checkpoint JSON 由 projection 服务提供；版本字段仍校验
-        current_config_version_id=run.config_version_id,
-        current_skill_version=run.manifest.version,
-    )
+    # 以持久化 snapshot（stored）优先恢复 step/cursor/budget/actions
+    stored_data: dict[str, Any] = (
+        json.loads(stored.payload_json) if stored else {})
+    resume_step = int(
+        stored_data.get("step_index")
+        or payload.get("resume_step")
+        or _step_from_result_ref(
+            run_row["result_ref"] if result_ref_idx(run_row) else None))
+    resume_cursor = (stored_data.get("cursor")
+                     or payload.get("resume_cursor", {}))
+    resume_budget = (stored_data.get("budget_used")
+                     or payload.get("resume_budget", {}))
+    resume_actions = (stored_data.get("completed_actions")
+                      or payload.get("completed_actions", []))
+
+    # 校验：以 persistence 时刻 snapshot 的 config_version 与当前对比（P0-04）
+    if stored is not None:
+        compatible, reason = validate_checkpoint_for_resume(
+            stored.payload_json,
+            current_config_version_id=run.config_version_id,
+            current_skill_version=run.manifest.version,
+        )
+    else:
+        compatible, reason = True, ""
     if not compatible:
         DriftRunRepository(run.conn).update_status(
             run.drift_run_id, DriftRunStatus.needs_review.value,
             preemption_reason=f"resume incompatible: {reason}")
         return f"drift.run {run.drift_run_id}: needs_review ({reason})"
 
-    # 恢复累计状态
-    prev_budget = {}
-    if run_row["budget_used_json"]:
-        try:
-            prev_budget = json.loads(run_row["budget_used_json"])
-        except Exception:
-            prev_budget = {}
+    # 恢复累计状态，由 _start_drift_run 消费（P0-04）
     run.resume_from_step = resume_step
-    run.resume_budget = prev_budget
+    run.resume_budget = dict(resume_budget)
+    run.resume_completed_actions = list(resume_actions)
+    run.resume_cursor = dict(resume_cursor)
 
     # 从 resume_step 续跑（预算继续累计）
     resume_summary = _start_drift_run(run)
-    # 在返回中标注 resume
     return resume_summary + " [resumed]"
+
+
+def result_ref_idx(run_row: Any) -> Any:
+    """取 sqlite3.Row 的 result_ref 列值（兼容 dict / Row）。"""
+    try:
+        return run_row["result_ref"]
+    except Exception:
+        return None
+
+
+def _step_from_result_ref(result_ref: Any) -> int:
+    if result_ref is None:
+        return 0
+    try:
+        return int(str(result_ref).rsplit(":", 1)[-1])
+    except Exception:
+        return 0
 
 
 def _execute_skill_step(run: _RunContext, step_index: int,
@@ -264,12 +316,82 @@ def _step_policy_view_audit(run: _RunContext, step_index: int,
             "summary": summary}
 
 
+def _create_resume_followup(
+    conn,
+    *,
+    resume_drift_run_id: str,
+    resume_step: int,
+    resume_cursor: dict[str, Any],
+    resume_budget: dict[str, int],
+    completed_actions: list[str],
+    skill_name: str,
+    config_version_id: str,
+) -> str | None:
+    """P0-02：暂停后创建 follow-up 任务，绕过 admission 的 already-active 守门。
+
+    paused 状态会被 Scheduler.admit() 判为 drift_already_active 而拒绝重入。
+    通过在同一事务内直接写一个新的 queued Task (origin=drift-resume)，并让
+    Worker 领取新 Attempt，从 pause 的 step 续跑，实现"真正 resume"。
+    """
+    import uuid
+    idempotency = f"drift-resume:{resume_drift_run_id}:{resume_step}"
+    # 幂等：同一 pause 点不重复创建 follow-up
+    existing = conn.execute(
+        "SELECT task_id FROM tasks WHERE idempotency_key=?", (idempotency,),
+    ).fetchone()
+    if existing is not None:
+        return existing[0]
+    payload = {
+        "resume_drift_run_id": resume_drift_run_id,
+        "resume_step": resume_step,
+        "resume_cursor": dict(resume_cursor),
+        "resume_budget": dict(resume_budget),
+        "completed_actions": list(completed_actions),
+        "skill_name": skill_name,
+        "config_version_id": config_version_id,
+    }
+    task_id = f"task-dr-{uuid.uuid4().hex[:16]}"
+    conn.execute(
+        "INSERT INTO tasks "
+        "(task_id, task_type, payload_ref, status, priority, "
+        " idempotency_key, origin, created_at) "
+        "VALUES (?,?,?,?, ?,?,?,?)",
+        (task_id, "drift.run",
+         __import__("json").dumps(payload, ensure_ascii=False),
+         "queued", 5, idempotency, "drift-resume",
+         int(time.time() * 1000)),
+    )
+    # 注意：不改动 drift_runs.task_id，保持与原始 task 的关联（任务 T 完成/关
+    # 联不变）。follow-up 任务通过 payload.resume_drift_run_id 自我定位。
+    conn.commit()
+    _LOGGER.info("drift resume follow-up created: %s for run %s @step %s",
+                 task_id, resume_drift_run_id, resume_step)
+    return task_id
+
+
 def _resolve_drift_run_id(conn, task: Task) -> str | None:
-    """通过 task_id 找 drift_run_id。"""
+    """通过 task_id 找 drift_run_id；follow-up 任务通过 payload.resume_drift_run_id 定位。"""
     row = conn.execute(
         "SELECT drift_run_id FROM drift_runs WHERE task_id=?", (task.task_id,),
     ).fetchone()
-    return row[0] if row else None
+    if row is not None:
+        return row[0]
+    # follow-up 任务 (origin=drift-resume) 带新的 task_id，由 payload 指向原始 run
+    payload_ref = getattr(task, "payload_ref", None)
+    if payload_ref:
+        try:
+            payload = json.loads(payload_ref)
+        except Exception:
+            payload = {}
+        resume_run_id = payload.get("resume_drift_run_id")
+        if resume_run_id:
+            row = conn.execute(
+                "SELECT drift_run_id FROM drift_runs WHERE drift_run_id=?",
+                (resume_run_id,),
+            ).fetchone()
+            if row is not None:
+                return row[0]
+    return None
 
 
 def _resolve_manifest(conn, run_id: str) -> DriftSkillManifest | None:

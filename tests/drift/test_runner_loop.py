@@ -61,9 +61,9 @@ def _seed_run(conn, run_id, task_id):
 
 
 class _Ctx:
-    def __init__(self, conn, lease_checker=None):
+    def __init__(self, conn, lease_checker=None, config_version_id="cfg-1"):
         self.connection_factory = lambda p=conn: p
-        self.config_version_id = "cfg-1"
+        self.config_version_id = config_version_id
         self.workspace_path = ""
         self.lease_checker = lease_checker
 
@@ -138,34 +138,94 @@ class TestPreemptionAtSafePoint:
 
 class TestResume:
     def test_resume_from_paused(self, memory_db):
-        """paused run 能被 handle_drift_run 再次触发 resume 续跑。"""
-        _seed_run(memory_db, "dr-6", "t-6")
+        """paused run resume 后必须精确标注 [resumed] 且最终 completed。"""
+        now = int(time.time() * 1000)
+        memory_db.execute(
+            "INSERT INTO tasks (task_id, task_type, status, priority, idempotency_key, created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            ("t-6", "drift.run", "running", 5, "idemp-6", now),
+        )
+        memory_db.execute(
+            "INSERT INTO drift_runs (drift_run_id, task_id, principal_id, "
+            "skill_name, skill_version, status, admission_snapshot_json, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("dr-6", "t-6", "owner", "proactive-policy-view-audit",
+             "1.0", "running", "{}", now),
+        )
+        # seed TaskAttempt（被 write_checkpoint 用于绑定真实 attempt_id）
+        memory_db.execute(
+            "INSERT INTO task_attempts "
+            "(task_attempt_id, task_id, attempt_no, status, "
+            " lease_owner, lease_version, lease_expires_at, started_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("att-6", "t-6", 1, "running", "wkr", 1, now, now),
+        )
+        memory_db.commit()
         task = Task(task_id="t-6", task_type="drift.run", status=TaskStatus.running)
-        # 先抢占暂停
+        # step 0 前抢占暂停
         request_preemption(memory_db, "owner", "new_turn")
-        first = handle_drift_run(task, _Ctx(memory_db))
+        first = handle_drift_run(task, _Ctx(memory_db, config_version_id="cfg-X"))
         assert "paused" in first
 
-        # 再次触发同一 task → resume 路径
+        # 真实 resume：再次调用，必须解析 follow-up payload 真正续跑
         resume_task = Task(task_id="t-6", task_type="drift.run",
                            status=TaskStatus.running)
-        second = handle_drift_run(resume_task, _Ctx(memory_db))
-        assert "resumed" in second.lower() or "completed" in second or "needs_review" in second
+        second = handle_drift_run(resume_task,
+                                  _Ctx(memory_db, config_version_id="cfg-X"))
+        # 严格断言：必须标注 [resumed] 且最终 completed（不接受任意非空字符串）
+        assert "resumed" in second.lower(), f"resume 必须标注 [resumed]：{second}"
+        assert "completed" in second.lower(), f"resume 后应完成：{second}"
+        # 预算跨 Attempt 累计
+        row = memory_db.execute(
+            "SELECT budget_used_json FROM drift_runs WHERE drift_run_id='dr-6'"
+        ).fetchone()
+        import json
+        budget = json.loads(row["budget_used_json"])
+        assert budget.get("tool_calls", 0) >= 2, f"跨 Attempt 预算未累计：{budget}"
 
     def test_needs_review_on_version_mismatch(self, memory_db):
-        """config_version 变化 → resume 校验拒绝 → needs_review。"""
-        _seed_run(memory_db, "dr-7", "t-7")
-        request_preemption(memory_db, "owner", "new_turn")
+        """config_version 变化 → resume 校验严格拒绝 → needs_review + waiting Task。"""
+        now = int(time.time() * 1000)
+        memory_db.execute(
+            "INSERT INTO tasks (task_id, task_type, status, priority, idempotency_key, created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            ("t-7", "drift.run", "running", 5, "idemp-7", now),
+        )
+        memory_db.execute(
+            "INSERT INTO drift_runs (drift_run_id, task_id, principal_id, "
+            "skill_name, skill_version, status, admission_snapshot_json, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("dr-7", "t-7", "owner", "proactive-policy-view-audit",
+             "1.0", "running", "{}", now),
+        )
+        memory_db.execute(
+            "INSERT INTO task_attempts "
+            "(task_attempt_id, task_id, attempt_no, status, "
+            " lease_owner, lease_version, lease_expires_at, started_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("att-7", "t-7", 1, "running", "wkr", 1, now, now),
+        )
+        memory_db.commit()
         task = Task(task_id="t-7", task_type="drift.run", status=TaskStatus.running)
-        handle_drift_run(task, _Ctx(memory_db))  # paused
+        request_preemption(memory_db, "owner", "new_turn")
+        first = handle_drift_run(task, _Ctx(memory_db, config_version_id="cfg-old"))
+        assert "paused" in first
 
-        # 用不同 config_version_id resume → 校验拒绝
+        # 用不同 config_version_id resume → 真实 JSON 校验拒绝
         resume_task = Task(task_id="t-7", task_type="drift.run",
                            status=TaskStatus.running)
-        result = handle_drift_run(resume_task, _Ctx(memory_db))
-        # 占位校验 JSON 为 "{}" 且无 config_version_id → 兼容；该路径需要真实 checkpoint
-        # 才能触发不兼容 —— 此处验证 needs_review 路径存在，不强制触发
-        assert result  # 不抛异常即通过
+        result = handle_drift_run(resume_task,
+                                  _Ctx(memory_db, config_version_id="cfg-new"))
+        # 严格断言：必须明确返回 needs_review + 说明 config_version changed
+        assert "needs_review" in result, \
+            f"config 版本变化必须进入 needs_review：{result}"
+        assert "config_version" in result, f"必须说明原因：{result}"
+        # drift_run 投影必须同步 needs_review
+        row = memory_db.execute(
+            "SELECT status, preemption_reason FROM drift_runs WHERE drift_run_id='dr-7'"
+        ).fetchone()
+        assert row["status"] == "needs_review"
+        assert "config_version" in (row["preemption_reason"] or "")
 
     def test_budget_accumulates_across_attempts(self, memory_db):
         """resume 后 budget 累计不重置（基于 update_progress 累加）。"""
