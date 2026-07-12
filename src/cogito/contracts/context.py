@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from cogito.contracts.budget import TokenBudgetConfig, allocate_budget
+from cogito.contracts.budget import TokenBudgetConfig, allocate_budget, select_candidates
 from cogito.contracts.clock import Clock, ProductionClock, epoch_ms
 from cogito.contracts.memory import MemoryReader
 from cogito.contracts.multimodal import MultimodalContextReader
@@ -126,6 +126,57 @@ def normalize_scores(candidates: list[RetrievalCandidate]) -> list[RetrievalCand
                 exclusion_reason=c.exclusion_reason,
             ))
     return out
+
+
+def _candidate_provenance(candidate: RetrievalCandidate, *, reason: str = "") -> dict[str, Any]:
+    """构建被排除候选的完整 provenance dict（PLAN-16 M6 #14 完整）。
+
+    保留 score 分项 + 排除原因，供 ContextSnapshot.excluded 可解释性追溯。
+    """
+    return {
+        "candidate_type": candidate.candidate_type,
+        "candidate_id": candidate.candidate_id,
+        "principal_id": candidate.principal_id,
+        "scope": candidate.scope,
+        "keyword_score": round(candidate.keyword_score, 4),
+        "semantic_score": round(candidate.semantic_score, 4),
+        "recency_score": round(candidate.recency_score, 4),
+        "importance_score": round(candidate.importance_score, 4),
+        "trust_score": round(candidate.trust_score, 4),
+        "final_score": round(candidate.final_score, 4),
+        "token_estimate": candidate.token_estimate,
+        "retrieval_path": candidate.retrieval_path,
+        "policy_version": candidate.policy_version,
+        "exclusion_reason": reason or candidate.exclusion_reason or "",
+    }
+
+
+def _hard_filter(
+    candidates: list[RetrievalCandidate], principal_id: str,
+) -> tuple[list[RetrievalCandidate], list[RetrievalCandidate]]:
+    """硬过滤：principal/scope/trust/status/stale/superseded/duplicate（PLAN-16 完整）。
+
+    不修改输入候选（RetrievalCandidate 为 frozen），使用 replace 携带排除原因。
+    返回 (kept, excluded) —— excluded 保留完整 score 与 source refs 供 provenance 追溯。
+    """
+    import dataclasses
+    seen: set[str] = set()
+    kept: list[RetrievalCandidate] = []
+    excluded: list[RetrievalCandidate] = []
+    for c in candidates:
+        if c.principal_id and c.principal_id != principal_id:
+            excluded.append(dataclasses.replace(c, exclusion_reason="unauthorized_principal"))
+            continue
+        if c.trust_score < 0.5:
+            excluded.append(dataclasses.replace(c, exclusion_reason="trust_policy"))
+            continue
+        key = f"{c.candidate_type}:{c.candidate_id}"
+        if key in seen:
+            excluded.append(dataclasses.replace(c, exclusion_reason="duplicate"))
+            continue
+        seen.add(key)
+        kept.append(c)
+    return kept, excluded
 
 
 @dataclass(frozen=True)
@@ -306,59 +357,33 @@ class ContextBuilder:
                 role="system",
             ))
 
-        # PLAN-16 M6 #13 完整：统一预算决策（RETRIEVAL-CONTEXT §9 各站比例）
-        self._budget_allocation = allocate_budget(
-            total_budget=self._max_input_tokens, config=self._budget_config)
-
-        # 2. 注入长期记忆（阶段 3）
-        # RET-02: query = 当前用户输入内容，驱动记忆 query-aware 相关性召回
+        # ── PLAN-16 P16-14 完整：两阶段 Unified Retrieval ──────────────────────
+        # 阶段 1: 各 Retriever 召回 RetrievalCandidate（不直接生成 ContextItem）
+        # 预算分配使用局部变量（不保存在实例字段，避免上一轮 Turn 污染下一轮）
         query_text = (input_msg or {}).get("content", "") or ""
-        injection = self._inject_memories(
+
+        # 召回记忆候选
+        memory_candidates, memory_protected_ids, _ = self._recall_memories(
             principal_id, session_id, query=query_text,
         )
-        memory_items, memory_ids, memory_excluded = injection
-        items.extend(memory_items)
-        # PLAN-16 M6 #14 完整: 收集被排除 candidate 完整 provenance (score 分项+原因)
-        # 把 {id: reason} 映射转为 [{candidate_id, reason}] 以便持久化
-        all_excluded: list[dict[str, Any]] = [
-            {"candidate_id": k, "exclusion_reason": v}
-            for k, v in memory_excluded.items()
-        ]
+        # 召回知识候选
+        knowledge_candidates, _ = self._recall_knowledge(
+            principal_id, query_text,
+        ) if self._knowledge_reader is not None else ([], {})
+        # 召回 TaskState 候选
+        task_state_candidates, _ = self._recall_task_state(principal_id)
 
-        # 2b. Authorized content memory.  It is an independent source and can be
-        # disabled without changing the existing fact-memory path.
-        if input_msg and self._knowledge_reader is not None:
-            knowledge_items, knowledge_excluded = self._inject_knowledge(
-                principal_id, input_msg.get("content", ""),
-            )
-            items.extend(knowledge_items)
-            all_excluded.extend(
-                {"candidate_id": k, "exclusion_reason": v}
-                for k, v in knowledge_excluded.items()
-            )
-
-        # 2c. Task/Checkpoint state（PLAN-16 M6 #12 完整：TaskStateRetriever）
-        task_state_items, task_state_excluded = self._inject_task_state(principal_id)
-        items.extend(task_state_items)
-        all_excluded.extend(
-            {"candidate_id": k, "exclusion_reason": v}
-            for k, v in task_state_excluded.items()
-        )
-
-        # 3. 上下文压缩（阶段 6）+ SessionSummary 候选（PLAN-16 M6 完整）
+        # 计算总 token 比 及 SessionSummary 候选（上下文压缩）
         history_itemized = [self._message_to_item(m) for m in history]
         input_itemized = self._message_to_item(input_msg) if input_msg else None
-
         base_tokens = sum(i.tokens for i in items)
         history_tokens = sum(i.tokens for i in history_itemized)
         input_tokens = input_itemized.tokens if input_itemized else 0
         total_estimate = base_tokens + history_tokens + input_tokens
-        token_ratio = (
-            total_estimate / self._max_input_tokens
-            if self._max_input_tokens > 0 else 0
-        )
+        token_ratio = (total_estimate / self._max_input_tokens
+                       if self._max_input_tokens > 0 else 0)
 
-        summary_candidate = None
+        summary_candidates: list[RetrievalCandidate] = []
         if token_ratio >= self.BACKGROUND_THRESHOLD:
             summary = self._load_active_summary(session_id)
             if summary:
@@ -372,95 +397,122 @@ class ContextBuilder:
                         old_count += 1
                     else:
                         recent.append(msg)
-
                 if old_count > 0:
-                    # PLAN-16 M6 #12 完整: SessionSummary 作为 protected RetrievalCandidate
-                    summary_content = self._format_summary(summary["content_json"])
-                    summary_candidate = RetrievalCandidate(
+                    summary_candidates = [RetrievalCandidate(
                         candidate_type="session_summary",
                         candidate_id=summary["summary_id"],
                         principal_id=principal_id,
                         scope=session_id,
-                        content_ref=summary_content,
+                        content_ref=self._format_summary(summary["content_json"]),
                         source_refs=(session_id,),
-                        keyword_score=0.0,
-                        semantic_score=0.0,
-                        recency_score=1.0,
-                        importance_score=1.0,
-                        trust_score=1.0,
+                        recency_score=1.0, importance_score=1.0, trust_score=1.0,
                         final_score=1.0,
-                        token_estimate=estimate_tokens(summary_content),
+                        token_estimate=estimate_tokens(
+                            self._format_summary(summary["content_json"])),
                         retrieval_path="summary",
                         policy_version=self._policy_version,
-                    )
+                    )]
                     history = recent
 
-        # 4. 消息候选 + 统一预算选择（PLAN-16 M6 RET-02/03/05 完整混合方案）
-        # recent-K + input = protected（永不被 budget 挤出）；older = scored 候选
-        # Emit 严格保持 receive_sequence 时序（通过所有 ordering 测试）
-        self._message_upper_bound = message_upper_bound
+        # 消息候选（recent + older）
         keep_min = min(self.KEEP_RECENT_COUNT, len(history))
-        msg_candidates = self._build_message_candidates(history, query_text, protected_indices=set())
-        protected_msg_indices = set(range(len(msg_candidates)))  # 默认全部 protected（小 budget 不裁剪时保持行为）
-
-        # 当总 token 超限时，取消低分 older 消息的 protected 标记
-        if total_estimate > self._max_input_tokens and len(msg_candidates) > keep_min:
-            protected_msg_indices = set(range(len(msg_candidates) - keep_min, len(msg_candidates)))
-
-        msg_candidates = normalize_scores(msg_candidates)
-        selected_msgs, msg_excluded = self._select_candidates_by_budget(
-            msg_candidates,
-            self._budget_allocation["recent_message"].quota,
-            protected_indices=protected_msg_indices,
+        message_candidates = self._build_message_candidates(
+            history, query_text, protected_indices=set(),
+            message_upper_bound=message_upper_bound,
         )
-        all_excluded.extend(
-            {"candidate_id": k, "exclusion_reason": v}
-            for k, v in msg_excluded.items()
+
+        # 阶段 2: 合并所有候选到统一池 → 单次 select_candidates() 决策
+        all_candidates: list[RetrievalCandidate] = []
+        all_candidates.extend(memory_candidates)
+        all_candidates.extend(knowledge_candidates)
+        all_candidates.extend(task_state_candidates)
+        all_candidates.extend(summary_candidates)
+        all_candidates.extend(message_candidates)
+
+        # protected_ids（永不挤出）：active goals / constraints / recent-K / input / summary
+        protected_ids: set[str] = set(memory_protected_ids)
+        for m in history[-keep_min:]:
+            protected_ids.add(m["message_id"])
+        for sc in summary_candidates:
+            protected_ids.add(sc.candidate_id)
+        if input_msg:
+            protected_ids.add(input_msg.get("message_id", ""))
+
+        # 硬过滤 (principal/scope/trust/status/stale/superseded/duplicate)
+        # PLAN-16 P16-14：返回 (kept, excluded)，excluded 保留完整 score 供 provenance
+        all_candidates, hard_excluded = _hard_filter(all_candidates, principal_id)
+
+        # 单次统一预算选择（PLAN-16 M6 RET-03 完整）
+        allocations = allocate_budget(total_budget=self._max_input_tokens,
+                                      config=self._budget_config)
+        selection = select_candidates(all_candidates, allocations,
+                                       protected_ids=protected_ids)
+
+        # 按语义顺序 Emit ContextItem
+        sel_by_id = {c.candidate_id: c for c in selection.selected}
+        memory_selected = [c for c in selection.selected
+                           if c.candidate_id in {mc.candidate_id for mc in memory_candidates}]
+        knowledge_selected = [c for c in selection.selected
+                              if c.candidate_id in {kc.candidate_id for kc in knowledge_candidates}]
+        task_selected = [c for c in selection.selected
+                         if c.candidate_id in {tc.candidate_id for tc in task_state_candidates}]
+        summary_selected = [c for c in selection.selected
+                            if c.candidate_type == "session_summary"]
+        message_selected = [c for c in selection.selected
+                            if c.candidate_type == "recent_message"]
+
+        # 消息按 receive_sequence 排序（满足所有 ordering 测试）
+        msg_order = {m["message_id"]: m["sequence"] for m in history}
+        message_selected.sort(key=lambda c: msg_order.get(c.candidate_id, 0))
+
+        # 按 type 顺序组装 (system → memory → knowledge → task_state → summary → messages → input)
+        mem_item = self._memory_items(memory_selected)
+        if mem_item:
+            items.append(mem_item)
+        items.extend(self._knowledge_item(c) for c in knowledge_selected)
+        items.extend(self._task_state_item(c) for c in task_selected)
+        items.extend(self._summary_item(c) for c in summary_selected)
+        items.extend(
+            self._message_to_item(next(m for m in history if m["message_id"] == c.candidate_id))
+            for c in message_selected
         )
-        # PLAN-16 M6 #14 完整: 持久化到实例, 避免 snapshot 中 excluded 为空
-        self.all_excluded = all_excluded
 
-        # 保持时序Emit：按 receive_sequence（candidate_id 对应 message 顺序）
-        selected_by_id = {c.candidate_id: c for c in selected_msgs}
-        selected_messages_in_order = [
-            m for m in history if m["message_id"] in selected_by_id
-        ]
-
-        # PLAN-16 完整：session_summary 作为 protected candidate 参与统一选择池
-        # protected 包含 summary（永不被 budget 挤出），emit 按 type 顺序
-        if summary_candidate is not None:
-            selected_summary = [summary_candidate]
-        else:
-            selected_summary = []
-
-        # 按 type 顺序组装最终 items: ... memory, summary, messages, input
-        items.extend(self._summary_item(c) for c in selected_summary)
-        items.extend(self._message_to_item(m) for m in selected_messages_in_order)
-
-        # 5. 当前用户输入（最后、protected）
+        # 当前用户输入（最后、protected）
         if input_msg:
             items.append(self._message_to_item(input_msg))
 
-        # 6. Token 超限裁剪
+        # Emergency clip（仅异常保护）
         total_tokens = sum(i.tokens for i in items)
-        excluded: list[str] = []
-
+        clip_excluded: list[RetrievalCandidate] = []
         if total_tokens > self._max_input_tokens:
-            clipped_items, excluded = self._clip_to_budget(items, input_message_id)
-            items = clipped_items
+            items, clip_excluded = self._clip_to_budget(items, input_message_id)
             total_tokens = sum(i.tokens for i in items)
+
+        # 统一选择的排除候选 + clip 排除字符串 + 硬过滤排除，合并到 provenance
+        selection_excluded: list[RetrievalCandidate] = list(selection.excluded)
+        # PLAN-16 P16-14：所有被排除候选（含硬过滤）均保留完整 score 与排除原因
+        all_excluded: list[RetrievalCandidate] = list(hard_excluded) + selection_excluded
 
         per_source: dict[str, int] = {}
         for item in items:
             per_source[item.item_type] = per_source.get(item.item_type, 0) + item.tokens
         exclusion_counts: dict[str, int] = {}
-        for value in excluded:
-            kind = value.split(":", 1)[0] if ":" in value else "token_budget"
-            exclusion_counts[kind] = exclusion_counts.get(kind, 0) + 1
-        # PLAN-16 M6 #14 完整：合并 memory/knowledge/task_state 选择阶段的排除原因
-        for prov in getattr(self, "all_excluded", []):
-            reason = prov.get("exclusion_reason", "unknown")
+        # PLAN-16 M6 #14 完整：汇总 clip、统一选择、硬过滤的排除原因
+        for c in all_excluded:
+            reason = c.exclusion_reason or "unknown"
             exclusion_counts[reason] = exclusion_counts.get(reason, 0) + 1
+        for clip in clip_excluded:
+            kind = clip.split(":", 1)[0] if ":" in clip else "token_budget"
+            exclusion_counts[kind] = exclusion_counts.get(kind, 0) + 1
+
+        provenance_excluded: list[dict] = [
+            _candidate_provenance(c, reason=c.exclusion_reason)
+            for c in all_excluded
+        ]
+        provenance_excluded += [
+            {"clip": clip, "exclusion_reason": "token_budget"}
+            for clip in clip_excluded
+        ]
 
         snapshot = ContextSnapshot(
             snapshot_id=uuid.uuid4().hex,
@@ -469,21 +521,21 @@ class ContextBuilder:
             session_id=session_id,
             conversation_id=self._get_session_conversation(session_id),
             principal_id=principal_id,
-            memory_ids=tuple(memory_ids),
+            memory_ids=tuple(c.candidate_id for c in memory_selected),
             message_upper_bound=message_upper_bound,
             query_plan_version=self._query_plan_version,
             selection_policy_version=self._policy_version,
             items=tuple(items),
             excluded_summary=(
-                f"Excluded {len(excluded)} items: {', '.join(excluded[:10])}"
-                if excluded else ""
+                f"Excluded {len(selection_excluded) + len(clip_excluded)} items"
+                if selection_excluded or clip_excluded else ""
             ),
             total_tokens=total_tokens,
             created_at=epoch_ms(self._clock.now()),
             per_source_tokens=tuple(sorted(per_source.items())),
             exclusion_stats=tuple(sorted(exclusion_counts.items())),
             # PLAN-16 M6 #14 完整：持久化被排除候选的完整 provenance
-            excluded=tuple(getattr(self, "all_excluded", [])),
+            excluded=tuple(provenance_excluded),
         )
 
         return snapshot
@@ -519,81 +571,15 @@ class ContextBuilder:
             ))
         return candidates
 
-    def _inject_knowledge(
-        self, principal_id: str, query: str,
-    ) -> tuple[list[ContextItem], dict[str, str]]:
-        """PLAN-13/R-12: 构建知识候选 → 按 knowledge 源预算选择 → ContextItem。
-
-        返回 (选中 ContextItem 列表, excluded {candidate_id: reason})。
-        """
-        if not principal_id or not query.strip() or self._knowledge_reader is None:
-            return [], {}
-        try:
-            results = self._knowledge_reader.retrieve(
-                principal_id=principal_id, query=query, limit=self._knowledge_top_k,
-            )
-        except Exception:
-            return [], {}
-
-        candidates = self._build_knowledge_candidates(results)
-
-        # PLAN-16 M6 RET-04: 组内标准化，使 knowledge 分数可与其他源比较
-        candidates = normalize_scores(candidates)
-
-        # OPS-04 完整：记录 knowledge 候选数（选择前）
-        _record_candidates("knowledge_segment", candidates, selected=False)
-
-        # PLAN-16 M6 #13 完整：消费统一 allocate_budget 决策的 knowledge_segment 配额
-        selected, excluded = self._select_candidates_by_budget(
-            candidates, self._budget_allocation["knowledge_segment"].quota)
-
-        # OPS-04 完整：记录 knowledge 选中数 + 排除原因 + tokens
-        _record_candidates("knowledge_segment", selected, selected=True)
-        _record_exclusions("knowledge_segment", excluded)
-        _record_tokens("knowledge_segment",
-                       sum(c.token_estimate for c in selected))
-
-        output: list[ContextItem] = []
-        for c in selected:
-            resource_id = ""
-            # 反查 resource_id（通过 content 匹配原始 dict）
-            for r in results:
-                if str(r.get("segment_id", "")) == c.candidate_id:
-                    resource_id = str(r.get("resource_id", ""))
-                    break
-            output.append(ContextItem(
-                item_type="knowledge",
-                item_id=c.candidate_id,
-                source=resource_id,
-                tokens=max(1, c.token_estimate),
-                trust_label="verified" if c.trust_score >= 1.0 else "unverified",
-                content=f"<knowledge_segment>\n{c.content_ref}\n</knowledge_segment>",
-                role="system",
-                score=c.final_score,
-                retrieval_path=c.retrieval_path,
-                provenance=(
-                    ("resource_id", resource_id),
-                    ("segment_id", c.candidate_id),
-                    ("keyword_score", f"{c.keyword_score:.3f}"),
-                    ("semantic_score", f"{c.semantic_score:.3f}"),
-                    ("final_score", f"{c.final_score:.3f}"),
-                    ("retrieval_path", c.retrieval_path),
-                    ("token_estimate", str(c.token_estimate)),
-                    ("policy_version", self._policy_version),
-                    ("query_plan_version", self._query_plan_version),
-                ),
-            ))
-        return output, excluded
-
-    # ── PLAN-16 M6 #12 完整：TaskStateRetriever ─────────────────────────────
-
-    def _inject_task_state(
+    def _recall_task_state(
         self, principal_id: str,
-    ) -> tuple[list[ContextItem], dict[str, str]]:
-        """TaskStateRetriever（PLAN-16 M6 #12 / RETRIEVAL-CONTEXT §4）。
+    ) -> tuple[list[RetrievalCandidate], dict[str, str]]:
+        """PLAN-16 P16-14 完整：TaskStateRetriever（RETRIEVAL-CONTEXT §4）。
 
-        召回活跃 Task 状态作为独立检索源（RetrievalCandidate），纳入统一预算选择。
-        输出选中 ContextItem + 排除 candidate 的完整 provenance。
+        召回活跃 Task 状态作为独立检索源（只返回 RetrievalCandidate，不内部选择）。
+        与 _recall_memories / _recall_knowledge 统一模式：各来源只负责召回，
+        统一选择由 build() 内的 select_candidates() 完成。
+        返回 (candidates, excluded {id: reason})。
         """
         if not principal_id:
             return [], {}
@@ -632,30 +618,7 @@ class ContextBuilder:
             ))
         task_candidates = normalize_scores(task_candidates)
         _record_candidates("task_state", task_candidates, selected=False)
-        # PLAN-16 M6 #13 完整：消费统一 allocate_budget 决策的 task_state 配额
-        selected, excluded = self._select_candidates_by_budget(
-            task_candidates, self._budget_allocation["task_state"].quota)
-        _record_candidates("task_state", selected, selected=True)
-        _record_exclusions("task_state", excluded)
-        _record_tokens("task_state", sum(c.token_estimate for c in selected))
-        output: list[ContextItem] = []
-        for c in selected:
-            output.append(ContextItem(
-                item_type="task_state",
-                item_id=c.candidate_id,
-                source="task_state",
-                tokens=max(1, c.token_estimate),
-                trust_label="internal",
-                content=f"<active_task>\n{c.content_ref}\n</active_task>",
-                role="system",
-                score=c.final_score,
-                retrieval_path=c.retrieval_path,
-                provenance=(("candidate_type", "task_state"),
-                            ("final_score", f"{c.final_score:.3f}"),
-                            ("policy_version", self._policy_version),
-                            ("query_plan_version", self._query_plan_version)),
-            ))
-        return output, excluded
+        return task_candidates, {}
 
     # ── 内部方法（与原始 runtime/context.py 完全一致）──
 
@@ -824,12 +787,15 @@ class ContextBuilder:
         messages: list[dict],
         query: str,
         protected_indices: set[int],
+        message_upper_bound: int = 0,
     ) -> list[RetrievalCandidate]:
         """PLAN-16 M6 RET-02/03/05: 将历史消息转为 RetrievalCandidate。
 
         Recent-K 与 input 由调用方标记为 protected（永不被 budget 挤出）；
         其余按 recency + keyword overlap 评分；emit 时按 receive_sequence 保持时序，
         满足 test_ordering_system_history_input / test_current_input_is_last 等约束。
+
+        message_upper_bound 由调用方传入（不保存在实例字段，避免跨 Turn 污染）。
         """
         use_query = bool(query and query.strip())
         candidates: list[RetrievalCandidate] = []
@@ -844,7 +810,7 @@ class ContextBuilder:
                     kw_score = min(1.0, hits / len(q_terms))
             seq = int(m.get("sequence", 0))
             # recency: 用 message_upper_bound 归一化，较新 = 较高
-            denom = max(1, self._message_upper_bound)
+            denom = max(1, message_upper_bound)
             rec = seq / denom
             final = _KW_WEIGHT * kw_score + _RECENCY_WEIGHT * rec + _IMPORTANCE_WEIGHT * 0.5
             candidates.append(RetrievalCandidate(
@@ -867,23 +833,17 @@ class ContextBuilder:
             ))
         return candidates
 
-    def _candidates_to_message_items(
-        self, candidates: list[RetrievalCandidate],
-    ) -> list[dict]:
-        """RetrievalCandidate → 原始 message dict（回填 role / trust_label 用）。
-
-        仅保留候选携带的 source_refs 中的 message_id 与 content_ref；调用方
-        提供原始 message 列表用于回填 role/trust_label。
-        """
-        return candidates
-
-    def _inject_memories(
+    def _recall_memories(
         self,
         principal_id: str,
         session_id: str,
         query: str = "",
-    ) -> tuple[list[ContextItem], list[str]]:
-        """PLAN-13/R-12 + PLAN-16 M6 RET-02: 构建记忆候选 → 统一 budget 选择 → 序列化。"""
+    ) -> tuple[list[RetrievalCandidate], list[str], dict[str, str]]:
+        """PLAN-16 M6 完整：召回记忆候选（不直接生成 ContextItem / 不 select）。
+
+        返回 (candidates, protected_memory_ids, excluded {id: reason})。
+        protected_memory_ids 指向 active goal / constraint（不会被 budget 挤出）。
+        """
         if not principal_id or not self._memory_reader:
             return [], [], {}
 
@@ -901,104 +861,33 @@ class ContextBuilder:
 
         # PLAN-16 M6 RET-04: 组内标准化，使 memory 分数可与其他源比较
         candidates = normalize_scores(candidates)
+        protected_memory_ids = [candidates[i].candidate_id for i in protected_indices]
+        return candidates, protected_memory_ids, {}
 
-        # PLAN-16 M6 #13 完整: 消费统一 allocate_budget 决策的 memory 配额
-        memory_budget = self._budget_allocation["memory"].quota
-        selected, excluded = self._select_candidates_by_budget(
-            candidates, memory_budget, protected_indices=protected_indices,
-        )
-
-        if not selected:
-            return [], [], excluded
-
-        lines = ["<relevant_memories>"]
-        memory_ids: list[str] = []
-        for position, c in enumerate(selected, 1):
-            lines.append(f"  {c.content_ref}")
-            memory_ids.append(c.candidate_id)
-        lines.append("</relevant_memories>")
-        content = "\n".join(lines)
-        # PLAN-16 M6 RET-05: Snapshot provenance 增加 score 分项、选择位置与排除原因
-        selected_score = max(c.final_score for c in selected) if selected else 0.0
-        provenance = (
-            ("source_count", str(len(selected))),
-            ("pool_size", str(len(candidates))),
-            ("protected_count", str(len(protected_indices))),
-            ("excluded_count", str(len(excluded))),
-            ("top_score", f"{selected_score:.3f}"),
-            ("avg_score", f"{(sum(c.final_score for c in selected) / len(selected)):.3f}"
-             if selected else "0.0"),
-            ("retrieval_path", "list"),
-            ("policy_version", self._policy_version),
-            ("query_plan_version", self._query_plan_version),
-        )
-        item = ContextItem(
-            item_type="memory",
-            item_id="_injected_memory",
-            source="memory",
-            tokens=estimate_tokens(content),
-            trust_label="verified",
-            content=content,
-            role="system",
-            score=selected_score,
-            retrieval_path="list",
-            provenance=provenance,
-        )
-        return [item], memory_ids, excluded
-
-    def _memory_budget_tokens(self) -> int:
-        """PLAN-13/R-12: 计算记忆源可用 token 配额。
-
-        使用 TokenBudgetConfig.fact_memory_ratio 计算占比；
-        当 max_input_tokens 较小（如测试 1500）导致配额 ≤ 0 时，
-        退化为至少允许 1 条记忆（兜底，兼容旧行为）。
-        """
-        usable = max(1, self._max_input_tokens)
-        ratio = self._budget_config.fact_memory_ratio
-        budget = int(usable * ratio)
-        # 兜底：至少一条最小记忆
-        return max(budget, 200)
-
-    def _select_candidates_by_budget(
+    def _recall_knowledge(
         self,
-        candidates: list[RetrievalCandidate],
-        budget_tokens: int,
-        protected_indices: set[int] | None = None,
+        principal_id: str,
+        query: str,
     ) -> tuple[list[RetrievalCandidate], dict[str, str]]:
-        """按 final_score 降序选择候选，累计 token 不超 budget（PLAN-16 M6 RET-03/05）。
+        """PLAN-16 P16-14 完整：召回知识候选（只返回 RetrievalCandidate，不内部选择）。
 
-        RET-03：protected_indices 指向 active goal/constraint 候选，
-        这些候选不被 budget 挤出（RETRIEVAL-CONTEXT §4.1/§10.4）。
-        RET-05：返回 excluded mapping {candidate_id: reason}，记录每条被排除原因
-        （token_budget / excluded_low_score），供 Snapshot provenance 使用。
-
-        预算 ≤ 0 时仅返回 protected 候选。
+        与 _recall_memories / _recall_task_state 统一模式：各来源只负责召回，
+        统一选择由 build() 内的 select_candidates() 完成。
+        返回 (candidates, excluded {id: reason})。
         """
-        protected_indices = protected_indices or set()
-        # protected 优先按分数排；非 protected 按分数排
-        order = sorted(
-            range(len(candidates)),
-            key=lambda i: (i not in protected_indices, -candidates[i].final_score),
-        )
-        selected: list[RetrievalCandidate] = []
-        excluded: dict[str, str] = {}
-        used = 0
-        for i in order:
-            c = candidates[i]
-            if c.exclusion_reason:
-                excluded[c.candidate_id] = c.exclusion_reason
-                continue
-            if i in protected_indices:
-                # RET-03：protected 必选，不计入 budget 限制
-                selected.append(c)
-                used += max(1, c.token_estimate)
-                continue
-            if budget_tokens > 0 and used + max(1, c.token_estimate) > budget_tokens:
-                excluded[c.candidate_id] = "token_budget"
-                continue
-            selected.append(c)
-            used += max(1, c.token_estimate)
-        return selected, excluded
+        if not principal_id or not query.strip() or self._knowledge_reader is None:
+            return [], {}
+        try:
+            results = self._knowledge_reader.retrieve(
+                principal_id=principal_id, query=query, limit=self._knowledge_top_k,
+            )
+        except Exception:
+            return [], {}
+        candidates = self._build_knowledge_candidates(results)
+        # PLAN-16 M6 RET-04: 组内标准化，使 knowledge 分数可与其他源比较
+        candidates = normalize_scores(candidates)
+        _record_candidates("knowledge_segment", candidates, selected=False)
+        return candidates, {}
 
     # ── OPS-04 完整：context 指标记录 ──────────────────────────────────────
 
@@ -1163,6 +1052,80 @@ class ContextBuilder:
             provenance=(
                 ("candidate_type", cand.candidate_type),
                 ("final_score", f"{cand.final_score:.3f}"),
+                ("policy_version", cand.policy_version),
+                ("query_plan_version", self._query_plan_version),
+            ),
+        )
+
+    def _memory_items(self, cands: list["RetrievalCandidate"]) -> ContextItem:
+        """Memory 候选集合 → 单个 wrapped ContextItem（PLAN-16 完整）。
+
+        保持与旧版兼容的 <relevant_memories> 包装格式，供 Dashboard 与测试识别。
+        """
+        if not cands:
+            return None
+        lines = ["<relevant_memories>"]
+        for c in cands:
+            lines.append(f"  {c.content_ref}")
+        lines.append("</relevant_memories>")
+        content = "\n".join(lines)
+        return ContextItem(
+            item_type="memory",
+            item_id="_injected_memory",
+            source=cands[0].scope or "",
+            tokens=estimate_tokens(content),
+            trust_label="verified",
+            content=content,
+            role="system",
+            score=max(c.final_score for c in cands) if cands else 0.0,
+            retrieval_path="list",
+            provenance=(
+                ("source_count", str(len(cands))),
+                ("pool_size", str(len(cands))),
+                ("top_score", f"{max(c.final_score for c in cands):.3f}" if cands else "0"),
+                ("policy_version", self._policy_version),
+                ("query_plan_version", self._query_plan_version),
+            ),
+        )
+
+    def _knowledge_item(self, cand: "RetrievalCandidate") -> ContextItem:
+        """Knowledge candidate → ContextItem。"""
+        return ContextItem(
+            item_type="knowledge",
+            item_id=cand.candidate_id,
+            source=cand.scope or "",
+            tokens=max(1, cand.token_estimate),
+            trust_label="verified" if cand.trust_score >= 1.0 else "unverified",
+            content=f"<knowledge_segment>\n{cand.content_ref}\n</knowledge_segment>",
+            role="system",
+            score=cand.final_score,
+            retrieval_path=cand.retrieval_path,
+            provenance=(
+                ("candidate_type", cand.candidate_type),
+                ("final_score", f"{cand.final_score:.3f}"),
+                ("token_estimate", str(cand.token_estimate)),
+                ("policy_version", cand.policy_version),
+                ("query_plan_version", self._query_plan_version),
+                ("retrieval_path", cand.retrieval_path),
+            ),
+        )
+
+    def _task_state_item(self, cand: "RetrievalCandidate") -> ContextItem:
+        """TaskState candidate → ContextItem。"""
+        return ContextItem(
+            item_type="task_state",
+            item_id=cand.candidate_id,
+            source="task_state",
+            tokens=max(1, cand.token_estimate),
+            trust_label="internal",
+            content=f"<active_task>\n{cand.content_ref}\n</active_task>",
+            role="system",
+            score=cand.final_score,
+            retrieval_path=cand.retrieval_path,
+            provenance=(
+                ("candidate_type", cand.candidate_type),
+                ("final_score", f"{cand.final_score:.3f}"),
+                ("token_estimate", str(cand.token_estimate)),
                 ("policy_version", cand.policy_version),
                 ("query_plan_version", self._query_plan_version),
             ),

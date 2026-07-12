@@ -60,6 +60,15 @@ class BudgetAllocation:
         return max(0, self.quota - self.used)
 
 
+@dataclass
+class BudgetSelection:
+    """统一预算选择结果（PLAN-16 RET-03 完整）。"""
+
+    selected: list["RetrievalCandidate"] = field(default_factory=list)
+    excluded: list["RetrievalCandidate"] = field(default_factory=list)
+    allocations: "dict[str, BudgetAllocation]" = field(default_factory=dict)
+
+
 def allocate_budget(
     *,
     total_budget: int,
@@ -75,3 +84,67 @@ def allocate_budget(
         s: BudgetAllocation(source=s, quota=config.quota(s, total_budget))
         for s in sources
     }
+
+
+def select_candidates(
+    candidates: list["RetrievalCandidate"],
+    allocations: "dict[str, BudgetAllocation]",
+    *,
+    protected_ids: set[str] | None = None,
+) -> BudgetSelection:
+    """统一候选选择（PLAN-16 RET-03 完整）。
+
+    所有来源候选进入同一池；protected_ids 指向 active goal / constraint /
+    recent message / input，永不挤出；各源按配额选择，未用余额进入共享池；
+    无法容纳的候选标记排除原因。
+    """
+    from .context import normalize_scores
+
+    protected_ids = protected_ids or set()
+    # 按 source group 内部归一化（各来源 score 可比）
+    by_source: dict[str, list["RetrievalCandidate"]] = {}
+    for c in candidates:
+        by_source.setdefault(c.candidate_type, []).append(c)
+    for group in by_source.values():
+        normalize_scores(group)
+
+    # protected 先选（不计入 quota 限制）
+    protected_selected: list["RetrievalCandidate"] = [
+        c for c in candidates if c.candidate_id in protected_ids
+    ]
+
+    # 普通候选按 final_score 排序 + 按 source quota 选择
+    pool = sorted(
+        [c for c in candidates if c.candidate_id not in protected_ids],
+        key=lambda c: -c.final_score,
+    )
+    import dataclasses
+    selected: list["RetrievalCandidate"] = list(protected_selected)
+    excluded: list["RetrievalCandidate"] = []
+    for alloc in allocations.values():
+        alloc.used = 0
+        alloc.selected = []
+        alloc.excluded_reasons = {}
+
+    for c in pool:
+        alloc = allocations.get(c.candidate_type)
+        if alloc is None:
+            # PLAN-16 P16-14：frozen 候选用 replace 携带排除原因
+            excluded.append(dataclasses.replace(c, exclusion_reason="no_allocation"))
+            continue
+        if alloc.used + max(1, c.token_estimate) <= alloc.quota:
+            selected.append(c)
+            alloc.used += max(1, c.token_estimate)
+            alloc.selected.append(c.candidate_id)
+        else:
+            # 本来源配额用完，尝试共享池
+            total_remaining = sum(a.remaining for a in allocations.values())
+            if total_remaining >= max(1, c.token_estimate):
+                selected.append(c)
+                fullest = max(allocations.values(), key=lambda a: a.remaining)
+                fullest.used += max(1, c.token_estimate)
+                fullest.selected.append(c.candidate_id)
+            else:
+                excluded.append(dataclasses.replace(c, exclusion_reason="token_budget"))
+
+    return BudgetSelection(selected=selected, excluded=excluded, allocations=allocations)
