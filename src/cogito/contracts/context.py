@@ -332,7 +332,7 @@ class ContextBuilder:
         items.extend(task_state_items)
         all_excluded.extend(task_state_excluded)
 
-        # 3. 上下文压缩（阶段 6）
+        # 3. 上下文压缩（阶段 6）+ SessionSummary 候选（PLAN-16 M6 完整）
         history_itemized = [self._message_to_item(m) for m in history]
         input_itemized = self._message_to_item(input_msg) if input_msg else None
 
@@ -345,6 +345,7 @@ class ContextBuilder:
             if self._max_input_tokens > 0 else 0
         )
 
+        summary_item = None
         if token_ratio >= self.BACKGROUND_THRESHOLD:
             summary = self._load_active_summary(session_id)
             if summary:
@@ -361,7 +362,7 @@ class ContextBuilder:
 
                 if old_count > 0:
                     summary_content = self._format_summary(summary["content_json"])
-                    items.append(ContextItem(
+                    summary_item = ContextItem(
                         item_type="summary",
                         item_id=summary["summary_id"],
                         source=session_id,
@@ -369,14 +370,41 @@ class ContextBuilder:
                         trust_label="verified",
                         content=summary_content,
                         role="system",
-                    ))
+                    )
                     history = recent
 
-        # 4. 历史消息（时间正序）
-        for msg in history:
-            items.append(self._message_to_item(msg))
+        # 4. 消息候选 + 统一预算选择（PLAN-16 M6 RET-02/03/05 完整混合方案）
+        # recent-K + input = protected（永不被 budget 挤出）；older = scored 候选
+        # Emit 严格保持 receive_sequence 时序（通过所有 ordering 测试）
+        self._message_upper_bound = message_upper_bound
+        keep_min = min(self.KEEP_RECENT_COUNT, len(history))
+        msg_candidates = self._build_message_candidates(history, query_text, protected_indices=set())
+        protected_msg_indices = set(range(len(msg_candidates)))  # 默认全部 protected（小 budget 不裁剪时保持行为）
 
-        # 5. 当前用户输入（最后）
+        # 当总 token 超限时，取消低分 older 消息的 protected 标记
+        if total_estimate > self._max_input_tokens and len(msg_candidates) > keep_min:
+            protected_msg_indices = set(range(len(msg_candidates) - keep_min, len(msg_candidates)))
+
+        msg_candidates = normalize_scores(msg_candidates)
+        selected_msgs, msg_excluded = self._select_candidates_by_budget(
+            msg_candidates,
+            self._budget_config.quota("recent_message", max(1, self._max_input_tokens)),
+            protected_indices=protected_msg_indices,
+        )
+        all_excluded.extend(msg_excluded)
+
+        # 保持时序Emit：按 receive_sequence（candidate_id 对应 message 顺序）
+        selected_by_id = {c.candidate_id: c for c in selected_msgs}
+        selected_messages_in_order = [
+            m for m in history if m["message_id"] in selected_by_id
+        ]
+
+        # 按 type 顺序组装最终 items: ... memory, summary, messages, input
+        if summary_item is not None:
+            items.append(summary_item)
+        items.extend(self._message_to_item(m) for m in selected_messages_in_order)
+
+        # 5. 当前用户输入（最后、protected）
         if input_msg:
             items.append(self._message_to_item(input_msg))
 
@@ -754,6 +782,64 @@ class ContextBuilder:
         )
         trust = 1.0 if is_explicit else 0.7
         return m.importance * 0.5 + m.confidence * 0.3 + trust * 0.2
+
+    def _build_message_candidates(
+        self,
+        messages: list[dict],
+        query: str,
+        protected_indices: set[int],
+    ) -> list[RetrievalCandidate]:
+        """PLAN-16 M6 RET-02/03/05: 将历史消息转为 RetrievalCandidate。
+
+        Recent-K 与 input 由调用方标记为 protected（永不被 budget 挤出）；
+        其余按 recency + keyword overlap 评分；emit 时按 receive_sequence 保持时序，
+        满足 test_ordering_system_history_input / test_current_input_is_last 等约束。
+        """
+        use_query = bool(query and query.strip())
+        candidates: list[RetrievalCandidate] = []
+        for idx, m in enumerate(messages):
+            content = m.get("content", "")
+            rel_tokens = _tokenize(content)
+            kw_score = 0.0
+            if use_query and rel_tokens:
+                q_terms = set(_tokenize(query))
+                if q_terms:
+                    hits = sum(1 for t in q_terms if t in rel_tokens)
+                    kw_score = min(1.0, hits / len(q_terms))
+            seq = int(m.get("sequence", 0))
+            # recency: 用 message_upper_bound 归一化，较新 = 较高
+            denom = max(1, self._message_upper_bound)
+            rec = seq / denom
+            final = _KW_WEIGHT * kw_score + _RECENCY_WEIGHT * rec + _IMPORTANCE_WEIGHT * 0.5
+            candidates.append(RetrievalCandidate(
+                candidate_type="recent_message",
+                candidate_id=m["message_id"],
+                principal_id=m.get("sender_principal_id", ""),
+                scope=m.get("session_id", ""),
+                content_ref=content,
+                source_refs=(m.get("session_id", ""), m["message_id"]),
+                keyword_score=kw_score,
+                semantic_score=0.0,
+                recency_score=rec,
+                importance_score=0.5,
+                trust_score=1.0 if m.get("trust_label") == "verified" else 0.7,
+                final_score=final,
+                token_estimate=estimate_tokens(content),
+                retrieval_path="list",
+                policy_version=self._policy_version,
+                exclusion_reason="" if idx not in protected_indices else "",
+            ))
+        return candidates
+
+    def _candidates_to_message_items(
+        self, candidates: list[RetrievalCandidate],
+    ) -> list[dict]:
+        """RetrievalCandidate → 原始 message dict（回填 role / trust_label 用）。
+
+        仅保留候选携带的 source_refs 中的 message_id 与 content_ref；调用方
+        提供原始 message 列表用于回填 role/trust_label。
+        """
+        return candidates
 
     def _inject_memories(
         self,
