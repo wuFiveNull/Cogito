@@ -95,6 +95,10 @@ class TaskWorker:
         # ── 3. 执行（后台心跳协程）──
         # MEM-01 完整：每个 Task 开始前清空共享依赖字段，避免跨 Task 继承
         self._handler_ctx.declared_memory_dependencies = []
+        # PLAN-17 R3 P0-03：把本次 Attempt 的真实 task_attempt_id 注入，让
+        # TaskHandler 能把 checkpoint 绑定到真实 Attempt（不再依赖 fallback SELECT）。
+        self._handler_ctx._task_id = task.task_id
+        self._handler_ctx._attempt_id = attempt.task_attempt_id
         heartbeat_task = asyncio.create_task(
             self._heartbeat_loop(task.task_id, attempt.task_attempt_id,
                                  worker_id, attempt.lease_version)

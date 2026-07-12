@@ -32,10 +32,11 @@ def _fresh_db():
 
 
 class _Ctx:
-    def __init__(self, c):
+    def __init__(self, c, attempt_id=""):
         self.connection_factory = lambda p=c: p
         self.config_version_id = "cfg-prod"
         self.workspace_path = ""
+        self._attempt_id = attempt_id
 
 
 def test_admission_persists_real_skill_and_runner_executes():
@@ -82,6 +83,55 @@ def test_admission_persists_real_skill_and_runner_executes():
     ).fetchone()
     assert steps_row["steps_taken"] >= 1, \
         "真实 Skill 至少执行了 1 步"
+
+
+def test_worker_claim_binds_attempt_id_to_checkpoint():
+    """DR-P0-03: Worker.claim_next 创建的 TaskAttempt 必须被写进 checkpoint；
+    task_attempts 里会有对应的 running attempt，checkpoint 的 attempt_id 与其绑定。"""
+    conn = _fresh_db()
+    now = int(time.time() * 1000)
+    scheduler = Scheduler(
+        conn,
+        drift_config=DriftConfig(
+            enabled=True, dry_run=False,
+            default_principal_id="owner",
+            idle_after_minutes=30, max_runs_per_day=3),
+        workspace_path="")
+    out = scheduler.tick_drift_admit()
+    assert out is not None
+    run_id, task_id = out
+
+    dispatcher = TaskDispatcher(conn)
+    worker_id = "wkr-attempt"
+    claimed = dispatcher.claim_next(worker_id)
+    assert claimed is not None, "Worker 应 claim 到 drift.run 任务"
+    task, attempt = claimed.task, claimed.attempt
+    assert task.task_id == task_id
+    assert attempt.task_attempt_id, "TaskAttempt 必须有真实 id"
+    assert attempt.status.value == "running"
+
+    # 模拟 Worker：把 attempt_id 注入 handler ctx（同 task_worker.py 实际注入）
+    ctx = _Ctx(conn, attempt_id=attempt.task_attempt_id)
+    result = handle_drift_run(task, ctx)
+    assert "completed" in result, f"read-only Skill 应 completed：{result}"
+
+    # checkpoint row 里 attempt_id 绑定到真实 attempt（非空、非 fallback 解析失误）
+    ck = conn.execute(
+        "SELECT task_attempt_id, payload_json FROM task_checkpoints "
+        "WHERE drift_run_id=? ORDER BY created_at DESC LIMIT 1", (run_id,),
+    ).fetchone()
+    assert ck is not None
+    assert ck["task_attempt_id"] == attempt.task_attempt_id, \
+        f"checkpoint 必须绑定真实 attempt_id，got={ck['task_attempt_id']}"
+    data = json.loads(ck["payload_json"])
+    assert data["attempt_id"] == attempt.task_attempt_id
+    # task_attempts.checkpoint_ref 同步
+    att_row = conn.execute(
+        "SELECT checkpoint_ref FROM task_attempts "
+        "WHERE task_attempt_id=?", (attempt.task_attempt_id,),
+    ).fetchone()
+    assert att_row is not None and att_row["checkpoint_ref"], \
+        "Attempt 的 checkpoint_ref 必须指向 checkpoint"
 
 
 def test_pause_creates_followup_and_resume_runs_from_paused_step():
@@ -174,11 +224,12 @@ def test_pause_creates_followup_and_resume_runs_from_paused_step():
     assert "resumed" in second.lower(), f"resume 必须标注 [resumed]：{second}"
     assert "completed" in second.lower(), f"resume 后应完成：{second}"
 
-    # 预算累计：step0+step1 各 1 次 tool_calls
+    # DR-P0-04：跨 Attempt 预算/step 精确，不重置、不双重累计
     run2 = conn.execute(
         "SELECT budget_used_json, steps_taken FROM drift_runs "
         "WHERE drift_run_id='dr-p02'").fetchone()
     budget = json.loads(run2["budget_used_json"])
-    assert budget.get("tool_calls", 0) >= 2, \
-        f"跨 Attempt 预算不累计：{budget}"
-    assert run2["steps_taken"] >= 2, "跨 Attempt 步数累计"
+    assert budget.get("tool_calls", 0) == 2, \
+        f"跨 Attempt 预算应精确为 2（无双重累计）：{budget}"
+    assert run2["steps_taken"] == 2, \
+        f"跨 Attempt 步数应精确为 2：{run2['steps_taken']}"

@@ -65,24 +65,18 @@ class DriftRunRepository:
 
     def update_progress(self, drift_run_id: str, *, budget_used: dict[str, int],
                         steps_taken: int) -> None:
-        """累计 steps + budget（跨 Attempt 不重置，读取后累加）。"""
-        row = self.get(drift_run_id)
-        if row is None:
-            return
-        prev_budget = {}
-        if row.get("budget_used_json"):
-            try:
-                prev_budget = json.loads(row["budget_used_json"])
-            except Exception:
-                prev_budget = {}
-        merged = {k: prev_budget.get(k, 0) + budget_used.get(k, 0)
-                  for k in set(prev_budget) | set(budget_used)}
-        prev_steps = row.get("steps_taken") or 0
+        """写入 steps + budget 的绝对累计值（不是 delta）。
+
+        DriftRunner 在 resume 时把 budget_used/steps_taken 作为"自 admission
+        以来累计总值"传入（基线在 resume_budget/resume_from_step），因此这里
+        是 REPLACE 语义——保持与 Skill 选择/任务执行一次完成的单次 Attempt 行为
+        一致：每个 attempt 的 finish_drift 写入它盯到的真实累计量。
+        """
         self._conn.execute(
             "UPDATE drift_runs SET budget_used_json=?, steps_taken=? "
             "WHERE drift_run_id=?",
-            (json.dumps(merged, ensure_ascii=False),
-             prev_steps + steps_taken, drift_run_id),
+            (json.dumps(dict(budget_used), ensure_ascii=False),
+             int(steps_taken), drift_run_id),
         )
         self._conn.commit()
 

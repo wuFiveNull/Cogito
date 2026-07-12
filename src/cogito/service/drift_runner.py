@@ -37,6 +37,7 @@ class _RunContext:
     conn: Any
     config_version_id: str = ""
     workspace_path: str = ""
+    attempt_id: str = ""                 # 本次 TaskAttempt 的真实 id (P0-03)
     # resume 时携带
     resume_from_step: int = 0
     resume_completed_actions: list[str] = field(default_factory=list)
@@ -73,6 +74,7 @@ def handle_drift_run(task: Task, ctx: Any) -> str:
         drift_run_id=run_id, task=task, manifest=manifest, conn=conn,
         config_version_id=getattr(ctx, "config_version_id", ""),
         workspace_path=getattr(ctx, "workspace_path", ""),
+        attempt_id=getattr(ctx, "_attempt_id", "") or "",
         lease_checker=getattr(ctx, "lease_checker", None),
     )
 
@@ -131,7 +133,7 @@ def _start_drift_run(run: _RunContext) -> str:
         if preempted:
             write_checkpoint(
                 run.conn, drift_run_id=run.drift_run_id, task_id=run.task.task_id,
-                attempt_id="", skill_name=run.manifest.name,
+                attempt_id=run.attempt_id, skill_name=run.manifest.name,
                 skill_version=run.manifest.version, step_index=step_index,
                 cursor=cursor, completed_actions=completed_actions,
                 budget_used=budget_used, config_version_id=run.config_version_id,
@@ -179,7 +181,7 @@ def _start_drift_run(run: _RunContext) -> str:
         # ③ 安全点写 checkpoint（含当前 budget/cursor/completed_actions 快照）
         write_checkpoint(
             run.conn, drift_run_id=run.drift_run_id, task_id=run.task.task_id,
-            attempt_id="", skill_name=run.manifest.name,
+            attempt_id=run.attempt_id, skill_name=run.manifest.name,
             skill_version=run.manifest.version, step_index=step_index,
             cursor=cursor, completed_actions=completed_actions,
             budget_used=budget_used, config_version_id=run.config_version_id,

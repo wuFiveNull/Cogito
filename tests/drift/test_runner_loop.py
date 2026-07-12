@@ -175,13 +175,16 @@ class TestResume:
         # 严格断言：必须标注 [resumed] 且最终 completed（不接受任意非空字符串）
         assert "resumed" in second.lower(), f"resume 必须标注 [resumed]：{second}"
         assert "completed" in second.lower(), f"resume 后应完成：{second}"
-        # 预算跨 Attempt 累计
+        # 跨 Attempt 预算精确（DR-P0-04：不重置、不双重累计）
         row = memory_db.execute(
-            "SELECT budget_used_json FROM drift_runs WHERE drift_run_id='dr-6'"
+            "SELECT budget_used_json, steps_taken FROM drift_runs WHERE drift_run_id='dr-6'"
         ).fetchone()
         import json
         budget = json.loads(row["budget_used_json"])
-        assert budget.get("tool_calls", 0) >= 2, f"跨 Attempt 预算未累计：{budget}"
+        assert budget.get("tool_calls", 0) == 2, \
+            f"跨 Attempt 预算应精确为 2 步：{budget}"
+        assert row["steps_taken"] == 2, \
+            f"跨 Attempt 步数应精确为 2：{row['steps_taken']}"
 
     def test_needs_review_on_version_mismatch(self, memory_db):
         """config_version 变化 → resume 校验严格拒绝 → needs_review + waiting Task。"""
