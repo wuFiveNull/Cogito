@@ -229,13 +229,22 @@ class RuntimeApplication:
             else:
                 shared_embedding_provider = NoopEmbeddingProvider()
             knowledge_embedder = EmbeddingProviderAdapter(shared_embedding_provider)
-            knowledge_service = KnowledgeService(conn, embedder=knowledge_embedder)
+
+            # PLAN-16 P16-13：不依赖 multimodal 开关，直接由 config 构造 PayloadStore 工厂
+            def _make_payload_store(payload_conn=None):
+                return PayloadStore(config.resolve_payload_dir(), payload_conn or conn)
+
+            # PLAN-16 P16-13：共享 Service 也要注入 factory，供 Turn/Tool 检索时解析 payload
+            knowledge_service = KnowledgeService(
+                conn, embedder=knowledge_embedder,
+                payload_store_factory=_make_payload_store,
+            )
 
             def _make_knowledge_service(knowledge_conn):
                 return KnowledgeService(
                     knowledge_conn, embedder=knowledge_embedder,
-                    payload_store_factory=lambda c=knowledge_conn: PayloadStore(
-                        config.resolve_payload_dir(), c),
+                    payload_store_factory=lambda: PayloadStore(
+                        config.resolve_payload_dir(), knowledge_conn),
                 )
 
             knowledge_factory = _make_knowledge_service
@@ -393,10 +402,12 @@ class RuntimeApplication:
         app.multimodal_metrics = multimodal_metrics
         # PLAN-16 M7 OPS-04: 注入 Memory/Knowledge 专项指标（metrics_access registry）
         app.cognition_metrics = cognition_metrics
-        # PLAN-16 完整 payload 边界：注入同步/Poll 路径的 PayloadStore 工厂
+        # PLAN-16 P16-13：注入同步/摄取路径的 PayloadStore 工厂（供 sync_source 解析正文）
         from cogito.service.knowledge.sync import set_payload_store_factory
         if config.knowledge.enabled:
-            set_payload_store_factory(self._make_payload_store_factory())
+            # PLAN-16 P16-13 修复：build() 是 classmethod，此处无 self；改用局部工厂函数
+            set_payload_store_factory(lambda payload_conn=None: PayloadStore(
+                config.resolve_payload_dir(), payload_conn or conn))
         app._wakeup_event = wakeup_event
         app._recovery_counts = recovery_counts
 

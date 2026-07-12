@@ -13,23 +13,6 @@ from cogito.service.knowledge.service import KnowledgeService
 
 _LOGGER = logging.getLogger("cogito.knowledge.sync")
 
-# 共享 PayloadStore 工厂（由 Application 注入，缺失则 inline fallback）
-_shared_payload_store_factory = None
-
-
-def _shared_payload_store():
-    if _shared_payload_store_factory is not None:
-        return _shared_payload_store_factory()
-    # fallback：创建默认实例
-    from cogito.infrastructure.payload_store import PayloadStore
-    return PayloadStore(".workspace/payloads", None)
-
-
-def set_payload_store_factory(factory) -> None:
-    """Application 注入 PayloadStore 工厂（PLAN-16 完整）。"""
-    global _shared_payload_store_factory
-    _shared_payload_store_factory = factory
-
 
 def _compose_raw_text(item: dict) -> str:
     """把 ConnectorItem 的摘要字段拼成 Knowledge 摄取的 raw_text。"""
@@ -51,16 +34,22 @@ def enqueue_knowledge_sync_source(
     principal_id: str = "owner",
     trust_label: str = "external",
     origin: str = "connector_poll",
+    make_payload_store=None,
 ) -> str | None:
-    """创建 durable knowledge.sync_source Task（PLAN-16 M4）。
+    """创建 durable knowledge.sync_source Task（PLAN-16 M4/P16-13 完整）。
 
     KNOW-01/02/03：Connector/API 来源内容经 durable Task 进入 Knowledge，
     以便 parse/embed/checkpoint 可恢复可重试。幂等键基于 stable_source_id，
     重复内容不会重复入 Knowledge。
+
+    PLAN-16 P16-13 完整 payload 边界：
+    - 正文 <= payload_threshold(4096 字节)内联 raw_text
+    - 正文 > threshold 强制写 PayloadStore，只保存 payload_ref
+    - PayloadStore 写入失败则 Task 整体失败（不降级截断）
     """
     if not stable_source_id:
         return None
-    # PLAN-16 M4 完整 payload 边界：大正文写入 PayloadStore、Task 仅保存引用
+    payload_threshold = 4096
     data = {
         "stable_source_id": stable_source_id,
         "source_kind": source_kind,
@@ -72,21 +61,23 @@ def enqueue_knowledge_sync_source(
         "source_version": content_hash[:8] if content_hash else "",
         "parser_policy_version": "1",
         "config_version": "1",
-        "payload_threshold": 4096,
     }
-    # 正文经 PayloadStore：Task 只保存 payload_ref，不内联无界正文
-    if raw_text:
-        try:
-            store = _shared_payload_store()
-            obj = store.put(raw_text.encode("utf-8"),
-                            content_type="text/plain; charset=utf-8",
-                            retention_class="hot")
-            data["payload_ref"] = obj.payload_id
-            data["content_length"] = len(raw_text)
-        except Exception as e:
-            # PayloadStore 不可用时降级内联（截断上限）
-            _LOGGER.warning("sync_source PayloadStore unavailable, inlining: %s", e)
-            data["raw_text"] = raw_text[:50000]
+    # PLAN-16 P16-13：阈值决定 inline 还是 payload
+    if len(raw_text.encode("utf-8")) <= payload_threshold:
+        # 小正文内联
+        data["raw_text"] = raw_text
+    elif make_payload_store is not None:
+        # 正文 > threshold 必须写 PayloadStore；失败则抛异常不创建 Task
+        store = make_payload_store(conn)
+        obj = store.put(raw_text.encode("utf-8"),
+                        content_type="text/plain; charset=utf-8",
+                        retention_class="hot")
+        data["payload_ref"] = obj.payload_id
+        data["content_length"] = len(raw_text)
+    else:
+        raise RuntimeError(
+            f"knowledge payload store not configured but content is "
+            f"{len(raw_text.encode('utf-8'))} bytes (> {payload_threshold})")
     # 完整：幂等键加入 content_hash，允许同一来源内容更新后重新摄取
     idem = f"knowledge.sync_source:{stable_source_id}:{content_hash or 'none'}"
     try:
@@ -166,25 +157,31 @@ def sync_resource(
     stable_source_id: str,
     source_kind: str = "explicit_local_file",
     content_hash: str = "",
-    raw_text: str,
+    raw_text: str = "",
+    payload_ref: str = "",
     principal_id: str = "",
     trust_label: str = "unverified",
+    make_payload_store=None,
 ) -> str:
-    """同步知识资源（PLAN-13 P13-10）。
+    """同步知识资源（PLAN-13 P13-10, PLAN-16 P16-13 完整 payload 边界）。
 
-    - unchanged（content_hash 未变）→ 跳过，不重新 parse/embed
-    - modified → 旧 Resource 标 stale + 新版本 active
-    - added → 新建
-
-    返回 resource_id。
+    PLAN-16 P16-13：正文 > threshold 时 Task 仅存 payload_ref，由本函数解析为
+    raw_text；payload 丢失明确失败，不创建空 Resource。
     """
-    # PLAN-16 完整 payload 边界：Task 存 payload_ref、handler 解析为 raw_text
     effective_raw_text = raw_text
     if not effective_raw_text and payload_ref:
-        from cogito.service.knowledge.resolver import resolve_payload_ref
-        effective_raw_text = resolve_payload_ref(payload_ref, _shared_payload_store())
-
-    resource_id = KnowledgeService(conn).sync_source(
+        # PLAN-16 P16-13：payload_ref 解析正文；丢失则失败
+        if make_payload_store is None:
+            raise RuntimeError("payload store not configured but payload_ref given")
+        raw_bytes = make_payload_store(conn).get(payload_ref)
+        if raw_bytes is None:
+            raise RuntimeError(f"knowledge payload not found: {payload_ref}")
+        effective_raw_text = raw_bytes.decode("utf-8", errors="replace")
+    if not effective_raw_text:
+        raise ValueError("knowledge source contains no content")
+    # PLAN-16 P16-13：使用 factory-backed KnowledgeService，ingest 时大段写 PayloadStore
+    knowledge_service = KnowledgeService(conn, payload_store_factory=make_payload_store)
+    resource_id = knowledge_service.sync_source(
         stable_source_id=stable_source_id,
         source_kind=source_kind,
         content_hash=content_hash,
@@ -192,7 +189,6 @@ def sync_resource(
         principal_id=principal_id,
         trust_label=trust_label,
     )
-    # PLAN-16 完整：不再内部 commit，由调用方（Task Handler）统一提交事务
     _LOGGER.info("Synced resource %s", resource_id)
     return resource_id
 
