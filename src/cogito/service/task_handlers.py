@@ -208,9 +208,12 @@ def _handle_knowledge_ingest(task: Task, ctx: TaskHandlerContext) -> str:
         _refresh_knowledge_views_task(ctx, conn)
         # PLAN-16 M4 KNOW-05: ingest 后提交独立的 embedding Task，使 segment 进入嵌入路径
         from cogito.service.knowledge.sync import enqueue_knowledge_embed
-        enqueue_knowledge_embed(conn, origin="knowledge_ingest")
+        enqueue_knowledge_embed(conn, origin="knowledge_ingest",
+                                embed_model=_embed_model_from(ctx))
         # PLAN-16 M2 TX-05: KnowledgeService 不再内部 commit，handler 统一提交。
         conn.commit()
+        # OPS-04 完整：记录 knowledge ingest 指标
+        _metrics().record_knowledge_ingest(status="ok" if segments else "empty")
         return f"knowledge ingested: {document.document_id} ({len(segments)} segments)"
     except Exception:
         conn.rollback()
@@ -226,9 +229,13 @@ def _handle_knowledge_embed(task: Task, ctx: TaskHandlerContext) -> str:
     try:
         import asyncio
         count = asyncio.run(_knowledge_service(ctx, conn).embed_pending())
+        # OPS-04 完整：记录 knowledge embedding 指标
+        _metrics().record_knowledge_embedding(status="ok" if count else "empty")
         return f"knowledge embedded: {count}"
     except Exception:
         conn.rollback()
+        # OPS-04 完整：记录 embedding 失败
+        _metrics().record_knowledge_embedding(status="failed")
         raise
     finally:
         conn.close()
@@ -272,7 +279,7 @@ def _handle_knowledge_sync_source(task: Task, ctx: TaskHandlerContext) -> str:
     data = _task_json(task)
     conn = ctx.connection_factory()
     try:
-        from cogito.service.knowledge.sync import sync_resource
+        from cogito.service.knowledge.sync import enqueue_knowledge_embed, sync_resource
         resource_id = sync_resource(
             conn,
             stable_source_id=str(data.get("stable_source_id", "")),
@@ -283,8 +290,13 @@ def _handle_knowledge_sync_source(task: Task, ctx: TaskHandlerContext) -> str:
             trust_label=str(data.get("trust_label", "unverified")),
         )
         _refresh_knowledge_views_task(ctx, conn)
+        # 完整：sync 后明确 enqueue 带版本幂等键的 embed Task（PLAN-16 KNOW-05/07）
+        enqueue_knowledge_embed(conn, origin="knowledge_sync_source",
+                                embed_model=str(data.get("embed_model", "")))
         # PLAN-16 M2 TX-05: KnowledgeService/sync 不再内部 commit，handler 统一提交。
         conn.commit()
+        # OPS-04 完整：记录 knowledge ingest 指标（sync_source 走独立摄取路径）
+        _metrics().record_knowledge_ingest(status="ok")
         return f"knowledge synced: {resource_id}"
     finally:
         conn.close()
@@ -603,10 +615,14 @@ def _handle_memory_extract(task: Task, ctx: TaskHandlerContext) -> str:
                 if current is None or current.processed_upto_sequence < payload.to_sequence:
                     raise RuntimeError("memory.extract watermark CAS failed")
         conn.commit()
+        # OPS-04 完整：记录 extraction 真正完成（含水卫推进与候选写入）
+        _metrics().record_extraction_completed()
         return f"extracted: {len(written)} candidates (upto={payload.to_sequence})"
     except Exception:
         conn.rollback()
         _LOGGER.exception("memory.extract failed")
+        # OPS-04 完整：记录 extraction failed
+        _metrics().record_extraction_failed()
         raise
     finally:
         try:

@@ -156,14 +156,23 @@ def _make_on_exposed_handler(
         svc = make_memory_service()
         from cogito.service.memory_signals import SignalWriter
         writer = SignalWriter(svc.conn if hasattr(svc, "conn") else svc._conn)
-        for mid in memory_ids:
+        try:
+            for mid in memory_ids:
+                try:
+                    writer.record_exposed(
+                        mid,
+                        idempotency_key=f"recall-exposed:{mid}",
+                        algorithm_version="2",
+                    )
+                except Exception as e:
+                    _LOGGER.warning("recall_memory exposed signal failed for %s: %s", mid, e)
+            # 完整：提交 Signal + Outbox，确保 exposed 可观察
+            svc.conn.commit()
+        finally:
+            # 独立连接用完即关，避免泄漏
             try:
-                writer.record_exposed(
-                    mid,
-                    idempotency_key=f"recall-exposed:{mid}",
-                    algorithm_version="2",
-                )
-            except Exception as e:
-                _LOGGER.warning("recall_memory exposed signal failed for %s: %s", mid, e)
+                svc.conn.close()
+            except Exception:
+                pass
 
     return _on_exposed

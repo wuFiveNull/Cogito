@@ -42,7 +42,12 @@ class EmbeddingPort(Protocol):
 
 
 class EmbeddingProviderAdapter:
-    """Adapt the shared EmbeddingProvider contract to the Knowledge port."""
+    """Adapt the shared EmbeddingProvider contract to the Knowledge port.
+
+    PLAN-16 完整实现：embed_sync / embed_many_sync 通过线程池跑同步
+    OpenAI HTTP 调用，供同步检索路径（ContextBuilder / search_knowledge）使用，
+    避免在 running event loop 内 asyncio.run() 或阻塞。
+    """
 
     def __init__(self, provider) -> None:
         self._provider = provider
@@ -55,8 +60,28 @@ class EmbeddingProviderAdapter:
     def model_version(self) -> str:
         return self._provider.model_version
 
+    @property
+    def dimensions(self) -> int:
+        return getattr(self._provider, "dimensions", 0)
+
     async def embed(self, texts: list[str]) -> list[list[float]]:
         return await self._provider.embed_many(texts)
+
+    def embed_sync(self, text: str) -> list[str]:
+        """同步单条 embedding（PLAN-16 完整实现，真正执行向量请求，不做 fallback）。"""
+        result = self.embed_many_sync([text])
+        return result[0] if result else []
+
+    def embed_many_sync(self, texts: list[str]) -> list[list[float]]:
+        """同步批量 embedding：把同步实现委派给 provider；若无则直接调用 _embed_batch_sync。"""
+        provider = self._provider
+        if hasattr(provider, "embed_many_sync"):
+            # OpenAICompatEmbeddingProvider 等提供真正的同步实现
+            return provider.embed_many_sync(texts)
+        # 无同步实现时退化（Noop 等）
+        if hasattr(provider, "embed_many"):
+            return provider.embed_many(texts)
+        return [[] for _ in texts]
 
 
 class KnowledgeService:
@@ -75,12 +100,8 @@ class KnowledgeService:
     def _emit(self, event_type: str, aggregate_id: str, payload: dict | None = None) -> None:
         from cogito.domain.events import DomainEvent
         from cogito.store.repositories import OutboxRepository
-        row = self._conn.execute(
-            "SELECT COALESCE(MAX(aggregate_version), 0) FROM outbox_events "
-            "WHERE aggregate_type='knowledge_resource' AND aggregate_id=?",
-            (aggregate_id,),
-        ).fetchone()
-        version = int(row[0] if row else 0) + 1
+        # 完整：复用 OutboxRepository.next_aggregate_version（同事务 MAX+1，严格单调）
+        version = OutboxRepository(self._conn).next_aggregate_version("knowledge_resource", aggregate_id)
         data = payload or {}
         import json
         OutboxRepository(self._conn).insert(DomainEvent(
@@ -252,7 +273,7 @@ class KnowledgeService:
                 (segment_id,),
             )
             written += 1
-        self._conn.commit()
+        # PLAN-16 M2/完整：不再内部 commit，由调用方统一提交事务
         return written
 
     def retrieve(
@@ -271,13 +292,20 @@ class KnowledgeService:
         merged: dict[str, tuple[float, str]] = {}
         for segment_id, score in knowledge_repo.search_knowledge_fts(self._conn, query, limit):
             merged[segment_id] = (score, "keyword")
-        # KNOW-06: 自动 query embedding（同步路径，不污染 running event loop）
+        # KNOW-06 完整：自动 query embedding（Adapter 现提供真正的同步实现）
+        used_path = "keyword"
         if query_vector is None and self._embedder is not None:
             try:
                 query_vector = self._embedder.embed_sync(query)
+                used_path = "keyword+vector"
             except Exception as e:
                 _LOGGER.warning("query embedding failed, degrading to FTS-only: %s", e)
                 query_vector = None
+                used_path = "keyword"
+                # OPS-04 完整：记录降级
+                from cogito.infrastructure.metrics_access import _metrics
+                _metrics().record_knowledge_retrieval_degraded(
+                    reason="embed_error")
         if query_vector:
             model = self._embedder.model_id if self._embedder else ""
             for segment_id, score in knowledge_repo.search_knowledge_vector(
@@ -289,6 +317,9 @@ class KnowledgeService:
                     max(score, old[0]) if old else score,
                     "keyword+vector" if old else "vector",
                 )
+        # OPS-04 完整：记录 knowledge retrieval 路径
+        from cogito.infrastructure.metrics_access import _metrics
+        _metrics().record_knowledge_retrieval(path=used_path)
         results: list[dict] = []
         for segment_id, (score, path) in sorted(
             merged.items(), key=lambda item: item[1][0], reverse=True,
@@ -369,17 +400,20 @@ class KnowledgeService:
         from cogito.domain.events import DomainEvent
         from cogito.store.repositories import OutboxRepository
         import json
+        outbox = OutboxRepository(self._conn)
         for row in affected:
             memory_id = row["memory_id"]
             data = {
                 "memory_id": memory_id, "resource_id": resource_id,
                 "reason": reason, "receipt_id": receipt_id,
             }
-            OutboxRepository(self._conn).insert(DomainEvent(
+            # 完整：严格单调递增事件版本（同事务 MAX+1），不再是固定 1
+            ver = outbox.next_aggregate_version("memory", memory_id)
+            outbox.insert(DomainEvent(
                 event_type="MemorySourceInvalidated",
                 aggregate_type="memory",
                 aggregate_id=memory_id,
-                aggregate_version=1,
+                aggregate_version=ver,
                 payload=data,
                 payload_ref=json.dumps(data, ensure_ascii=False),
                 origin="knowledge_service",

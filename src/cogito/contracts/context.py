@@ -457,11 +457,21 @@ class ContextBuilder:
         # PLAN-16 M6 RET-04: 组内标准化，使 knowledge 分数可与其他源比较
         candidates = normalize_scores(candidates)
 
+        # OPS-04 完整：记录 knowledge 候选数（选择前）
+        _record_candidates("knowledge_segment", candidates, selected=False)
+
         # PLAN-13/R-12: 按 knowledge_segment 源预算配额选择
         knowledge_budget = self._budget_config.quota(
             "knowledge_segment", max(1, self._max_input_tokens),
         )
-        selected = self._select_candidates_by_budget(candidates, knowledge_budget)
+        selected, excluded = self._select_candidates_by_budget(
+            candidates, knowledge_budget)
+
+        # OPS-04 完整：记录 knowledge 选中数 + 排除原因 + tokens
+        _record_candidates("knowledge_segment", selected, selected=True)
+        _record_exclusions("knowledge_segment", excluded)
+        _record_tokens("knowledge_segment",
+                       sum(c.token_estimate for c in selected))
 
         output: list[ContextItem] = []
         for c in selected:
@@ -779,6 +789,37 @@ class ContextBuilder:
             selected.append(c)
             used += max(1, c.token_estimate)
         return selected, excluded
+
+    # ── OPS-04 完整：context 指标记录 ──────────────────────────────────────
+
+    @staticmethod
+    def _record_candidates(source: str, candidates: list, selected: bool) -> None:
+        """记录某来源的候选/选中计数。"""
+        try:
+            from cogito.infrastructure.metrics_access import _metrics
+            for _ in candidates:
+                _metrics().record_context_candidate(source, selected)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _record_exclusions(source: str, excluded: dict) -> None:
+        """记录某来源的排除原因（OPS-04）。"""
+        try:
+            from cogito.infrastructure.metrics_access import _metrics
+            for reason in excluded.values():
+                _metrics().record_context_exclusion(f"{source}:{reason}")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _record_tokens(source: str, tokens: int) -> None:
+        """记录某来源实际 token 占用（OPS-04）。"""
+        try:
+            from cogito.infrastructure.metrics_access import _metrics
+            _metrics().record_context_tokens(source, tokens)
+        except Exception:
+            pass
 
     def _clip_to_budget(
         self,

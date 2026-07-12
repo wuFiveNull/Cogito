@@ -34,6 +34,9 @@ class SignalWriter:
         metadata_json: str = "{}",
     ) -> bool:
         """幂等写入一条信号（PLAN-14 R-08: 同时发 MemorySignalRecorded 到 Outbox）。"""
+        # OPS-04 完整：记录信号指标（无论写入成功与否均计数类型）
+        from cogito.infrastructure.metrics_access import _metrics
+        _metrics().record_signal(signal_type)
         signal = MemorySignal(
             signal_id="",
             memory_id=memory_id,
@@ -52,17 +55,16 @@ class SignalWriter:
         return ok
 
     def _emit_signal_event(self, signal_type: str, memory_id: str, signal_value: int, task_id: str) -> None:
-        """PLAN-14/16 R-08: MemorySignalRecorded 领域事件（PLAN-16 M2 TX-02/TX-03）。
+        """PLAN-14/16 R-08: MemorySignalRecorded 领域事件（PLAN-16 M2 TX-02/TX-03 + 完整版本单调）。
 
         与信号行共享同一连接 / 事务：写入失败向上传播，确保信号与
-        Outbox 事件原子提交。aggregate_version 取 MemoryItem 当前 version。
+        Outbox 事件原子提交。aggregate_version 由 OutboxRepository 同事务 MAX+1
+        取得，保证严格单调。
         """
         from cogito.domain.events import DomainEvent
-        from cogito.store.memory_repo import MemoryRepository
         from cogito.store.repositories import OutboxRepository
         payload = {"signal_type": signal_type, "signal_value": signal_value, "task_id": task_id}
-        current = MemoryRepository(self._conn).get(memory_id)
-        version = current.version if current else 1
+        version = OutboxRepository(self._conn).next_aggregate_version("memory", memory_id)
         OutboxRepository(self._conn).insert(DomainEvent(
             event_type="MemorySignalRecorded",
             aggregate_type="memory",

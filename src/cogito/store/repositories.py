@@ -543,6 +543,19 @@ class OutboxRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
+    def next_aggregate_version(self, aggregate_type: str, aggregate_id: str) -> int:
+        """取得同一 aggregate 下一事件版本（PLAN-16 完整：严格单调递增）。
+
+        在同一事务内基于当前 MAX(aggregate_version) + 1，确保同一 aggregate
+        的事件序列严格单调（无重复、无跳号），不受底层实体 version 变化影响。
+        """
+        row = self._conn.execute(
+            "SELECT COALESCE(MAX(aggregate_version), 0) FROM outbox_events "
+            "WHERE aggregate_type=? AND aggregate_id=?",
+            (aggregate_type, aggregate_id),
+        ).fetchone()
+        return int(row[0] if row else 0) + 1
+
     def insert(self, event: DomainEvent) -> None:
         self._conn.execute(
             "INSERT INTO outbox_events (event_id, event_type, aggregate_type, aggregate_id, "

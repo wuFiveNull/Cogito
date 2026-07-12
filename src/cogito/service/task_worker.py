@@ -93,6 +93,8 @@ class TaskWorker:
             return TaskRunOutcome.no_handler
 
         # ── 3. 执行（后台心跳协程）──
+        # MEM-01 完整：每个 Task 开始前清空共享依赖字段，避免跨 Task 继承
+        self._handler_ctx.declared_memory_dependencies = []
         heartbeat_task = asyncio.create_task(
             self._heartbeat_loop(task.task_id, attempt.task_attempt_id,
                                  worker_id, attempt.lease_version)
@@ -107,8 +109,6 @@ class TaskWorker:
                 "Task handler completed: %s => %s",
                 task.task_type, (result or "")[:100],
             )
-            # MEM-01: 将 handler 声明的记忆依赖持久化到 task.result_ref
-            self._persist_declared_dependencies(task)
         except Exception as e:
             _LOGGER.exception("Task handler failed: %s", e)
             heartbeat_task.cancel()
@@ -136,6 +136,17 @@ class TaskWorker:
         heartbeat_task.cancel()
 
         # ── 4. 完成 ──
+        # MEM-01 完整：先将 handler 声明的依赖持久化到 result_ref
+        self._persist_declared_dependencies(task)
+
+        # MEM-01 + #11 完整：事实型 task_succeeded 信号在 complete 之前写入，
+        # 与 Task/Attempt 完成同事务原子提交；失败向上传播（禁止 silent pass）
+        try:
+            self._emit_task_succeeded_signals(task)
+        except Exception as e:
+            _LOGGER.warning("task_succeeded signals failed for %s: %s", task.task_id, e)
+            return TaskRunOutcome.failed
+
         try:
             ok = self._dispatcher.complete(task, attempt, worker_id)
         except Exception as e:
@@ -146,17 +157,15 @@ class TaskWorker:
             _LOGGER.warning("Task complete failed (lease lost): %s", task.task_id)
             return TaskRunOutcome.lost
 
-        # PLAN-16 M3 MEM-01: Task 成功后，按 handler 声明的 memory_dependencies
-        # 写出 task_succeeded 信号（禁止从任意文本猜测依赖）。
-        self._emit_task_succeeded_signals(task)
-
         return TaskRunOutcome.completed
 
     def _emit_task_succeeded_signals(self, task: Any) -> None:
-        """读取任务 result_ref 中声明的 memory_dependencies 并写 task_succeeded。
+        """Task 成功后写 task_succeeded 信号（PLAN-16 MEM-01 完整原子语义）。
 
-        handler 在 result_ref 中以 JSON {"memory_dependencies": [mid, ...]} 声明
-        其使用并强化的记忆；失败仅记录日志，不影响 Task 完成状态本身。
+        信号与 Task/Attempt 完成在同一事务中由 dispatcher.complete 提交。
+        失败向上传播（不再 silent pass），确保事实型信号 durable。
+        handler 必须通过 ctx.declare_memory_dependencies 显式声明依赖
+        （禁止从任意文本猜测）。
         """
         import json
 
@@ -170,25 +179,19 @@ class TaskWorker:
         deps = data.get("memory_dependencies")
         if not deps:
             return
-        try:
-            from cogito.service.memory_signals import SignalWriter
-            conn = getattr(self._dispatcher, "_conn", None)
-            if conn is None:
-                return
-            writer = SignalWriter(conn)
-            for mid in deps:
-                try:
-                    writer.record_task_succeeded(
-                        str(mid),
-                        task_id=task.task_id,
-                        idempotency_key=f"task-succeeded:{task.task_id}:{mid}",
-                        algorithm_version="2",
-                    )
-                except Exception as e:
-                    _LOGGER.warning(
-                        "task_succeeded signal failed for %s: %s", mid, e)
-        except Exception as e:
-            _LOGGER.warning("emit_task_succeeded_signals failed: %s", e)
+        from cogito.service.memory_signals import SignalWriter
+        conn = getattr(self._dispatcher, "_conn", None)
+        if conn is None:
+            return
+        writer = SignalWriter(conn)
+        # 失败即抛出 → 事务回滚，Task 不标记成功
+        for mid in deps:
+            writer.record_task_succeeded(
+                str(mid),
+                task_id=task.task_id,
+                idempotency_key=f"task-succeeded:{task.task_id}:{mid}",
+                algorithm_version="2",
+            )
 
     def _persist_declared_dependencies(self, task: Any) -> None:
         """把 handler 声明的记忆依赖写入 task.result_ref（PLAN-16 M3 MEM-01）。"""

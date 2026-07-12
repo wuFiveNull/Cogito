@@ -118,8 +118,10 @@ def _make_handler(
 def _request_extraction_after_remember(task_svc: Any, ctx: ToolContext) -> None:
     """显式记住后，为该 session 提交一次高优先级 context 提取任务。
 
-    使用 TaskService 自有连接（与 remember 的写操作独立），失败仅记录而不
-    影响本次记忆保存的结果。
+    完整语义（PLAN-16 MEM-01）：
+    - 独立连接 + UnitOfWork 提交，Task + Outbox(MemoryExtractionRequested) 同事务原子落库；
+    - 显式传入 is_explicit_remember=True，不受消息数阈值限制；
+    - 失败仅记录而不影响本次记忆保存的结果。
     """
     from cogito.service.task_service import SqliteTaskService
 
@@ -127,14 +129,25 @@ def _request_extraction_after_remember(task_svc: Any, ctx: ToolContext) -> None:
         return
     conn = task_svc.conn
     from cogito.service.memory_extractor import request_extraction
-    request_extraction(
-        conn,
-        conversation_id=ctx.conversation_id,
-        session_id=ctx.session_id,
-        principal_id=ctx.principal_id,
-        trigger_type="explicit_remember",
-        priority=90,
-    )
+    try:
+        request_extraction(
+            conn,
+            conversation_id=ctx.conversation_id,
+            session_id=ctx.session_id,
+            principal_id=ctx.principal_id,
+            trigger_type="explicit_remember",
+            priority=90,
+            is_explicit_remember=True,
+        )
+        # 完整：提交 Task + Outbox 事件，确保 durable
+        conn.commit()
+    except Exception as e:
+        # 提交失败回滚，避免脏数据
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
 
 
 def create_tool_def(

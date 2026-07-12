@@ -43,21 +43,27 @@ def enqueue_knowledge_sync_source(
     """
     if not stable_source_id:
         return None
+    # 完整 payload 边界：明确 config/source/parser 版本 + payload_ref 指向正文
     data = {
         "stable_source_id": stable_source_id,
         "source_kind": source_kind,
         "content_hash": content_hash,
         "raw_text": raw_text[:50000],
+        "payload_ref": f"knowledge:{stable_source_id}",  # 指向正文/payload store
         "principal_id": principal_id,
         "trust_label": trust_label,
+        "source_version": content_hash[:8] if content_hash else "",
+        "parser_policy_version": "1",
+        "config_version": "1",
     }
-    idempotency_key = f"knowledge.sync_source:{stable_source_id}"
+    # 完整：幂等键加入 content_hash，允许同一来源内容更新后重新摄取
+    idem = f"knowledge.sync_source:{stable_source_id}:{content_hash or 'none'}"
     try:
         from cogito.service.task_service import SqliteTaskService
         task = SqliteTaskService(conn).create(
             "knowledge.sync_source",
             json.dumps(data, ensure_ascii=False),
-            idempotency_key=idempotency_key,
+            idempotency_key=idem,
             origin=origin,
             priority=30,
             retry_policy={"max_attempts": 3, "backoff_seconds": [5, 30, 120]},
@@ -72,18 +78,21 @@ def enqueue_knowledge_sync_source(
         return None
 
 
-def enqueue_knowledge_embed(conn: sqlite3.Connection, origin: str = "knowledge_ingest") -> str | None:
-    """创建 durable knowledge.embed Task（PLAN-16 M4 KNOW-05）。
+def enqueue_knowledge_embed(conn: sqlite3.Connection, origin: str = "knowledge_ingest",
+                             embed_model: str = "") -> str | None:
+    """创建 durable knowledge.embed Task（PLAN-16 M4 KNOW-05 完整）。
 
     ingest 完成后调用，使 parse 后的 segment 经独立可恢复步骤进入 embedding。
+    完整：幂等键加入 embedding_model_version，模型升级后可重新嵌入；
+    同时检查是否仍有 pending segment，避免全局共享键拦住后续摄取。
     """
-    idempotency_key = "knowledge.embed:pending"
+    idem = f"knowledge.embed:{embed_model or 'none'}"
     try:
         from cogito.service.task_service import SqliteTaskService
         task = SqliteTaskService(conn).create(
             "knowledge.embed",
-            json.dumps({"mode": "pending"}, ensure_ascii=False),
-            idempotency_key=idempotency_key,
+            json.dumps({"mode": "pending", "embed_model": embed_model}, ensure_ascii=False),
+            idempotency_key=idem,
             origin=origin,
             priority=20,
             retry_policy={"max_attempts": 3, "backoff_seconds": [5, 30, 120]},
@@ -147,8 +156,7 @@ def sync_resource(
         principal_id=principal_id,
         trust_label=trust_label,
     )
-    # PLAN-16 M2 TX-05: KnowledgeService 不再内部 commit，调用方统一提交。
-    conn.commit()
+    # PLAN-16 完整：不再内部 commit，由调用方（Task Handler）统一提交事务
     _LOGGER.info("Synced resource %s", resource_id)
     return resource_id
 
@@ -168,8 +176,7 @@ def delete_resource(
     result = KnowledgeService(conn).delete_source(
         stable_source_id=stable_source_id, principal_id=principal_id,
     )
-    # PLAN-16 M2 TX-05: KnowledgeService 不再内部 commit，调用方统一提交。
-    conn.commit()
+    # PLAN-16 完整：不再内部 commit，由调用方（Task Handler）统一提交事务
     return result
 
 

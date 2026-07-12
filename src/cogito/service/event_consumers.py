@@ -298,6 +298,11 @@ class MemorySourceInvalidatedConsumer(EventConsumer):
         return lease.event_type == "MemorySourceInvalidated"
 
     def handle(self, conn: sqlite3.Connection, lease: OutboxLease) -> bool:
+        """处理 Knowledge→Memory 失效传播（PLAN-16 完整 schema）。
+
+        统一事件 schema：必要字段 resource_id + memory_id（由 KnowledgeService.erase
+        发布）。缺必要字段 → 返回 False（事件标记失败重试），而非静默标成功。
+        """
         consumed = conn.execute(
             "SELECT 1 FROM event_consumptions WHERE consumer_name=? AND event_id=?",
             (self.name, lease.event_id),
@@ -309,18 +314,21 @@ class MemorySourceInvalidatedConsumer(EventConsumer):
             payload = json.loads(lease.payload_ref or "{}")
         except json.JSONDecodeError:
             payload = {}
-        memory_id = str(payload.get("memory_id") or lease.aggregate_id)
-        source_resource_id = str(payload.get("source_resource_id") or "")
+        memory_id = str(payload.get("memory_id") or "").strip()
+        resource_id = str(payload.get("resource_id") or "").strip()
         reason = str(payload.get("reason") or "knowledge_deleted")
-        if not memory_id or not source_resource_id:
-            with conn:
-                _mark_consumed(conn, self.name, lease.event_id)
-            return True
+        # 完整 schema 校验：缺必要字段返回 False（事件会 retry/入 dead-letter）
+        if not memory_id or not resource_id:
+            _LOGGER.warning(
+                "MemorySourceInvalidated missing required fields "
+                "(memory_id=%r, resource_id=%r), failing event for retry",
+                memory_id, resource_id)
+            return False
 
         with conn:
             from cogito.service.memory_service import SqliteMemoryService
             SqliteMemoryService(conn).handle_memory_source_invalidated(
-                memory_id, source_resource_id=source_resource_id, reason=reason,
+                memory_id, source_resource_id=resource_id, reason=reason,
             )
             _mark_consumed(conn, self.name, lease.event_id)
         return True

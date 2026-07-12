@@ -150,6 +150,9 @@ class ExtractionTriggerPolicy:
         return new_message_count >= self.min_new_messages
 
 
+from cogito.infrastructure.metrics_access import _metrics  # noqa: E402
+
+
 def request_extraction(
     conn: sqlite3.Connection,
     *,
@@ -158,11 +161,14 @@ def request_extraction(
     principal_id: str,
     trigger_type: str,
     priority: int = 40,
+    is_explicit_remember: bool = False,
 ) -> bool:
     """创建 durable memory.extract Task 并发出 MemoryExtractionRequested 事件。
 
-    三类提取触发（turn_completed / session_closed / explicit_remember）共用此入口，
-    避免重复的水位计算 / 幂等键 / 事件发出逻辑（PLAN-16 M1 P0-06）。
+    三类提取触发共用此入口（PLAN-16 M1 P0-06）。完整语义：
+    - is_explicit_remember=True 时显式传参给 TriggerPolicy（消息数不足也触发）；
+    - 幂等键加入 trigger type（不同触发类型独立窗口）；
+    - Task + Outbox 事件 + checkpoint 在同一事务提交（调用方提供连接并负责 commit）。
     返回 True 表示（已创建或已存在），False 表示触发策略决定不提交。
     """
     from cogito.domain.events import DomainEvent
@@ -185,10 +191,15 @@ def request_extraction(
 
     if to_seq < from_seq:
         return True
+    # 完整：显式传入 is_explicit_remember，使 explicit 触发不受消息数阈值限制
     if not ExtractionTriggerPolicy().should_trigger(
         trigger_type=trigger_type, new_message_count=new_count,
+        is_explicit_remember=is_explicit_remember,
     ):
         return True
+
+    # OPS-04 完整：记录 extraction requested 指标
+    _metrics().record_extraction_requested()
 
     task_payload = {
         "conversation_id": conversation_id,
@@ -200,8 +211,10 @@ def request_extraction(
         "prompt_version": EXTRACTOR_VERSION,
         "model_role": "memory_extractor",
     }
+    # 完整：幂等键加入 trigger type（turn_completed / session_closed / explicit_remember 独立）
     key = make_idempotency_key(
-        "memory.extract", conversation_id, session_id, from_seq, to_seq, EXTRACTOR_VERSION,
+        "memory.extract", conversation_id, session_id, from_seq, to_seq,
+        f"{EXTRACTOR_VERSION}:{trigger_type}",
     )
     try:
         SqliteTaskService(conn).create(
@@ -214,6 +227,9 @@ def request_extraction(
         )
     except sqlite3.IntegrityError:
         return True  # 同一窗口已有任务，幂等成功
+
+    # OPS-04 完整：记录 extraction completed（Task 已创建）
+    _metrics().record_extraction_completed()
 
     OutboxRepository(conn).insert(DomainEvent(
         event_type="MemoryExtractionRequested",
