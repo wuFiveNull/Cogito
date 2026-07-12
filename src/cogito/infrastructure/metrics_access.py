@@ -1,12 +1,16 @@
 """全局 CognitionMetrics 安全访问（PLAN-16 M7 OPS-04）。
 
 各生产路径（extraction / signal / weight / knowledge / context）统一通过
-_metrics() 获取进程内计数器；未注入时返回 noop 替身，不阻断主流程。
+get_cognition_metrics() / _metrics() 获取进程内计数器。Application 在 build()
+时调用 set_cognition_metrics(...) 注入真实实例；未注入时返回 noop 替身，
+不阻断主流程。
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+from cogito.infrastructure.cognition_metrics import CognitionMetrics
 
 
 class _NoopMetrics:
@@ -49,21 +53,28 @@ class _NoopMetrics:
         pass
 
 
+# ── module-level registry（替代不存在的 Config._instance 查找）──
+
+_cognition_metrics: CognitionMetrics | None = None
+
+
+def set_cognition_metrics(metrics: CognitionMetrics) -> None:
+    """Application build() 注入真实 CognitionMetrics 实例（PLAN-16 完整）。"""
+    global _cognition_metrics
+    _cognition_metrics = metrics
+
+
+def get_cognition_metrics() -> CognitionMetrics:
+    """获取当前注入的 CognitionMetrics；未注入返回 noop 替身。"""
+    return _cognition_metrics or _NoopMetrics()
+
+
 def _metrics() -> Any:
-    """安全获取全局 CognitionMetrics；缺失时返回 noop 替身。"""
-    try:
-        from cogito.config import Config
-        cfg = getattr(Config, "_instance", None)
-    except Exception:
-        cfg = None
-    m = getattr(cfg, "_cognition_metrics", None) if cfg else None
-    return m or _NoopMetrics()
+    """安全获取全局 CognitionMetrics（PLAN-16 完整注入路径）。"""
+    return get_cognition_metrics()
 
 
 def _reset_for_test() -> None:
-    """测试辅助：清空 noop 状态（占位，noop 无状态）。"""
-    pass
-
-
-# 兼容：历史位置引用
-from cogito.infrastructure.cognition_metrics import CognitionMetrics  # noqa: F401, E402
+    """测试辅助：清空注入状态。"""
+    global _cognition_metrics
+    _cognition_metrics = None

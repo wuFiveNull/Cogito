@@ -231,7 +231,10 @@ class RuntimeApplication:
             knowledge_service = KnowledgeService(conn, embedder=knowledge_embedder)
 
             def _make_knowledge_service(knowledge_conn):
-                return KnowledgeService(knowledge_conn, embedder=knowledge_embedder)
+                return KnowledgeService(
+                    knowledge_conn, embedder=knowledge_embedder,
+                    payload_store_factory=self._make_payload_store_factory(),
+                )
 
             knowledge_factory = _make_knowledge_service
 
@@ -263,6 +266,9 @@ class RuntimeApplication:
         multimodal_metrics = MultimodalMetrics()
         # PLAN-16 M7 OPS-04: Memory/Knowledge 专项运行指标（进程内计数器）
         cognition_metrics = CognitionMetrics()
+        # PLAN-16 完整注入：让 metrics_access._metrics() 能找到真实实例
+        from cogito.infrastructure.metrics_access import set_cognition_metrics
+        set_cognition_metrics(cognition_metrics)
 
         def _make_vision_service() -> VisionAnalysisService:
             from cogito.store.connection import get_connection as _gc
@@ -383,8 +389,7 @@ class RuntimeApplication:
         app.knowledge_service = knowledge_service
         app.knowledge_service_factory = knowledge_factory
         app.multimodal_metrics = multimodal_metrics
-        # PLAN-16 M7 OPS-04: 注入 Memory/Knowledge 专项指标（config 持有供 QueryService 读取）
-        config._cognition_metrics = cognition_metrics
+        # PLAN-16 M7 OPS-04: 注入 Memory/Knowledge 专项指标（metrics_access registry）
         app.cognition_metrics = cognition_metrics
         app._wakeup_event = wakeup_event
         app._recovery_counts = recovery_counts
@@ -682,6 +687,16 @@ class RuntimeApplication:
 
         return result
 
+    # ── PLAN-16 M4 完整 payload 边界：PayloadStore 工厂 ───────────────────
+
+    def _make_payload_store_factory(self) -> Callable[[], Any] | None:
+        """构造 PayloadStore 工厂；multimodal 未启用则返回 None。"""
+        if not self.config.multimodal.enabled:
+            return None
+        from cogito.infrastructure.payload_store import PayloadStore
+        return lambda conn=None: PayloadStore(
+            self.config.resolve_payload_dir(), conn or self.conn)
+
     # ── worker entrypoint ──────────────────────────────────────────────────
 
     async def run_worker(
@@ -754,6 +769,8 @@ class RuntimeApplication:
             proactive_config=self.config.capability.proactive,
             presence_reader=presence_reader,
             config_version_id=self.config.config_version,
+            # PLAN-16 M4 完整 payload 边界：resolver 化知识段落文本
+            payload_store_factory=self._make_payload_store_factory(),
         )
         task_registry = _build_registry(task_handler_ctx)
         task_dispatcher = TaskDispatcher(self.conn)

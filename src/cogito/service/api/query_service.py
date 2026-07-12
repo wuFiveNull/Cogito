@@ -1453,10 +1453,12 @@ class QueryService:
     # ── PLAN-16 M7 OPS-04: Memory/Knowledge 专项指标 ───────────
 
     def cognition_metrics(self) -> dict[str, Any]:
-        """Memory/Knowledge 专项运行指标（PLAN-16 M7 OPS-04）。"""
+        """Memory/Knowledge 专项运行指标（PLAN-16 M7 OPS-04 完整）。"""
         from cogito.service.cognition_metrics_service import CognitionMetricsService
-        provider = getattr(self._config, "_cognition_metrics", None)
-        return CognitionMetricsService(self._conn, metrics=provider).snapshot()
+        # PLAN-16 完整：通过 metrics_access registry 读取真实注入的计数器
+        from cogito.infrastructure.metrics_access import get_cognition_metrics
+        return CognitionMetricsService(
+            self._conn, metrics=get_cognition_metrics()).snapshot()
 
     # ── Context Snapshot 查询（PLAN-16 M7 OPS-03）──────────────
 

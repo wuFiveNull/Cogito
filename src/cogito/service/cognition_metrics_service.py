@@ -11,12 +11,14 @@ import sqlite3
 from typing import Any
 
 from cogito.infrastructure.cognition_metrics import CognitionMetrics
+from cogito.infrastructure.metrics_access import get_cognition_metrics
 
 
 class CognitionMetricsService:
     def __init__(self, conn: sqlite3.Connection, metrics: CognitionMetrics | None = None) -> None:
         self._conn = conn
-        self._metrics = metrics or CognitionMetrics()
+        # 优先使用注入的 metrics；否则取全局 registry（application 注入）；否则 noop
+        self._metrics = metrics if metrics is not None else get_cognition_metrics()
 
     @property
     def counters(self) -> CognitionMetrics:

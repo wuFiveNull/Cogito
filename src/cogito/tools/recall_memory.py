@@ -111,6 +111,6 @@ def create_tool_def(
             "required": ["query"],
         },
         toolset=("core", "memory"),
-        handler=_make_handler(reader=reader),
+        handler=_make_handler(reader=reader, on_exposed=on_exposed),
         risk_level="low",
     )

@@ -109,6 +109,8 @@ class TaskHandlerContext:
     _attempt_id: str = ""
     # PLAN-16 M3 MEM-01: handler 主动声明的记忆依赖（成功后被强化）
     declared_memory_dependencies: list[str] = field(default_factory=list)
+    # PLAN-16 M4 完整 payload 边界：PayloadStore 工厂（提供时 resolver 化段落文本）
+    payload_store_factory: Callable[[], Any] | None = None
 
     def declare_memory_dependencies(self, memory_ids: list[str]) -> None:
         """声明本 Task 使用并强化的记忆（PLAN-16 M3 MEM-01）。
@@ -169,7 +171,7 @@ def _knowledge_service(ctx: TaskHandlerContext, conn: sqlite3.Connection):
     if ctx.knowledge_service_factory:
         return ctx.knowledge_service_factory(conn)
     from cogito.service.knowledge.service import KnowledgeService
-    return KnowledgeService(conn)
+    return KnowledgeService(conn, payload_store_factory=ctx.payload_store_factory)
 
 
 def _refresh_knowledge_views_task(ctx: TaskHandlerContext, conn: sqlite3.Connection) -> None:
@@ -191,6 +193,33 @@ def _task_json(task: Task) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"invalid {task.task_type} payload")
     return value
+
+
+def _embed_model_from(ctx: TaskHandlerContext) -> str:
+    """从 context 获取当前 embedding model id（用于 embed 任务幂等键）。"""
+    try:
+        factory = ctx.knowledge_service_factory
+        if factory is None:
+            return ""
+        svc = factory(ctx.connection_factory()) if ctx.connection_factory else None
+        if svc is None:
+            return ""
+        embedder = getattr(svc, "_embedder", None)
+        if embedder is None:
+            return ""
+        return getattr(embedder, "model_id", "") or ""
+    except Exception:
+        return ""
+
+
+def _count_pending_segments(conn: sqlite3.Connection, svc: Any) -> int:
+    """计算仍有待嵌入的段数（PLAN-16 embed 排水循环）。"""
+    try:
+        from cogito.store.knowledge_repo import list_unembedded_segments
+        return len(list_unembedded_segments(
+            conn, model=getattr(getattr(svc, "_embedder", None), "model_id", "") or None))
+    except Exception:
+        return 0
 
 
 def _handle_knowledge_ingest(task: Task, ctx: TaskHandlerContext) -> str:
@@ -228,10 +257,20 @@ def _handle_knowledge_embed(task: Task, ctx: TaskHandlerContext) -> str:
     conn = ctx.connection_factory()
     try:
         import asyncio
-        count = asyncio.run(_knowledge_service(ctx, conn).embed_pending())
+        svc = _knowledge_service(ctx, conn)
+        # PLAN-16 M4 完整：传入 payload_store_factory resolver 化段落文本
+        count = asyncio.run(svc.embed_pending(make_payload_store=ctx.payload_store_factory))
         # OPS-04 完整：记录 knowledge embedding 指标
         _metrics().record_knowledge_embedding(status="ok" if count else "empty")
-        return f"knowledge embedded: {count}"
+        # PLAN-16 完整：处理达到上限仍有 pending 排水循环（embed_pending 幂等安全）
+        remaining = _count_pending_segments(conn, svc)
+        if remaining > 0:
+            from cogito.service.knowledge.sync import enqueue_knowledge_embed
+            enqueue_knowledge_embed(
+                conn, origin="knowledge_embed_drain",
+                embed_model=_embed_model_from(ctx))
+        conn.commit()
+        return f"knowledge embedded: {count} (remaining_pending={remaining})"
     except Exception:
         conn.rollback()
         # OPS-04 完整：记录 embedding 失败

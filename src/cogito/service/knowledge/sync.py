@@ -86,13 +86,12 @@ def enqueue_knowledge_embed(conn: sqlite3.Connection, origin: str = "knowledge_i
     完整：幂等键加入 embedding_model_version，模型升级后可重新嵌入；
     同时检查是否仍有 pending segment，避免全局共享键拦住后续摄取。
     """
-    idem = f"knowledge.embed:{embed_model or 'none'}"
+    # PLAN-16 完整：去掉全局幂等键（embed_pending 天然幂等：WHERE embedding_status='pending'）
     try:
         from cogito.service.task_service import SqliteTaskService
         task = SqliteTaskService(conn).create(
             "knowledge.embed",
             json.dumps({"mode": "pending", "embed_model": embed_model}, ensure_ascii=False),
-            idempotency_key=idem,
             origin=origin,
             priority=20,
             retry_policy={"max_attempts": 3, "backoff_seconds": [5, 30, 120]},
@@ -102,7 +101,7 @@ def enqueue_knowledge_embed(conn: sqlite3.Connection, origin: str = "knowledge_i
             return task.task_id
         return None
     except sqlite3.IntegrityError:
-        _LOGGER.debug("knowledge.embed already queued")
+        _LOGGER.debug("knowledge.embed create conflict")
         return None
 
 
