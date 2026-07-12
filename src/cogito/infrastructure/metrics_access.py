@@ -12,18 +12,41 @@ from typing import Any
 class _NoopMetrics:
     """metrics 未注入时的安全替身（所有方法均为空操作）。"""
 
-    def record_extraction_requested(self) -> None: pass
-    def record_extraction_completed(self) -> None: pass
-    def record_extraction_failed(self) -> None: pass
-    def record_signal(self, signal_type: str) -> None: pass
-    def record_weight_recomputed(self) -> None: pass
-    def record_knowledge_ingest(self, status: str = "ok") -> None  # noqa: E501
-    def record_knowledge_embedding(self, status: str = "ok") -> None  # noqa: E501
-    def record_knowledge_retrieval(self, path: str = "keyword") -> None  # noqa: E501
-    def record_knowledge_retrieval_degraded(self, reason: str = "no_embedder") -> None  # noqa: E501
-    def record_context_candidate(self, source: str, selected: bool) -> None  # noqa: E501
-    def record_context_tokens(self, source: str, tokens: int) -> None  # noqa: E501
-    def record_context_exclusion(self, reason: str) -> None  # noqa: E501
+    def record_extraction_requested(self) -> None:
+        pass
+
+    def record_extraction_completed(self) -> None:
+        pass
+
+    def record_extraction_failed(self) -> None:
+        pass
+
+    def record_signal(self, signal_type: str) -> None:
+        pass
+
+    def record_weight_recomputed(self) -> None:
+        pass
+
+    def record_knowledge_ingest(self, status: str = "ok") -> None:
+        pass
+
+    def record_knowledge_embedding(self, status: str = "ok") -> None:
+        pass
+
+    def record_knowledge_retrieval(self, path: str = "keyword") -> None:
+        pass
+
+    def record_knowledge_retrieval_degraded(self, reason: str = "no_embedder") -> None:
+        pass
+
+    def record_context_candidate(self, source: str, selected: bool) -> None:
+        pass
+
+    def record_context_tokens(self, source: str, tokens: int) -> None:
+        pass
+
+    def record_context_exclusion(self, reason: str) -> None:
+        pass
 
 
 def _metrics() -> Any:

@@ -1479,6 +1479,7 @@ class QueryService:
             "excluded_summary": record.excluded_summary,
             "per_source_tokens": record.per_source_tokens,
             "exclusion_stats": record.exclusion_stats,
+            "excluded": list(record.excluded),
             "created_at": record.created_at,
             "items": [
                 {
@@ -1514,6 +1515,7 @@ class QueryService:
             "tokens_used": snap["tokens_used"],
             "per_source_tokens": snap["per_source_tokens"],
             "exclusion_stats": snap["exclusion_stats"],
+            "excluded": list(snap.get("excluded", [])),
             "selected_by_source": {
                 src: [
                     {

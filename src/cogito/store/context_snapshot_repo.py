@@ -53,12 +53,13 @@ class ContextSnapshotRepository:
             "message_upper_bound, query_plan_version, "
             "selection_policy_version, token_budget, tokens_used, "
             "excluded_summary, created_at, schema_version, per_source_tokens_json, "
-            "exclusion_stats_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "exclusion_stats_json, excluded_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (record.snapshot_id, record.session_id, record.attempt_id, record.attempt_type,
              record.parent_snapshot_id, record.message_upper_bound, record.query_plan_version,
              record.selection_policy_version, record.token_budget, record.tokens_used,
              int(record.excluded_summary), record.created_at, record.schema_version,
-             json.dumps(record.per_source_tokens), json.dumps(record.exclusion_stats)),
+             json.dumps(record.per_source_tokens), json.dumps(record.exclusion_stats),
+             json.dumps(list(record.excluded)) if record.excluded else None),
         )
         for item in record.items:
             self._conn.execute(
@@ -138,4 +139,5 @@ class ContextSnapshotRepository:
             items=items,
             per_source_tokens=json.loads(row["per_source_tokens_json"] or "{}"),
             exclusion_stats=json.loads(row["exclusion_stats_json"] or "{}"),
+            excluded=tuple(json.loads(row["excluded_json"] or "[]")),
         )

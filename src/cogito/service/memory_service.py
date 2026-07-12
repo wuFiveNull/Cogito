@@ -206,18 +206,17 @@ class SqliteMemoryService:
             raise ValueError("Either conn or repo must be provided")
 
     def _emit_memory_event(self, event_type: str, memory_id: str, payload: dict | None = None) -> None:
-        """发布 Memory 领域事件到 Outbox（PLAN-16 M2 TX-01/TX-03）。
+        """发布 Memory 领域事件到 Outbox（PLAN-16 M2 TX-01/TX-03 + 完整版本单调）。
 
         与调用方共享同一连接 / 事务：写入失败会向上传播，由调用方
         决定回滚，确保 Memory 行与 Outbox 事件原子提交。
-        aggregate_version 取 MemoryItem 当前 version（单调递增），
-        同一 aggregate 事件可严格排序。
+        aggregate_version 由 OutboxRepository.next_aggregate_version 在同一事务内
+        MAX+1 取得，保证同一 aggregate 事件序列严格单调（不受实体 version 变化影响）。
         """
         from cogito.domain.events import DomainEvent
         from cogito.store.repositories import OutboxRepository
         data = payload or {}
-        current = self._repo.get(memory_id)
-        version = current.version if current else 1
+        version = OutboxRepository(self._repo._conn).next_aggregate_version("memory", memory_id)
         OutboxRepository(self._repo._conn).insert(DomainEvent(
             event_type=event_type,
             aggregate_type="memory",

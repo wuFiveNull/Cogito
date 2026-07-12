@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from cogito.contracts.budget import TokenBudgetConfig
+from cogito.contracts.budget import TokenBudgetConfig, allocate_budget
 from cogito.contracts.clock import Clock, ProductionClock, epoch_ms
 from cogito.contracts.memory import MemoryReader
 from cogito.contracts.multimodal import MultimodalContextReader
@@ -182,12 +182,15 @@ class ContextSnapshot:
     per_source_tokens: tuple[tuple[str, int], ...] = ()
     # PLAN-13 P13-12：排除摘要统计（unauthorized/stale/superseded/low score/token budget/duplicate）
     exclusion_stats: tuple[tuple[str, int], ...] = ()
+    # PLAN-16 M6 #14 完整：每条被排除候选的完整 provenance（score 分项 + 排除原因）
+    excluded: tuple[dict[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "items", tuple(self.items))
         object.__setattr__(self, "memory_ids", tuple(self.memory_ids))
         object.__setattr__(self, "per_source_tokens", tuple(self.per_source_tokens))
         object.__setattr__(self, "exclusion_stats", tuple(self.exclusion_stats))
+        object.__setattr__(self, "excluded", tuple(self.excluded))
 
 
 class KnowledgeReader(Protocol):
@@ -300,6 +303,10 @@ class ContextBuilder:
                 role="system",
             ))
 
+        # PLAN-16 M6 #13 完整：统一预算决策（RETRIEVAL-CONTEXT §9 各站比例）
+        self._budget_allocation = allocate_budget(
+            total_budget=self._max_input_tokens, config=self._budget_config)
+
         # 2. 注入长期记忆（阶段 3）
         # RET-02: query = 当前用户输入内容，驱动记忆 query-aware 相关性召回
         query_text = (input_msg or {}).get("content", "") or ""
@@ -308,15 +315,22 @@ class ContextBuilder:
         )
         memory_items, memory_ids, memory_excluded = injection
         items.extend(memory_items)
-        # RET-05: 记忆源排除原因暂存，最终汇入 Snapshot exclusion_stats
-        self._memory_excluded: dict[str, str] = memory_excluded
+        # PLAN-16 M6 #14 完整：收集被排除 candidate 完整 provenance（score 分项+原因）
+        all_excluded: list[dict[str, Any]] = list(memory_excluded)
 
         # 2b. Authorized content memory.  It is an independent source and can be
         # disabled without changing the existing fact-memory path.
         if input_msg and self._knowledge_reader is not None:
-            items.extend(self._inject_knowledge(
+            knowledge_items, knowledge_excluded = self._inject_knowledge(
                 principal_id, input_msg.get("content", ""),
-            ))
+            )
+            items.extend(knowledge_items)
+            all_excluded.extend(knowledge_excluded)
+
+        # 2c. Task/Checkpoint state（PLAN-16 M6 #12 完整：TaskStateRetriever）
+        task_state_items, task_state_excluded = self._inject_task_state(principal_id)
+        items.extend(task_state_items)
+        all_excluded.extend(task_state_excluded)
 
         # 3. 上下文压缩（阶段 6）
         history_itemized = [self._message_to_item(m) for m in history]
@@ -382,8 +396,9 @@ class ContextBuilder:
         for value in excluded:
             kind = value.split(":", 1)[0] if ":" in value else "token_budget"
             exclusion_counts[kind] = exclusion_counts.get(kind, 0) + 1
-        # RET-05: 合并记忆源选择阶段的排除原因（token_budget 等）到 Snapshot
-        for reason in getattr(self, "_memory_excluded", {}).values():
+        # PLAN-16 M6 #14 完整：合并 memory/knowledge/task_state 选择阶段的排除原因
+        for prov in getattr(self, "all_excluded", []):
+            reason = prov.get("exclusion_reason", "unknown")
             exclusion_counts[reason] = exclusion_counts.get(reason, 0) + 1
 
         snapshot = ContextSnapshot(
@@ -406,6 +421,8 @@ class ContextBuilder:
             created_at=epoch_ms(self._clock.now()),
             per_source_tokens=tuple(sorted(per_source.items())),
             exclusion_stats=tuple(sorted(exclusion_counts.items())),
+            # PLAN-16 M6 #14 完整：持久化被排除候选的完整 provenance
+            excluded=tuple(getattr(self, "all_excluded", [])),
         )
 
         return snapshot
@@ -441,16 +458,18 @@ class ContextBuilder:
             ))
         return candidates
 
-    def _inject_knowledge(self, principal_id: str, query: str) -> list[ContextItem]:
+    def _inject_knowledge(
+        self, principal_id: str, query: str,
+    ) -> tuple[list[ContextItem], list[dict]]:
         """PLAN-13/R-12: 构建知识候选 → 按 knowledge 源预算选择 → ContextItem。"""
         if not principal_id or not query.strip() or self._knowledge_reader is None:
-            return []
+            return [], []
         try:
             results = self._knowledge_reader.retrieve(
                 principal_id=principal_id, query=query, limit=self._knowledge_top_k,
             )
         except Exception:
-            return []
+            return [], []
 
         candidates = self._build_knowledge_candidates(results)
 
@@ -503,7 +522,76 @@ class ContextBuilder:
                     ("query_plan_version", self._query_plan_version),
                 ),
             ))
-        return output
+        return output, excluded
+
+    # ── PLAN-16 M6 #12 完整：TaskStateRetriever ─────────────────────────────
+
+    def _inject_task_state(self, principal_id: str) -> tuple[list[ContextItem], list[dict]]:
+        """TaskStateRetriever（PLAN-16 M6 #12 / RETRIEVAL-CONTEXT §4）。
+
+        召回活跃 Task 状态作为独立检索源（RetrievalCandidate），纳入统一预算选择。
+        输出选中 ContextItem + 排除 candidate 的完整 provenance。
+        """
+        if not principal_id:
+            return [], []
+        rows = self._conn.execute(
+            "SELECT task_id, task_type, payload_ref, origin, priority, status "
+            "FROM tasks WHERE status IN ('queued','running') "
+            "AND origin NOT LIKE 'memory_maintenance%' "
+            "ORDER BY priority DESC, created_at DESC LIMIT ?",
+            (10,),
+        ).fetchall()
+        if not rows:
+            return [], []
+        task_candidates: list[RetrievalCandidate] = []
+        for r in rows:
+            payload = {}
+            try:
+                payload = json.loads(r["payload_ref"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                pass
+            explicit = str(r["task_type"]) in ("memory.extract", "knowledge.ingest",
+                                               "knowledge.sync_source")
+            task_candidates.append(RetrievalCandidate(
+                candidate_type="task_state",
+                candidate_id=str(r["task_id"]),
+                principal_id=principal_id,
+                scope="",
+                content_ref=json.dumps({"task_type": r["task_type"], "origin": r["origin"],
+                                        "payload": payload}, ensure_ascii=False),
+                token_estimate=60,
+                keyword_score=0.0, semantic_score=0.0, recency_score=0.0,
+                importance_score=float(r["priority"]) / 100.0,
+                trust_score=1.0 if explicit else 0.6,
+                final_score=float(r["priority"]) / 100.0,
+                retrieval_path="task_state",
+                policy_version=self._policy_version,
+            ))
+        task_candidates = normalize_scores(task_candidates)
+        _record_candidates("task_state", task_candidates, selected=False)
+        budget = self._budget_config.quota("task_state", max(1, self._max_input_tokens))
+        selected, excluded = self._select_candidates_by_budget(task_candidates, budget)
+        _record_candidates("task_state", selected, selected=True)
+        _record_exclusions("task_state", excluded)
+        _record_tokens("task_state", sum(c.token_estimate for c in selected))
+        output: list[ContextItem] = []
+        for c in selected:
+            output.append(ContextItem(
+                item_type="task_state",
+                item_id=c.candidate_id,
+                source="task_state",
+                tokens=max(1, c.token_estimate),
+                trust_label="internal",
+                content=f"<active_task>\n{c.content_ref}\n</active_task>",
+                role="system",
+                score=c.final_score,
+                retrieval_path=c.retrieval_path,
+                provenance=(("candidate_type", "task_state"),
+                            ("final_score", f"{c.final_score:.3f}"),
+                            ("policy_version", self._policy_version),
+                            ("query_plan_version", self._query_plan_version)),
+            ))
+        return output, excluded
 
     # ── 内部方法（与原始 runtime/context.py 完全一致）──
 
