@@ -309,6 +309,20 @@ def _poll_mcp_connector(
                 connector_item, source_metadata=_build_source_metadata(item)
             )
 
+            # PLAN-16 M4 KNOW-02: MCP 新 digest 内容经 durable Task 进入 Knowledge
+            if item_status == ItemStatus.digest:
+                from cogito.service.knowledge.sync import enqueue_connector_knowledge_sync
+                enqueue_connector_knowledge_sync(
+                    conn, connector_id=connector_id,
+                    item={
+                        "source_item_id": external_id,
+                        "title": title or "",
+                        "body": body or "",
+                        "content_hash": content_hash,
+                    },
+                    principal_id="owner",
+                )
+
             # 6. 发 Outbox —— SourceEventIngested
             event = DomainEvent(
                 event_type="SourceEventIngested",

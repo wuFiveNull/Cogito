@@ -1,4 +1,4 @@
-"""KnowledgeSync — 来源增删改级联（PLAN-13 P13-10 M5）。
+"""KnowledgeSync — 来源增删改级联（PLAN-13 P13-10 M5, PLAN-16 M4）。
 
 每个 Connector/source root 使用 stable_source_id + content_hash + watermark。
 Diff 分类：added、modified、unchanged、deleted。
@@ -6,11 +6,119 @@ Diff 分类：added、modified、unchanged、deleted。
 """
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from cogito.service.knowledge.service import KnowledgeService
 
 _LOGGER = logging.getLogger("cogito.knowledge.sync")
+
+
+def _compose_raw_text(item: dict) -> str:
+    """把 ConnectorItem 的摘要字段拼成 Knowledge 摄取的 raw_text。"""
+    title = str(item.get("title") or "")
+    summary = str(item.get("summary") or "")
+    body = str(item.get("body") or "")
+    parts = [p for p in (title, summary, body) if p]
+    text = "\n\n".join(parts)
+    return text[:50000]  # 首版内联上限（大正文走 payload_ref 由调用方处理）
+
+
+def enqueue_knowledge_sync_source(
+    conn: sqlite3.Connection,
+    *,
+    stable_source_id: str,
+    source_kind: str = "connector",
+    content_hash: str = "",
+    raw_text: str,
+    principal_id: str = "owner",
+    trust_label: str = "external",
+    origin: str = "connector_poll",
+) -> str | None:
+    """创建 durable knowledge.sync_source Task（PLAN-16 M4）。
+
+    KNOW-01/02/03：Connector/API 来源内容经 durable Task 进入 Knowledge，
+    以便 parse/embed/checkpoint 可恢复可重试。幂等键基于 stable_source_id，
+    重复内容不会重复入 Knowledge。
+    """
+    if not stable_source_id:
+        return None
+    data = {
+        "stable_source_id": stable_source_id,
+        "source_kind": source_kind,
+        "content_hash": content_hash,
+        "raw_text": raw_text[:50000],
+        "principal_id": principal_id,
+        "trust_label": trust_label,
+    }
+    idempotency_key = f"knowledge.sync_source:{stable_source_id}"
+    try:
+        from cogito.service.task_service import SqliteTaskService
+        task = SqliteTaskService(conn).create(
+            "knowledge.sync_source",
+            json.dumps(data, ensure_ascii=False),
+            idempotency_key=idempotency_key,
+            origin=origin,
+            priority=30,
+            retry_policy={"max_attempts": 3, "backoff_seconds": [5, 30, 120]},
+        )
+        if task:
+            _LOGGER.info("Enqueued knowledge.sync_source for %s", stable_source_id)
+            return task.task_id
+        return None
+    except sqlite3.IntegrityError:
+        _LOGGER.debug(
+            "knowledge.sync_source already queued for %s", stable_source_id)
+        return None
+
+
+def enqueue_knowledge_embed(conn: sqlite3.Connection, origin: str = "knowledge_ingest") -> str | None:
+    """创建 durable knowledge.embed Task（PLAN-16 M4 KNOW-05）。
+
+    ingest 完成后调用，使 parse 后的 segment 经独立可恢复步骤进入 embedding。
+    """
+    idempotency_key = "knowledge.embed:pending"
+    try:
+        from cogito.service.task_service import SqliteTaskService
+        task = SqliteTaskService(conn).create(
+            "knowledge.embed",
+            json.dumps({"mode": "pending"}, ensure_ascii=False),
+            idempotency_key=idempotency_key,
+            origin=origin,
+            priority=20,
+            retry_policy={"max_attempts": 3, "backoff_seconds": [5, 30, 120]},
+        )
+        if task:
+            _LOGGER.info("Enqueued knowledge.embed")
+            return task.task_id
+        return None
+    except sqlite3.IntegrityError:
+        _LOGGER.debug("knowledge.embed already queued")
+        return None
+
+
+def enqueue_connector_knowledge_sync(
+    conn: sqlite3.Connection,
+    *,
+    connector_id: str,
+    item: dict,
+    principal_id: str = "owner",
+) -> str | None:
+    """为一条 Connector 新/修改内容创建 durable knowledge.sync_source Task（KNOW-01/02）。"""
+    source_item_id = str(item.get("source_item_id") or item.get("item_id") or "")
+    if not source_item_id:
+        return None
+    stable_source_id = f"connector:{connector_id}:{source_item_id}"
+    return enqueue_knowledge_sync_source(
+        conn,
+        stable_source_id=stable_source_id,
+        source_kind="connector",
+        content_hash=str(item.get("content_hash") or ""),
+        raw_text=_compose_raw_text(item),
+        principal_id=principal_id,
+        trust_label="external",
+        origin="connector_poll",
+    )
 
 
 def sync_resource(

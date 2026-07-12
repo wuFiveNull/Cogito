@@ -190,6 +190,20 @@ def _poll_connector(
             ConnectorItemRepository(conn).insert(item)
             new_count += 1
 
+            # PLAN-16 M4 KNOW-01: 新 digest 内容经 durable Task 进入 Knowledge
+            if item_status == ItemStatus.digest:
+                from cogito.service.knowledge.sync import enqueue_connector_knowledge_sync
+                enqueue_connector_knowledge_sync(
+                    conn, connector_id=connector_id,
+                    item={
+                        "source_item_id": entry.source_item_id,
+                        "title": entry.title,
+                        "summary": entry.summary,
+                        "content_hash": entry.content_hash,
+                    },
+                    principal_id="owner",
+                )
+
         uow.commit()
 
     _LOGGER.info(

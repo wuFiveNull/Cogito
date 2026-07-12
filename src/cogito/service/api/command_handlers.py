@@ -799,9 +799,13 @@ def _refresh_knowledge_views(conn: sqlite3.Connection, config: Any) -> None:
 def register_knowledge(
     payload: KnowledgeRegisterPayload, deps: CommandDeps = Depends(get_command_deps),
 ) -> CommandResponse:
-    """注册知识资源 + 可选立即 ingest"""
+    """注册知识资源 + 可选经 durable Task 摄取（PLAN-16 M4 KNOW-03/04）。
+
+    仅登记意图与注册资源（元数据，快速）；内容摄取经 durable
+    knowledge.sync_source Task 完成（可恢复可重试，不在 HTTP 请求内同步 parse/embed）。
+    """
     cached = _check_idempotency(deps.conn, ACTOR, "register-knowledge", payload.idempotency_key)
-    if cached:
+    if cached and cached.status == "ok":
         return cached
     from cogito.service.knowledge.service import KnowledgeService
     svc = KnowledgeService(deps.conn)
@@ -813,10 +817,21 @@ def register_knowledge(
         trust_label=payload.trust_label,
         source_version=payload.source_version,
     )
+    task_id = None
     if payload.content:
-        svc.ingest(resource.resource_id, payload.content)
-    # PLAN-16 M2 TX-05/06: 审计与事实（register + ingest）同一事务原子提交。
-    # KnowledgeService 不再内部 commit，由 deps.conn.commit() 统一提交。
+        # PLAN-16 M4 KNOW-03/04: 内容经 durable Task 摄取（handler 使用含 embedder 的工厂）
+        from cogito.service.knowledge.sync import enqueue_knowledge_sync_source
+        task_id = enqueue_knowledge_sync_source(
+            deps.conn,
+            stable_source_id=resource.source_uri_hash,
+            source_kind=payload.source_kind,
+            content_hash="",
+            raw_text=payload.content,
+            principal_id=payload.principal_id or "owner",
+            trust_label=payload.trust_label,
+            origin="register-knowledge",
+        )
+    # PLAN-16 M2 TX-05/06: 审计与事实同一事务原子提交。
     write_audit(
         deps.conn, actor_id=ACTOR, action="register-knowledge",
         target_type="knowledge_resource", target_id=resource.resource_id,
@@ -826,7 +841,7 @@ def register_knowledge(
     deps.conn.commit()
     _refresh_knowledge_views(deps.conn, deps.config)
     return _ok("register-knowledge", resource.resource_id,
-               source_kind=payload.source_kind)
+               source_kind=payload.source_kind, task_id=task_id)
 
 
 @router.post("/refresh-knowledge", response_model=CommandResponse)
@@ -847,9 +862,21 @@ def refresh_knowledge(
     resource_id = row["resource_id"]
     from cogito.service.knowledge.service import KnowledgeService
     svc = KnowledgeService(deps.conn)
+    task_id = None
     if payload.content:
+        # PLAN-16 M4 KNOW-03/04: 失效 + 内容经 durable Task 重新摄取
         svc.invalidate(resource_id, "refresh")
-        svc.ingest(resource_id, payload.content)
+        from cogito.service.knowledge.sync import enqueue_knowledge_sync_source
+        task_id = enqueue_knowledge_sync_source(
+            deps.conn,
+            stable_source_id=payload.source_uri_hash,
+            source_kind="explicit_local_file",
+            content_hash="",
+            raw_text=payload.content,
+            principal_id=payload.principal_id or "owner",
+            trust_label="unverified",
+            origin="refresh-knowledge",
+        )
     # PLAN-16 M2 TX-05/06: 审计与事实同一事务原子提交。
     write_audit(
         deps.conn, actor_id=ACTOR, action="refresh-knowledge",
@@ -859,7 +886,7 @@ def refresh_knowledge(
     )
     deps.conn.commit()
     _refresh_knowledge_views(deps.conn, deps.config)
-    return _ok("refresh-knowledge", resource_id)
+    return _ok("refresh-knowledge", resource_id, task_id=task_id)
 
 
 @router.post("/invalidate-knowledge", response_model=CommandResponse)

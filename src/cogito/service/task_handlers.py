@@ -206,6 +206,9 @@ def _handle_knowledge_ingest(task: Task, ctx: TaskHandlerContext) -> str:
             raise ValueError("knowledge.ingest requires resource_id and raw_text")
         document, segments = service.ingest(resource_id, raw_text)
         _refresh_knowledge_views_task(ctx, conn)
+        # PLAN-16 M4 KNOW-05: ingest 后提交独立的 embedding Task，使 segment 进入嵌入路径
+        from cogito.service.knowledge.sync import enqueue_knowledge_embed
+        enqueue_knowledge_embed(conn, origin="knowledge_ingest")
         # PLAN-16 M2 TX-05: KnowledgeService 不再内部 commit，handler 统一提交。
         conn.commit()
         return f"knowledge ingested: {document.document_id} ({len(segments)} segments)"
