@@ -617,7 +617,7 @@ class ContextBuilder:
                 policy_version=self._policy_version,
             ))
         task_candidates = normalize_scores(task_candidates)
-        _record_candidates("task_state", task_candidates, selected=False)
+        self._record_candidates("task_state", task_candidates, selected=False)
         return task_candidates, {}
 
     # ── 内部方法（与原始 runtime/context.py 完全一致）──
@@ -886,7 +886,7 @@ class ContextBuilder:
         candidates = self._build_knowledge_candidates(results)
         # PLAN-16 M6 RET-04: 组内标准化，使 knowledge 分数可与其他源比较
         candidates = normalize_scores(candidates)
-        _record_candidates("knowledge_segment", candidates, selected=False)
+        self._record_candidates("knowledge_segment", candidates, selected=False)
         return candidates, {}
 
     # ── OPS-04 完整：context 指标记录 ──────────────────────────────────────
