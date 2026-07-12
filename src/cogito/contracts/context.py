@@ -9,8 +9,10 @@ Previous location: `cogito.runtime.context` (kept as re-export shim).
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from cogito.contracts.budget import TokenBudgetConfig
@@ -26,6 +28,52 @@ _CHARS_PER_TOKEN = 4.0
 def estimate_tokens(text: str) -> int:
     """字符级 Token 估算。"""
     return max(1, int(len(text) / _CHARS_PER_TOKEN))
+
+
+# ── PLAN-16 M6 RET-02/04: query-aware scoring helpers ──────────────────────
+
+# RETRIEVAL-CONTEXT §6.1 综合分数分量权重（memory 无 embedding，semantic=0）。
+# keyword + recency + importance + confidence + trust；权重和 = 1.0。
+_KW_WEIGHT = 0.25
+_RECENCY_WEIGHT = 0.10
+_IMPORTANCE_WEIGHT = 0.35
+_CONFIDENCE_WEIGHT = 0.15
+_TRUST_WEIGHT = 0.15
+_RECENCY_HALF_LIFE_DAYS = 30.0
+
+
+def _tokenize(text: str) -> list[str]:
+    """简单的 lower-case 分词（中英文），用于 keyword 重叠度计算。"""
+    return re.findall(r"[一-鿿㐀-䶿]+|[A-Za-z0-9]+", text.lower())
+
+
+def keyword_score(query: str, subject: str, predicate: str, value: str) -> float:
+    """query 与记忆文本的 keyword 重叠度 ∈ [0,1]（PLAN-16 M6 RET-04）。
+
+    MemoryRetriever 接收当前 query 后（RET-02），用 query terms 在记忆文本上的
+    覆盖比例作为 keyword 分量；query 为空返回 0（保持原行为）。
+    """
+    query_terms = [t for t in _tokenize(query) if len(t) > 0]
+    if not query_terms:
+        return 0.0
+    blob_terms = set(_tokenize(f"{subject} {predicate} {value}"))
+    if not blob_terms:
+        return 0.0
+    hits = sum(1 for qt in query_terms if any(qt in bt for bt in blob_terms))
+    return min(1.0, hits / len(query_terms))
+
+
+def recency_score(created_at: datetime | None) -> float:
+    """时间衰减得分 ∈ [0,1]，半衰期 _RECENCY_HALF_LIFE_DAYS。"""
+    if created_at is None:
+        return 0.0
+    try:
+        age_days = abs((datetime.now(UTC) - created_at).total_seconds()) / 86400.0
+    except (TypeError, ValueError):
+        return 0.0
+    # 指数衰减：0 天=1.0，半衰期后=0.5。
+    import math
+    return float(math.exp(-0.6931 * age_days / _RECENCY_HALF_LIFE_DAYS))
 
 
 def normalize_scores(candidates: list[RetrievalCandidate]) -> list[RetrievalCandidate]:
@@ -253,8 +301,15 @@ class ContextBuilder:
             ))
 
         # 2. 注入长期记忆（阶段 3）
-        memory_items, memory_ids = self._inject_memories(principal_id, session_id)
+        # RET-02: query = 当前用户输入内容，驱动记忆 query-aware 相关性召回
+        query_text = (input_msg or {}).get("content", "") or ""
+        injection = self._inject_memories(
+            principal_id, session_id, query=query_text,
+        )
+        memory_items, memory_ids, memory_excluded = injection
         items.extend(memory_items)
+        # RET-05: 记忆源排除原因暂存，最终汇入 Snapshot exclusion_stats
+        self._memory_excluded: dict[str, str] = memory_excluded
 
         # 2b. Authorized content memory.  It is an independent source and can be
         # disabled without changing the existing fact-memory path.
@@ -327,6 +382,9 @@ class ContextBuilder:
         for value in excluded:
             kind = value.split(":", 1)[0] if ":" in value else "token_budget"
             exclusion_counts[kind] = exclusion_counts.get(kind, 0) + 1
+        # RET-05: 合并记忆源选择阶段的排除原因（token_budget 等）到 Snapshot
+        for reason in getattr(self, "_memory_excluded", {}).values():
+            exclusion_counts[reason] = exclusion_counts.get(reason, 0) + 1
 
         snapshot = ContextSnapshot(
             snapshot_id=uuid.uuid4().hex,
@@ -489,10 +547,17 @@ class ContextBuilder:
         memories: list,
         session_id: str,
         conversation_id: str,
-    ) -> list[RetrievalCandidate]:
-        """PLAN-13/R-12: 将 MemoryItem 实体映射为 RetrievalCandidate。
+        query: str = "",
+    ) -> tuple[list[RetrievalCandidate], set[int]]:
+        """PLAN-13/R-12 + PLAN-16 M6 RET-02/03/04: 将 MemoryItem 映射为 RetrievalCandidate。
 
-        保留原有的 session > conversation > global 优先级排序 + canonical_key 去重。
+        RET-02：MemoryRetriever 接收当前 query；query 非空时 keyword 分量按
+        query terms 在记忆文本上的覆盖比例注入。
+        RET-03：返回 protected_indices —— active goal（kind=goal, goal_status=active）
+        与 constraint 候选（RETRIEVAL-CONTEXT §4.1），在选择时不被 budget 挤出。
+        RET-04：final_score 复用 RETRIEVAL-CONTEXT §6.1 加权公式
+        (keyword + recency + importance + confidence + trust); query 为空时
+        退化为原 importance/confidence/trust 排序，保持现有行为不变。
         """
         session_mems: list = []
         conv_mems: list = []
@@ -517,6 +582,8 @@ class ContextBuilder:
                     seen_keys.add(m.canonical_key)
                 merged.append(m)
 
+        use_query = query and query.strip()
+
         def _sort_key(m):
             kind_order = self._KIND_PRIORITY.get(str(m.kind), 5)
             return (kind_order, -m.importance, -m.confidence)
@@ -524,7 +591,8 @@ class ContextBuilder:
         merged.sort(key=_sort_key)
 
         candidates: list[RetrievalCandidate] = []
-        for m in merged:
+        protected_indices: set[int] = set()
+        for idx, m in enumerate(merged):
             kind_label = str(m.kind)
             is_explicit = m.explicitness in (
                 "explicit_user_statement", "confirmed_inference",
@@ -536,6 +604,20 @@ class ContextBuilder:
                 f"confidence={m.confidence:.1f}] "
                 f"{m.subject}/{m.predicate} = {m.value}"
             )
+            # RET-02/04: query-aware 评分（query 为空时 keyword=0、behavior 不变）
+            kw = keyword_score(query, m.subject, m.predicate, m.value) if use_query else 0.0
+            rec = recency_score(m.created_at) if use_query else 0.0
+            trust = 1.0 if is_explicit else 0.7
+            if use_query:
+                final = (
+                    _KW_WEIGHT * kw
+                    + _RECENCY_WEIGHT * rec
+                    + _IMPORTANCE_WEIGHT * m.importance
+                    + _CONFIDENCE_WEIGHT * m.confidence
+                    + _TRUST_WEIGHT * trust
+                )
+            else:
+                final = self._memory_candidate_score(m)
             candidates.append(RetrievalCandidate(
                 candidate_type="memory",
                 candidate_id=m.memory_id,
@@ -543,20 +625,32 @@ class ContextBuilder:
                 scope=m.scope_type,
                 content_ref=entry_text,
                 token_estimate=estimate_tokens(entry_text),
-                keyword_score=0.0,
+                keyword_score=kw,
                 semantic_score=0.0,
-                recency_score=0.0,
+                recency_score=rec,
                 importance_score=m.importance,
-                trust_score=(1.0 if is_explicit else 0.7),
-                final_score=self._memory_candidate_score(m),
+                trust_score=trust,
+                final_score=final,
                 retrieval_path="list",
                 policy_version=self._policy_version,
             ))
-        return candidates
+            # RET-03: active goal / constraint 标记为 protected
+            is_active_goal = (
+                kind_label == "goal"
+                and getattr(m, "goal_status", None) is not None
+                and str(m.goal_status) == "active"
+            )
+            is_constraint = kind_label == "constraint"
+            if is_active_goal or is_constraint:
+                protected_indices.add(idx)
+        return candidates, protected_indices
 
     @staticmethod
     def _memory_candidate_score(m) -> float:
-        """记忆候选综合分 = importance * 0.5 + confidence * 0.3 + trust * 0.2。"""
+        """记忆候选综合分 = importance * 0.5 + confidence * 0.3 + trust * 0.2。
+
+        query 为空时复用原公式，保持现有排序行为不变。
+        """
         is_explicit = m.explicitness in (
             "explicit_user_statement", "confirmed_inference",
         )
@@ -567,32 +661,35 @@ class ContextBuilder:
         self,
         principal_id: str,
         session_id: str,
+        query: str = "",
     ) -> tuple[list[ContextItem], list[str]]:
-        """PLAN-13/R-12: 构建记忆候选 → 统一 budget 选择 → 序列化 ContextItem。"""
+        """PLAN-13/R-12 + PLAN-16 M6 RET-02: 构建记忆候选 → 统一 budget 选择 → 序列化。"""
         if not principal_id or not self._memory_reader:
-            return [], []
+            return [], [], {}
 
         all_memories = self._memory_reader.retrieve(
             principal_id=principal_id,
             limit=self._MEMORY_MAX_ITEMS,
         )
         if not all_memories:
-            return [], []
+            return [], [], {}
 
         conversation_id = self._get_session_conversation(session_id)
-        candidates = self._build_memory_candidates(
-            all_memories, session_id, conversation_id,
+        candidates, protected_indices = self._build_memory_candidates(
+            all_memories, session_id, conversation_id, query=query,
         )
 
         # PLAN-16 M6 RET-04: 组内标准化，使 memory 分数可与其他源比较
         candidates = normalize_scores(candidates)
 
-        # PLAN-13/R-12: 按 memory 源预算配额选择候选
+        # PLAN-16 M6 RET-03: 按 memory 源预算配额选择候选（protected 不被挤出）
         memory_budget = self._memory_budget_tokens()
-        selected = self._select_candidates_by_budget(candidates, memory_budget)
+        selected, excluded = self._select_candidates_by_budget(
+            candidates, memory_budget, protected_indices=protected_indices,
+        )
 
         if not selected:
-            return [], []
+            return [], [], excluded
 
         lines = ["<relevant_memories>"]
         memory_ids: list[str] = []
@@ -601,11 +698,13 @@ class ContextBuilder:
             memory_ids.append(c.candidate_id)
         lines.append("</relevant_memories>")
         content = "\n".join(lines)
-        # PLAN-16 M6 RET-05: Snapshot provenance 增加 score 分项与选择位置
+        # PLAN-16 M6 RET-05: Snapshot provenance 增加 score 分项、选择位置与排除原因
         selected_score = max(c.final_score for c in selected) if selected else 0.0
         provenance = (
             ("source_count", str(len(selected))),
             ("pool_size", str(len(candidates))),
+            ("protected_count", str(len(protected_indices))),
+            ("excluded_count", str(len(excluded))),
             ("top_score", f"{selected_score:.3f}"),
             ("avg_score", f"{(sum(c.final_score for c in selected) / len(selected)):.3f}"
              if selected else "0.0"),
@@ -625,7 +724,7 @@ class ContextBuilder:
             retrieval_path="list",
             provenance=provenance,
         )
-        return [item], memory_ids
+        return [item], memory_ids, excluded
 
     def _memory_budget_tokens(self) -> int:
         """PLAN-13/R-12: 计算记忆源可用 token 配额。
@@ -644,23 +743,42 @@ class ContextBuilder:
         self,
         candidates: list[RetrievalCandidate],
         budget_tokens: int,
-    ) -> list[RetrievalCandidate]:
-        """按 final_score 降序选择候选，累计 token 不超 budget。
+        protected_indices: set[int] | None = None,
+    ) -> tuple[list[RetrievalCandidate], dict[str, str]]:
+        """按 final_score 降序选择候选，累计 token 不超 budget（PLAN-16 M6 RET-03/05）。
 
-        预算 ≤ 0 时返回空（由调用方决定是否兜底）。
+        RET-03：protected_indices 指向 active goal/constraint 候选，
+        这些候选不被 budget 挤出（RETRIEVAL-CONTEXT §4.1/§10.4）。
+        RET-05：返回 excluded mapping {candidate_id: reason}，记录每条被排除原因
+        （token_budget / excluded_low_score），供 Snapshot provenance 使用。
+
+        预算 ≤ 0 时仅返回 protected 候选。
         """
-        if budget_tokens <= 0:
-            return []
-        used = 0
+        protected_indices = protected_indices or set()
+        # protected 优先按分数排；非 protected 按分数排
+        order = sorted(
+            range(len(candidates)),
+            key=lambda i: (i not in protected_indices, -candidates[i].final_score),
+        )
         selected: list[RetrievalCandidate] = []
-        for c in candidates:  # 已按重要性预排序
+        excluded: dict[str, str] = {}
+        used = 0
+        for i in order:
+            c = candidates[i]
             if c.exclusion_reason:
+                excluded[c.candidate_id] = c.exclusion_reason
                 continue
-            if used + max(1, c.token_estimate) > budget_tokens:
+            if i in protected_indices:
+                # RET-03：protected 必选，不计入 budget 限制
+                selected.append(c)
+                used += max(1, c.token_estimate)
+                continue
+            if budget_tokens > 0 and used + max(1, c.token_estimate) > budget_tokens:
+                excluded[c.candidate_id] = "token_budget"
                 continue
             selected.append(c)
             used += max(1, c.token_estimate)
-        return selected
+        return selected, excluded
 
     def _clip_to_budget(
         self,
