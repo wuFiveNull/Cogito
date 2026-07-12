@@ -595,10 +595,11 @@ class SqliteMemoryService:
 
     # ── 管理 ──
 
-    def confirm(self, memory_id: str, confirmed_by: str = "") -> bool:
+    def confirm(self, memory_id: str, confirmed_by: str = "", *, expected_version: int | None = None) -> bool:
         """确认候选记忆（PLAN-14 R-08: emit MemoryConfirmed）。"""
         ok = self._repo.confirm(
             memory_id, confirmed_by=confirmed_by, confirmation_method="manual",
+            expected_version=expected_version,
         )
         if ok:
             self._emit_memory_event("MemoryConfirmed", memory_id, {
@@ -606,9 +607,9 @@ class SqliteMemoryService:
             })
         return ok
 
-    def reject(self, memory_id: str, principal_id: str = "") -> bool:
+    def reject(self, memory_id: str, principal_id: str = "", *, expected_version: int | None = None) -> bool:
         """拒绝候选记忆（PLAN-14 R-08: emit MemoryRejected）。"""
-        ok = self._repo.reject(memory_id, principal_id=principal_id)
+        ok = self._repo.reject(memory_id, principal_id=principal_id, expected_version=expected_version)
         if ok:
             self._emit_memory_event("MemoryRejected", memory_id, {
                 "principal_id": principal_id,

@@ -38,15 +38,6 @@ class ApprovalPayload(BaseModel):
     # decision 由路径决定 (approve / reject)
 
 
-class MemoryConfirmPayload(BaseModel):
-    memory_id: str
-
-
-class MemoryRejectPayload(BaseModel):
-    memory_id: str
-    idempotency_key: str = ""
-
-
 class MemoryCorrectPayload(BaseModel):
     """提交对记忆的修正（创建新记忆 + 标 old 为 superseded）。"""
     memory_id: str
@@ -155,6 +146,16 @@ class BaseCommandPayload(BaseModel):
     """命令基类：统一幂等键 + 预期版本（APPROVAL-COMMANDS §2）。"""
     idempotency_key: str = ""
     expected_version: int | None = None
+
+
+class MemoryConfirmPayload(BaseCommandPayload):
+    """确认记忆候选（PLAN-16 MEM-06：统一 expected_version 乐观锁）。"""
+    memory_id: str
+
+
+class MemoryRejectPayload(BaseCommandPayload):
+    """拒绝记忆候选（PLAN-16 MEM-06：统一 expected_version 乐观锁）。"""
+    memory_id: str
 
 
 class MemoryErasePayload(BaseCommandPayload):

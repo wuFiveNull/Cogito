@@ -710,14 +710,22 @@ class MemoryRepository:
         memory_id: str,
         confirmed_by: str = "",
         confirmation_method: str = "",
+        expected_version: int | None = None,
     ) -> bool:
-        """确认记忆（candidate → confirmed）。"""
+        """确认记忆（candidate → confirmed）。
+
+        PLAN-16 MEM-06：expected_version 非空时加入 WHERE 条件做乐观锁，
+        版本不匹配则 rowcount=0（调用方据此返回 conflict）。
+        """
         now = datetime.now(UTC).isoformat()
         conditions = ["memory_id=?", "status='candidate'", "deleted_at IS NULL"]
         params: list[Any] = [memory_id]
         if confirmed_by:
             conditions.append("principal_id=?")
             params.append(confirmed_by)
+        if expected_version is not None:
+            conditions.append("version=?")
+            params.append(expected_version)
         cursor = self._conn.execute(
             f"UPDATE memory_items SET "
             f"  status='confirmed', confirmed_by=?, confirmation_method=?, "
@@ -727,14 +735,20 @@ class MemoryRepository:
         )
         return cursor.rowcount > 0
 
-    def reject(self, memory_id: str, principal_id: str = "") -> bool:
-        """拒绝记忆（candidate → rejected）。"""
+    def reject(self, memory_id: str, principal_id: str = "", expected_version: int | None = None) -> bool:
+        """拒绝记忆（candidate → rejected）。
+
+        PLAN-16 MEM-06：expected_version 非空时加入 WHERE 条件做乐观锁。
+        """
         now = datetime.now(UTC).isoformat()
         conditions = ["memory_id=?", "status='candidate'"]
         params: list[Any] = [memory_id]
         if principal_id:
             conditions.append("principal_id=?")
             params.append(principal_id)
+        if expected_version is not None:
+            conditions.append("version=?")
+            params.append(expected_version)
         cursor = self._conn.execute(
             f"UPDATE memory_items SET status='rejected', updated_at=?, version=version+1 "
             f"WHERE {' AND '.join(conditions)}",

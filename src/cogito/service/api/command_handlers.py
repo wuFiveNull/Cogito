@@ -275,8 +275,12 @@ def confirm_memory(payload: MemoryConfirmPayload, deps: CommandDeps = Depends(ge
     item = svc.get(payload.memory_id)
     if item is None:
         raise HTTPException(status_code=404, detail=f"memory {payload.memory_id} not found")
+    # PLAN-16 MEM-06: expected_version 乐观锁预检（并发修改不覆盖新版本）
+    if payload.expected_version is not None and item.version != payload.expected_version:
+        return _conflict("confirm-memory", payload.memory_id, item.version)
     # 按记忆所有者 principal 确认，保留服务层所有权校验语义
-    ok = svc.confirm(payload.memory_id, confirmed_by=item.principal_id or ACTOR)
+    ok = svc.confirm(payload.memory_id, confirmed_by=item.principal_id or ACTOR,
+                      expected_version=payload.expected_version)
     if not ok:
         return _fail("confirm-memory", payload.memory_id, "not candidate")
     from cogito.service.memory_signals import SignalWriter
@@ -318,7 +322,10 @@ def reject_memory(payload: MemoryRejectPayload, deps: CommandDeps = Depends(get_
     item = svc.get(payload.memory_id)
     if item is None:
         raise HTTPException(status_code=404, detail=f"memory {payload.memory_id} not found")
-    ok = svc.reject(payload.memory_id)
+    # PLAN-16 MEM-06: expected_version 乐观锁预检（并发修改不覆盖新版本）
+    if payload.expected_version is not None and item.version != payload.expected_version:
+        return _conflict("reject-memory", payload.memory_id, item.version)
+    ok = svc.reject(payload.memory_id, expected_version=payload.expected_version)
     if not ok:
         return _fail("reject-memory", payload.memory_id, "not candidate or already decided")
     from cogito.service.memory_signals import SignalWriter
