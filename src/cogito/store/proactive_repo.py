@@ -137,6 +137,26 @@ class ProactiveCandidateRepository:
         ).fetchall()
         return [_row_to_candidate(r) for r in rows]
 
+    def quality_stats(self, principal_id: str = "owner") -> dict[str, int]:
+        """读回各 status/origin 候选数与最近一次 evaluate 指标 (read-only 诊断用)。"""
+        out: dict[str, int] = {}
+        try:
+            rows = self._conn.execute(
+                "SELECT status, COUNT(*) FROM proactive_candidates "
+                "WHERE principal_id=? GROUP BY status", (principal_id,),
+            ).fetchall()
+            for r in rows:
+                out[f"candidate_status_{r[0]}"] = int(r[1])
+            rows = self._conn.execute(
+                "SELECT origin, COUNT(*) FROM proactive_candidates "
+                "WHERE principal_id=? GROUP BY origin", (principal_id,),
+            ).fetchall()
+            for r in rows:
+                out[f"candidate_origin_{r[0]}"] = int(r[1])
+        except Exception:
+            pass
+        return out
+
     def count_by_principal(self, principal_id: str, status: str | None = None) -> int:
         if status is None:
             return self._conn.execute(

@@ -354,6 +354,12 @@ def _handle_drift_run(task: Task, ctx: TaskHandlerContext) -> str:
         return "drift.run skipped: no connection"
     try:
         result = handle_drift_run(task, ctx)
+        # PLAN-17 R5 P0-06: emitter insert (DriftResult + Outbox) 依赖外部 commit，
+        # 最后一原子提交避免 conn.close 丢弃。
+        try:
+            conn.commit()
+        except Exception:
+            pass
         try:
             conn.close()
         except Exception:

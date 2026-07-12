@@ -1,0 +1,13 @@
+name = "proactive-candidate-quality-stats"
+version = "1.0"
+description = "Read-only scan of DB proactive_candidates/quality stats; produce candidate_draft for down-stream evaluation. No external side effects."
+handler = "builtin.proactive_candidate_quality_stats"
+risk_level = "low"
+allowed_tools = ["query.candidate_quality_stats", "query.proactive_candidates", "query.deliveries"]
+max_steps = 4
+max_runtime_seconds = 30
+max_model_calls = 0
+max_tool_calls = 6
+can_emit_candidate = true
+requires_approval = false
+checkpoint_schema_version = 1

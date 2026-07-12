@@ -359,8 +359,128 @@ def _mark_consumed(conn: sqlite3.Connection, consumer_name: str, event_id: str) 
     )
 
 
-def build_default_registry(default_principal_id: str = "owner") -> EventConsumerRegistry:
-    """构造默认注册表（首期仅一个 consumer）。"""
+class DriftResultCommittedConsumer(EventConsumer):
+    """PLAN-17 R5 P0-06: Drift 完成后自动投影为 ProactiveCandidate。
+
+    校验：DriftRun completed；Principal 一致；manifest.can_emit_candidate；
+    config.allow_candidate_projection；evidence/trust；同 Run 最多一个用户可见
+    Candidate。dry_run 仅保存 preview/result，不写真实 Candidate。投影成功后回写
+    DriftRun.candidate_id。Drift 不直接调用 DeliveryService。
+    """
+
+    name = "drift-result-projector"
+
+    def __init__(self, *, default_principal_id: str = "owner",
+                 drift_config: Any = None) -> None:
+        self._default_principal_id = default_principal_id
+        self._drift_config = drift_config
+
+    def can_handle(self, lease: OutboxLease) -> bool:
+        return lease.event_type == "DriftResultCommitted"
+
+    def handle(self, conn: sqlite3.Connection, lease: OutboxLease) -> bool:
+        # 幂等：event_consumptions 表 (consumer_name, event_id) 唯一键
+        if conn.execute(
+            "SELECT 1 FROM event_consumptions WHERE consumer_name=? AND event_id=?",
+            (self.name, lease.event_id)).fetchone() is not None:
+            return True
+        # payload_ref 直接存 drift_run_id (str)
+        drift_run_id = (lease.payload_ref or "").strip()
+
+        run = conn.execute(
+            "SELECT principal_id, status, skill_name FROM drift_runs "
+            "WHERE drift_run_id=?", (drift_run_id,),
+        ).fetchone()
+        if run is None:
+            return False
+        if run["status"] != "completed":
+            _LOGGER.info("DriftResultCommitted: run %s not completed (status=%s); skip",
+                         drift_run_id, run["status"])
+            return True
+        principal_id = run["principal_id"] or self._default_principal_id
+
+        # 校验 config 拒绝投影 (dry-run / allow_candidate_projection / allow_candidate_emission)
+        allow = True
+        if self._drift_config is not None:
+            dry = bool(getattr(self._drift_config, "dry_run", False))
+            proj = bool(getattr(self._drift_config, "allow_candidate_projection", False))
+            emit = bool(getattr(self._drift_config, "allow_candidate_emission", False))
+            allow = (not dry) and proj and emit
+        if not allow:
+            _LOGGER.info(
+                "[drift_project] skip projection: dry=%s projection=%s emission=%s run=%s",
+                dry if self._drift_config is not None else None,
+                proj if self._drift_config is not None else None,
+                emit if self._drift_config is not None else None,
+                drift_run_id)
+            # 消费 Outbox event 防止重试 (审计证据 #6: dry_run 只保存 preview/result)
+            with conn:
+                _mark_consumed(conn, self.name, lease.event_id)
+            return True
+
+        # 每 run 最多一个用户可见 Candidate (由 DriftProjectionService 双重校验)
+        from cogito.store.drift_result_repo import DriftResultRepository
+        drr = DriftResultRepository(conn).latest_for_run(drift_run_id)
+        draft_payload = (drr.candidate_draft if drr else None) or {}
+        if not draft_payload:
+            with conn:
+                _mark_consumed(conn, self.name, lease.event_id)
+            return True
+        from cogito.domain.drift import DriftCandidateDraft
+        try:
+            draft = DriftCandidateDraft(
+                topic=str(draft_payload.get("topic", "drift.result")),
+                summary=str(draft_payload.get("summary", "")),
+                evidence_refs=tuple(draft_payload.get("evidence_refs", ())),
+                trust_label=str(draft_payload.get("trust_label", "system_generated")),
+                urgency=float(draft_payload.get("urgency", 0.5)),
+                confidence=float(draft_payload.get("confidence", 0.5)),
+                relevance=float(draft_payload.get("relevance", 0.6)),
+                expires_at=draft_payload.get("expires_at"),
+            )
+        except Exception:
+            _LOGGER.warning("invalid candidate draft for run %s", drift_run_id,
+                            exc_info=True)
+            with conn:
+                _mark_consumed(conn, self.name, lease.event_id)
+            return True
+
+        dry_run = bool(self._drift_config and
+                       getattr(self._drift_config, "dry_run", False))
+        from cogito.service.drift_projection import DriftProjectionService
+        svc = DriftProjectionService(conn, dry_run=dry_run)
+        try:
+            candidate_id = svc.project(drift_run_id=drift_run_id,
+                                       draft=draft, principal_id=principal_id)
+        except Exception:
+            import traceback as _tb
+            _LOGGER.warning("drift projection failed for run %s", drift_run_id,
+                            exc_info=True)
+            _tb.print_exc()
+            return False  # 触发 Outbox retry
+
+        if candidate_id:
+            # 回写 candidate_id on DriftRun + DriftResult
+            conn.execute(
+                "UPDATE drift_runs SET candidate_id=? WHERE drift_run_id=?",
+                (candidate_id, drift_run_id))
+            if drr is not None:
+                DriftResultRepository(conn).mark_emitted(
+                    drr.drift_result_id, candidate_id)
+            _LOGGER.info("drift projected: run=%s candidate=%s",
+                         drift_run_id, candidate_id)
+
+        with conn:
+            _mark_consumed(conn, self.name, lease.event_id)
+        return True
+
+
+def build_default_registry(default_principal_id: str = "owner",
+                           drift_config: Any = None) -> EventConsumerRegistry:
+    """构造默认注册表。
+
+    PLAN-17 R5 P0-06: DriftResultCommittedConsumer 注册；dry_run 时只保存 preview。
+    """
     registry = EventConsumerRegistry()
     registry.register(SourceEventIngestedConsumer(
         default_principal_id=default_principal_id,
@@ -368,4 +488,6 @@ def build_default_registry(default_principal_id: str = "owner") -> EventConsumer
     registry.register(TurnCompletedMemoryExtractionConsumer())
     registry.register(SessionCompletedMemoryExtractionConsumer())
     registry.register(MemorySourceInvalidatedConsumer())
+    registry.register(DriftResultCommittedConsumer(default_principal_id=default_principal_id,
+                                                   drift_config=drift_config))
     return registry

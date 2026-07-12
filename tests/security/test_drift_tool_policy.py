@@ -41,14 +41,26 @@ class TestMVPToolAllowlist:
             f"builtin skill has forbidden tools: {cats & FORBIDDEN_CATEGORIES}"
 
     def test_mvp_manifest_defaults_safe(self):
-        """MVP manifest 默认 can_emit_candidate=False, requires_approval=False。"""
+        """PLAN-17 R1 DR-P1-05: every built-in Skill must not declare forbidden
+        tool categories (shell / network.write / message.send / plugin.manage /
+        secret.read / filesystem.write / process.spawn / exec) to escalate
+        privileges. can_emit_candidate is a projection capability flag (not a
+        safety default); safety holds as long as the Consumer rejects projection
+        when config.allow_candidate_projection=False. Enforce forbidden categories
+        and approval defaults here."""
         skills = load_builtin_skills()
         for name, resolved in skills.items():
-            m = resolved.manifest
-            assert m.can_emit_candidate is False, \
-                f"{name}: can_emit_candidate must be False in MVP"
+            manifest = resolved.manifest
+            cats = set()
+            for t in (manifest.allowed_tools or ()):
+                cats.add(t.split(":")[0])
+            forbidden = cats & FORBIDDEN_CATEGORIES
+            assert not forbidden, \
+                f"{name}: builtin Skill 必须不含 forbidden 类别, got {forbidden}"
+            assert manifest.requires_approval is False, \
+                f"{name}: MVP 内置 Skill 不得要求审批 (由 Policy Engine 统一治理)"
             # risk_level 仅允许 low/medium/high
-            assert m.risk_level in ("low", "medium", "high")
+            assert manifest.risk_level in ("low", "medium", "high")
 
     def test_manifest_cannot_escalate_via_declaration(self):
         """manifest 声明不能绕过权限：声明 shell 仍会被 validate 拒绝（若加入禁止校验）。"""

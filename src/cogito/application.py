@@ -385,6 +385,8 @@ class RuntimeApplication:
             asset_service=asset_service,
             vision_service=shared_vision_service,
             max_assets_per_message=config.multimodal.max_assets_per_message,
+            # PLAN-17 R4 P0-05：入站新 Turn 到达时发射抢占信号（仅 drift 启用时）
+            drift_preemption=config.drift if config.drift.enabled else None,
         )
 
         app = cls(
@@ -505,7 +507,14 @@ class RuntimeApplication:
             self.conn,
             lease_ttl_s=self.config.worker.outbox_lease_ttl_seconds,
         )
-        self.event_consumer_registry = build_default_registry()
+        drift_cfg = getattr(self.config, "drift", None)
+        default_principal = getattr(getattr(self.config, "capability", None),
+                                    "proactive", None)
+        default_principal_id = getattr(default_principal, "default_principal_id",
+                                       None) or "owner"
+        self.event_consumer_registry = build_default_registry(
+            default_principal_id=default_principal_id,
+            drift_config=drift_cfg)
         if self.channel_gateway is None:
             self.build_channel_components()
         elif self.gateway_client is None:

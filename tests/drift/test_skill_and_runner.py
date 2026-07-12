@@ -110,14 +110,19 @@ class TestSelector:
         """刚失败的 skill 评分降低 (recent_failure_penalty)。"""
         skills = load_builtin_skills()
         now = int(time.time() * 1000)
-        # 让 proactive-policy-view-audit 刚失败
+        # 只选 proactive-policy-view-audit 为 candidate, 刚失败 (penalty 生效)
+        skills_one = {k: v for k, v in skills.items()
+                      if k == "proactive-policy-view-audit"}
         states = {"proactive-policy-view-audit": {
             "last_status": "failed", "last_run_at": now - 60_000,  # 1 分钟前
             "run_count": 1,
         }}
-        _name, scores = select_skill(skills, states)
-        # 只有 1 个 skill，仍会被选但分数应体现惩罚（运行仍然返回它）
+        _name, scores = select_skill(skills_one, states)
+        # 只有 1 个 skill，仍会被选但分数应体现惩罚
         assert _name == "proactive-policy-view-audit"
+        # 分数里 recent_failure_penalty 已被扣分 (W_RECENT_FAILURE=25 已减)
+        assert scores["proactive-policy-view-audit"] < 100.0, \
+            f"失败 penalty 应降低分数: {scores}"
 
     def test_empty_skills_returns_none(self):
         assert select_skill({}, {}) is None

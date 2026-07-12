@@ -66,6 +66,7 @@ class InboundService:
         asset_service: Any | None = None,
         vision_service: Any | None = None,
         max_assets_per_message: int = 4,
+        drift_preemption: Any = None,          # None ⇒ 不发射抢占(P0-05 默认关闭)
     ) -> None:
         self._conn = conn
         # 入站新建 Turn 后的唤醒回调（用于即时唤醒后台 worker，消除轮询睡眠）
@@ -73,6 +74,7 @@ class InboundService:
         self._asset_service = asset_service
         self._vision_service = vision_service
         self._max_assets_per_message = max_assets_per_message
+        self._drift_preemption = drift_preemption
 
     def accept(self, envelope: ChannelEnvelope) -> AcceptInboundResult:
         """接受入站消息并创建 Turn。
@@ -301,11 +303,27 @@ class InboundService:
             except Exception:
                 pass
 
-        return AcceptInboundResult(
+        result = AcceptInboundResult(
             message_id=message.message_id,
             turn_id=turn.turn_id,
             is_new=True,
         )
+
+        # PLAN-17 R4 P0-05：入站 Turn 提交后发射 Drift 抢占信号。
+        # 持有 active Drift Lease 的 Attempt 在下一安全点消费该信号并暂停；
+        # 信号不在读取时立即清除，避免错误 Worker 吃掉信号。
+        if result.is_new and self._drift_preemption is not None:
+            try:
+                from cogito.service.drift_preemption import request_preemption
+                request_preemption(
+                    self._conn,
+                    self._drift_preemption.default_principal_id,
+                    "inbound_turn")
+            except Exception:
+                _LOGGER.warning("drift preemption signal emit failed",
+                                exc_info=True)
+
+        return result
 
     def _find_turn_id_by_message(self, message_id: str, uow: UnitOfWork) -> str:
         """通过 input_message_id 查找已创建的 turn_id。"""

@@ -102,6 +102,8 @@ def _start_drift_run(run: _RunContext) -> str:
         budget_used.setdefault("tool_calls", 0)
         budget_used.setdefault("model_calls", 0)
     cursor: dict[str, Any] = dict(run.resume_cursor)
+    # P0-06：收集 Skill 每步产出的内部项，供 _finish_drift 提炼 Candidate 草稿
+    items: list[dict[str, Any]] = []
     started_ms = int(time.time() * 1000)
     max_steps = max(1, run.manifest.max_steps)
     max_runtime_ms = max(1, run.manifest.max_runtime_seconds) * 1000
@@ -176,6 +178,10 @@ def _start_drift_run(run: _RunContext) -> str:
             budget_used[k] = budget_used.get(k, 0) + v
         if result.get("cursor") is not None:
             cursor = result["cursor"]
+        # P0-06：收集本步 items 供完成时提炼 Candidate 草稿
+        step_items = result.get("items") or []
+        if step_items:
+            items.extend(step_items)
         step_index += 1
 
         # ③ 安全点写 checkpoint（含当前 budget/cursor/completed_actions 快照）
@@ -190,18 +196,26 @@ def _start_drift_run(run: _RunContext) -> str:
         # ④ Skill 主动宣告做完 / no_value
         if result.get("no_value"):
             _finish_drift(run.conn, run.drift_run_id, DriftRunStatus.completed,
-                          summary="no_value", reason_code=DriftReasonCode.skipped_no_value,
+                          summary="no_value",
+                          reason_code=DriftReasonCode.skipped_no_value,
                           budget_used=budget_used, steps_taken=step_index,
-                          internal_items=result.get("items", []))
+                          internal_items=result.get("items", []),
+                          items=items,
+                          task_attempt_id=run.attempt_id,
+                          manifest_can_emit_candidate=run.manifest.can_emit_candidate)
             return f"drift.run {run.drift_run_id}: skipped (no_value)"
         if result.get("done"):
             break
 
     # 正常完成（step 耗尽 / 时间耗尽 / Skill done）
+    result_ref = f"drift-check:{run.drift_run_id}:{step_index}"
     _finish_drift(run.conn, run.drift_run_id, DriftRunStatus.completed,
                   summary=f"done at step {step_index}",
                   reason_code=DriftReasonCode.completed,
-                  budget_used=budget_used, steps_taken=step_index)
+                  budget_used=budget_used, steps_taken=step_index,
+                  result_ref=result_ref, items=items,
+                  task_attempt_id=run.attempt_id,
+                  manifest_can_emit_candidate=run.manifest.can_emit_candidate)
     return f"drift.run {run.drift_run_id}: completed ({step_index} steps)"
 
 
@@ -289,13 +303,59 @@ def _step_from_result_ref(result_ref: Any) -> int:
 
 def _execute_skill_step(run: _RunContext, step_index: int,
                         cursor: dict[str, Any]) -> dict[str, Any]:
-    """执行单个 Skill 的单步。返回步结果 dict。"""
+    """执行单个 Skill 的单步。返回步结果 dict。
+
+    PLAN-17 R5: Skill 名 → 内置受控 handler (MVP 直接分派；不通过任意 import)。
+    """
     name = run.manifest.name
     if name == "proactive-policy-view-audit":
         return _step_policy_view_audit(run, step_index, cursor)
+    if name == "proactive-candidate-quality-stats":
+        return _step_candidate_quality_stats(run, step_index, cursor)
     # 未知 skill
     return {"done": True, "no_value": True, "action": "unknown",
             "cursor": cursor, "budget": {}, "items": []}
+
+
+def _step_candidate_quality_stats(run: _RunContext, step_index: int,
+                                  cursor: dict[str, Any]) -> dict[str, Any]:
+    """proactive-candidate-quality-stats 多步 (step0 policy; step1-2 stats; step3 done)。"""
+    from cogito.store.proactive_repo import ProactivePolicyRepository, \
+        ProactiveCandidateRepository
+    policy = ProactivePolicyRepository(run.conn).get_current()
+    if step_index == 0:
+        return {"done": False, "no_value": False, "action": "read_policy",
+                "cursor": {"policy_version": policy.version},
+                "budget": {"tool_calls": 1}, "items": []}
+    if step_index == 1:
+        stats = ProactiveCandidateRepository(run.conn).quality_stats()
+        return {"done": False, "no_value": False, "action": "gather_candidate_stats",
+                "cursor": {"candidate_stats": stats},
+                "budget": {"tool_calls": 1},
+                "items": [{"kind": "candidate_quality_stats",
+                           "summary": f"candidate_stats={stats}",
+                           "ref": f"policy_v{policy.version}"}]}
+    if step_index == 2:
+        # 简单查询 deliveries 状态统计
+        rows = run.conn.execute(
+            "SELECT status, COUNT(*) FROM deliveries GROUP BY status").fetchall()
+        dstats = {r[0]: r[1] for r in rows}
+        return {"done": False, "no_value": False, "action": "gather_delivery_stats",
+                "cursor": {"delivery_stats": dstats},
+                "budget": {"tool_calls": 1},
+                "items": [{"kind": "delivery_quality_stats",
+                           "summary": f"delivery_stats={dstats}",
+                           "ref": "deliveries"}]}
+    # step_index >= 3 → done (with a candidate-visible summary item)
+    summary = (f"policy v{policy.version} dry_run={policy.dry_run}; "
+               "candidate+delivery quality stats collected (read-only).")
+    return {"done": True, "no_value": False, "action": "summarize",
+            "cursor": {"done": True},
+            "budget": {"tool_calls": 1},
+            "items": [{"kind": "candidate_quality", "summary": summary,
+                        "policy_version": policy.version,
+                        "evidence_refs": ("candidate_quality_stats",)}],
+            "summary": summary}
 
 
 def _step_policy_view_audit(run: _RunContext, step_index: int,
@@ -418,8 +478,18 @@ def _finish_drift(conn, run_id: str, status: DriftRunStatus, *,
                   budget_used: dict[str, int] | None = None,
                   steps_taken: int = 0,
                   internal_items: list[dict] | None = None,
-                  result_ref: str | None = None) -> None:
-    """强制收尾：更新 drift_runs.status + 同步 skill_state。"""
+                  result_ref: str | None = None,
+                  # P0-06: DriftResult + Outbox emission 参数
+                  items: list[dict[str, Any]] | None = None,
+                  task_attempt_id: str = "",
+                  manifest_can_emit_candidate: bool = False) -> None:
+    """强制收尾：更新 drift_runs.status + 同步 skill_state + 持久化 DriftResult。
+
+    P0-06: 当 items 非空时，_drift.run 完成事务写 DriftResult 同时发射 Outbox
+    DriftResultCommitted；Consumer 校验 completed/principal/manifest/config 后
+    create ProactiveCandidate(origin=drift) (PLAN-17 R5)。dry_run 由调用方控制
+    (config.dry_run on DriftProjectionService)，不在 _finish_drift 之内断言。
+    """
     from cogito.store.drift_repo import DriftRunRepository
 
     rc = reason_code.value if hasattr(reason_code, "value") else str(reason_code)
@@ -430,10 +500,25 @@ def _finish_drift(conn, run_id: str, status: DriftRunStatus, *,
         fields["result_ref"] = result_ref
     DriftRunRepository(conn).update_status(run_id, status.value, **fields)
 
-    # 累计 budget/steps
+    # REPLACE 语义写入累计 budget/steps (P0-04 修复后 resume 基线下仍是累计总值)
     if budget_used and steps_taken:
         DriftRunRepository(conn).update_progress(
             run_id, budget_used=budget_used, steps_taken=steps_taken)
+
+    # P0-06: 持久化 DriftResult + 发射 Outbox DriftResultCommitted
+    if status == DriftRunStatus.completed:
+        try:
+            from cogito.service.drift_result_emitter import emit_drift_result
+            ref = result_ref or f"drift-check:{run_id}:{steps_taken}"
+            emit_drift_result(
+                conn, drift_run_id=run_id,
+                task_attempt_id=task_attempt_id or "",
+                result_ref=ref, summary=summary,
+                items=(items or []) + (internal_items or []),
+                reason_code=reason_code,
+                manifest_can_emit_candidate=manifest_can_emit_candidate)
+        except Exception:
+            _LOGGER.warning("emit drift result failed", exc_info=True)
 
     # 同步 drift_skill_state
     row = conn.execute(

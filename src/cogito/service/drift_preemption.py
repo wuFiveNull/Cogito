@@ -56,23 +56,53 @@ def is_preemption_requested(conn, principal_id: str) -> tuple[bool, str]:
     return False, ""
 
 
+def _count_active_normal_turns(conn) -> int:
+    """每步前从 DB 查询正在运行的 normal turns (PLAN-17 R4/R0 P0-05)。
+    非 idle 的 running/accepted/queued Turn 到达后会抢占 Drift。
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) FROM turns WHERE status IN ('running','accepted','queued')"
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def _count_high_priority_backlog(conn, threshold: int = 50) -> int:
+    """每步前从 DB 查询高优先级任务积压 (PLAN-17 R4 P0-05)。"""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM tasks WHERE status IN ('queued','scheduled','running') "
+        "AND priority >= ?",
+        (threshold,),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def should_preempt_step(
     conn,
     *,
     principal_id: str,
     lease_valid: bool,
     budget_remaining: int,
-    active_normal_turns: int = 0,
-    priority_backlog: int = 0,
+    active_normal_turns: int | None = None,
+    priority_backlog: int | None = None,
+    high_priority_threshold: int = 50,
 ) -> tuple[bool, str]:
-    """Drift 单步前检查。返回 (should_preempt, reason)。"""
+    """Drift 单步前检查。返回 (should_preempt, reason)。
+
+    active_normal_turns / priority_backlog 为 None 时从 DB 动态查询
+    (修复 P0-05 的默认 0 使 turn 到达永不被抢占的证据)。
+    """
     if not lease_valid:
         return True, DriftReasonCode.lease_lost
     preempted, reason = is_preemption_requested(conn, principal_id)
     if preempted:
         return True, DriftReasonCode.preempted_by_turn
+    if active_normal_turns is None:
+        active_normal_turns = _count_active_normal_turns(conn)
     if active_normal_turns > 0:
         return True, DriftReasonCode.active_turn
+    if priority_backlog is None:
+        priority_backlog = _count_high_priority_backlog(
+            conn, threshold=high_priority_threshold)
     if priority_backlog > 0:
         return True, DriftReasonCode.priority_backlog
     if budget_remaining <= 0:

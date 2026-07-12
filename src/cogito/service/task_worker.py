@@ -99,6 +99,34 @@ class TaskWorker:
         # TaskHandler 能把 checkpoint 绑定到真实 Attempt（不再依赖 fallback SELECT）。
         self._handler_ctx._task_id = task.task_id
         self._handler_ctx._attempt_id = attempt.task_attempt_id
+        # PLAN-17 R4 P0-05：注入 DB 校验的 lease_checker，用
+        # task_id+attempt_id+worker_id+lease_version 条件查询 tasks 表，
+        # 避免外部 heartbeat 失败/抢占时仍默认 lease_valid=True 继续执行。
+        _lease_version = attempt.lease_version
+        _expire = attempt.lease_expires_at
+        _task_id = task.task_id
+        _worker = worker_id
+        def _lease_checker() -> bool:
+            try:
+                conn = self._conn
+                row = conn.execute(
+                    "SELECT lease_version, lease_expires_at FROM tasks "
+                    "WHERE task_id=? AND lease_owner=? AND status='running'",
+                    (_task_id, _worker),
+                ).fetchone()
+                if row is None:
+                    return False
+                if row["lease_version"] != _lease_version:
+                    return False
+                from datetime import datetime as _dt, timezone as _tz
+                exp = row["lease_expires_at"]
+                # lease_expires_at stored as epoch ms int
+                if isinstance(exp, (int, float)):
+                    return exp > int(_dt.now(_tz.utc).timestamp() * 1000)
+                return True
+            except Exception:
+                return False
+        self._handler_ctx.lease_checker = _lease_checker
         heartbeat_task = asyncio.create_task(
             self._heartbeat_loop(task.task_id, attempt.task_attempt_id,
                                  worker_id, attempt.lease_version)

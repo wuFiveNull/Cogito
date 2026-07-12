@@ -757,7 +757,7 @@ _KNOWN_DRIFT_FIELDS = frozenset({
     "idle_after_minutes", "max_runs_per_day", "max_concurrent",
     "max_runtime_seconds", "max_steps",
     "allow_workspace_skills", "allow_candidate_emission",
-    "workspace_path", "preemption",
+    "allow_candidate_projection", "workspace_path", "preemption",
 })
 
 _KNOWN_DRIFT_PREEMPTION_FIELDS = frozenset({
@@ -797,6 +797,8 @@ class DriftConfig:
     max_steps: int = 8
     allow_workspace_skills: bool = False
     allow_candidate_emission: bool = False
+    # 允许 Drift 结果投影为 ProactiveCandidate (独立于 emission 的 kill switch)
+    allow_candidate_projection: bool = False
     # 工作区根目录；启用 workspace Skills 时由 resolve_catalog 扫描 drift/skills 子目录
     workspace_path: str = ""
     preemption: DriftPreemptionConfig = field(default_factory=DriftPreemptionConfig)
@@ -829,6 +831,7 @@ class DriftConfig:
             max_steps=int(raw.get("max_steps", 8)),
             allow_workspace_skills=bool(raw.get("allow_workspace_skills", False)),
             allow_candidate_emission=bool(raw.get("allow_candidate_emission", False)),
+            allow_candidate_projection=bool(raw.get("allow_candidate_projection", False)),
             workspace_path=str(raw.get("workspace_path", "")),
             preemption=preemption,
         )
