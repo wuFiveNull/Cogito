@@ -20,8 +20,9 @@ def _compose_raw_text(item: dict) -> str:
     summary = str(item.get("summary") or "")
     body = str(item.get("body") or "")
     parts = [p for p in (title, summary, body) if p]
-    text = "\n\n".join(parts)
-    return text[:50000]  # 首版内联上限（大正文走 payload_ref 由调用方处理）
+    # PLAN-16 P16-13：不再截断；正文 > 4096 bytes 由调用方写 PayloadStore（只存 payload_ref）。
+    # 截断会造成内容丢失、source hash 与实际摄取正文不一致。
+    return "\n\n".join(parts)
 
 
 def enqueue_knowledge_sync_source(
@@ -133,6 +134,7 @@ def enqueue_connector_knowledge_sync(
     connector_id: str,
     item: dict,
     principal_id: str = "owner",
+    make_payload_store=None,
 ) -> str | None:
     """为一条 Connector 新/修改内容创建 durable knowledge.sync_source Task（KNOW-01/02）。"""
     source_item_id = str(item.get("source_item_id") or item.get("item_id") or "")
@@ -148,6 +150,7 @@ def enqueue_connector_knowledge_sync(
         principal_id=principal_id,
         trust_label="external",
         origin="connector_poll",
+        make_payload_store=make_payload_store,
     )
 
 

@@ -217,22 +217,19 @@ class KnowledgeService:
                 end_offset=b.end_offset,
             )
             # PLAN-16 M4 完整 payload 边界：大正文 → PayloadStore
+            # PLAN-16 P16-13：写入失败则抛异常（不降级内联），由 Command/Task 失败重试。
+            # 降级会造成内容截断、source hash 与实际摄取正文不一致、Task 表无限增长。
             if (self._payload_store_factory is not None
                     and len(b.text.encode("utf-8")) > payload_threshold):
-                try:
-                    store = self._payload_store_factory(self._conn)
-                    obj = store.put(
-                        b.text.encode("utf-8"),
-                        content_type="text/plain; charset=utf-8",
-                        retention_class="hot",
-                    )
-                    seg.text_ref_or_inline = ""
-                    seg.payload_ref = obj.payload_id
-                    seg.token_count = max(1, len(b.text) // 4)
-                except Exception as e:  # 写入失败降级内联（不断路）
-                    import logging as _logging
-                    _logging.getLogger("cogito.knowledge.service").warning(
-                        "payload store write failed, falling back to inline: %s", e)
+                store = self._payload_store_factory(self._conn)
+                obj = store.put(
+                    b.text.encode("utf-8"),
+                    content_type="text/plain; charset=utf-8",
+                    retention_class="hot",
+                )
+                seg.text_ref_or_inline = ""
+                seg.payload_ref = obj.payload_id
+                seg.token_count = max(1, len(b.text) // 4)
             knowledge_repo.insert_segment(self._conn, seg)
             segs.append(seg)
         # 更新 resource 状态

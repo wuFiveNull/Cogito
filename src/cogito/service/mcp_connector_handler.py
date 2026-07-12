@@ -321,6 +321,8 @@ def _poll_mcp_connector(
                         "content_hash": content_hash,
                     },
                     principal_id="owner",
+                    # PLAN-16 P16-13：大正文写 PayloadStore，不内联
+                    make_payload_store=ctx.payload_store_factory,
                 )
 
             # 6. 发 Outbox —— SourceEventIngested

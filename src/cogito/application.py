@@ -402,12 +402,8 @@ class RuntimeApplication:
         app.multimodal_metrics = multimodal_metrics
         # PLAN-16 M7 OPS-04: 注入 Memory/Knowledge 专项指标（metrics_access registry）
         app.cognition_metrics = cognition_metrics
-        # PLAN-16 P16-13：注入同步/摄取路径的 PayloadStore 工厂（供 sync_source 解析正文）
-        from cogito.service.knowledge.sync import set_payload_store_factory
-        if config.knowledge.enabled:
-            # PLAN-16 P16-13 修复：build() 是 classmethod，此处无 self；改用局部工厂函数
-            set_payload_store_factory(lambda payload_conn=None: PayloadStore(
-                config.resolve_payload_dir(), payload_conn or conn))
+        # PLAN-16 P16-13 完整：Knowledge PayloadStore 已直接注入 KnowledgeService 工厂，
+        # 不再使用全局 set_payload_store_factory（已移除，避免全局状态与并发污染）。
         app._wakeup_event = wakeup_event
         app._recovery_counts = recovery_counts
 
