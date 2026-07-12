@@ -252,6 +252,40 @@ def rebuild_knowledge_fts(conn: sqlite3.Connection) -> None:
         pass
 
 
+def purge_segments_for_resource(
+    conn: sqlite3.Connection, resource_id: str,
+) -> int:
+    """擦除资源的所有段落地（PLAN-16 M5 KNOW-08）。
+
+    清空 segment 正文（最小 tombstone）、删除 embedding 行、标记 deleted_at，
+    并重建 FTS 使被擦除正文/vector 不再保留。返回被清理的段数。
+    """
+    now = datetime.now(UTC).isoformat()
+    docs = list_documents_for_resource(conn, resource_id)
+    count = 0
+    try:
+        seg_ids = []
+        for doc in docs:
+            for seg in list_segments_for_document(conn, doc.document_id):
+                seg_ids.append(seg.segment_id)
+        for sid in seg_ids:
+            conn.execute(
+                "UPDATE knowledge_segments "
+                "SET text_ref_or_inline='', deleted_at=?, embedding_status='pending' "
+                "WHERE segment_id=? AND deleted_at IS NULL",
+                (now, sid),
+            )
+            conn.execute(
+                "DELETE FROM knowledge_embeddings WHERE segment_id=?", (sid,),
+            )
+            count += 1
+        ensure_knowledge_fts(conn)
+    except sqlite3.OperationalError as e:
+        logging.getLogger("cogito.knowledge_repo").warning(
+            "purge_segments_for_resource partial failure: %s", e)
+    return count
+
+
 def search_knowledge_fts(
     conn: sqlite3.Connection, query: str, limit: int = 8,
 ) -> list[tuple[str, float]]:

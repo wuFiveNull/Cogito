@@ -285,6 +285,47 @@ class SessionCompletedMemoryExtractionConsumer(EventConsumer):
         return True
 
 
+class MemorySourceInvalidatedConsumer(EventConsumer):
+    """Knowledge 来源失效 → 经 MemoryService 决定 keep/review/expire（PLAN-16 M5 KNOW-07）。
+
+    KnowledgeService.erase 仅发布 MemorySourceInvalidated 事件，不再直写 memory 表；
+    本消费者调用 MemoryService.handle_memory_source_invalidated 完成跨聚合传播。
+    """
+
+    name = "memory-source-invalidation-handler"
+
+    def can_handle(self, lease: OutboxLease) -> bool:
+        return lease.event_type == "MemorySourceInvalidated"
+
+    def handle(self, conn: sqlite3.Connection, lease: OutboxLease) -> bool:
+        consumed = conn.execute(
+            "SELECT 1 FROM event_consumptions WHERE consumer_name=? AND event_id=?",
+            (self.name, lease.event_id),
+        ).fetchone()
+        if consumed is not None:
+            return True
+
+        try:
+            payload = json.loads(lease.payload_ref or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        memory_id = str(payload.get("memory_id") or lease.aggregate_id)
+        source_resource_id = str(payload.get("source_resource_id") or "")
+        reason = str(payload.get("reason") or "knowledge_deleted")
+        if not memory_id or not source_resource_id:
+            with conn:
+                _mark_consumed(conn, self.name, lease.event_id)
+            return True
+
+        with conn:
+            from cogito.service.memory_service import SqliteMemoryService
+            SqliteMemoryService(conn).handle_memory_source_invalidated(
+                memory_id, source_resource_id=source_resource_id, reason=reason,
+            )
+            _mark_consumed(conn, self.name, lease.event_id)
+        return True
+
+
 
 
 def _mk_idempotency(principal: str, stream_type: str, event_ids: list[str],
@@ -318,4 +359,5 @@ def build_default_registry(default_principal_id: str = "owner") -> EventConsumer
     ))
     registry.register(TurnCompletedMemoryExtractionConsumer())
     registry.register(SessionCompletedMemoryExtractionConsumer())
+    registry.register(MemorySourceInvalidatedConsumer())
     return registry

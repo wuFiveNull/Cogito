@@ -263,10 +263,21 @@ class KnowledgeService:
         limit: int = 8,
         query_vector: list[float] | None = None,
     ) -> list[dict]:
-        """Return authorized FTS/vector results with safe provenance metadata."""
+        """Return authorized FTS/vector results with safe provenance metadata.
+
+        PLAN-16 M5 KNOW-06: 未显式传入 query_vector 且配置了 Embedder 时，
+        自动生成 query vector 走 hybrid retrieval（FTS + vector），不再仅 FTS-only。
+        """
         merged: dict[str, tuple[float, str]] = {}
         for segment_id, score in knowledge_repo.search_knowledge_fts(self._conn, query, limit):
             merged[segment_id] = (score, "keyword")
+        # KNOW-06: 自动 query embedding（同步路径，不污染 running event loop）
+        if query_vector is None and self._embedder is not None:
+            try:
+                query_vector = self._embedder.embed_sync(query)
+            except Exception as e:
+                _LOGGER.warning("query embedding failed, degrading to FTS-only: %s", e)
+                query_vector = None
         if query_vector:
             model = self._embedder.model_id if self._embedder else ""
             for segment_id, score in knowledge_repo.search_knowledge_vector(
@@ -333,45 +344,37 @@ class KnowledgeService:
         return True
 
     def erase(self, resource_id: str, reason: str = "") -> int:
-        """擦除资源的所有数据（PLAN-13 M4）。"""
-        docs = knowledge_repo.list_documents_for_resource(self._conn, resource_id)
-        count = 0
-        for doc in docs:
-            segs = knowledge_repo.list_segments_for_document(self._conn, doc.document_id)
-            for seg in segs:
-                self._conn.execute(
-                    "UPDATE knowledge_segments SET deleted_at=? WHERE segment_id=?",
-                    (datetime.now(UTC).isoformat(), seg.segment_id),
-                )
-                count += 1
+        """擦除资源的所有数据（PLAN-13 M4, PLAN-16 M5 KNOW-07/08/09）。
+
+        KNOW-08: 清空 segment 正文 + 删除 embedding + 重建 FTS（最小 tombstone）。
+        KNOW-09: 写 Erasure Receipt 供对账。
+        KNOW-07: 不再直写 memory 表；发布 MemorySourceInvalidated 事件，
+        由 MemorySourceInvalidatedConsumer 经 MemoryService 决定 keep/review/expire。
+        """
+        # KNOW-08: 清理段落地（正文/embedding/FTS）
+        count = knowledge_repo.purge_segments_for_resource(self._conn, resource_id)
         knowledge_repo.update_resource_status(self._conn, resource_id, ResourceStatus.deleted.value)
-        now = datetime.now(UTC).isoformat()
+
+        # KNOW-09: 写 Erasure Receipt
+        receipt_id = _write_knowledge_erasure_receipt(
+            self._conn, resource_id=resource_id, reason=reason, segment_count=count,
+        )
+
+        # KNOW-07: 经事件传播到 Memory（不再直写 memory 表）
         affected = self._conn.execute(
             "SELECT DISTINCT memory_id FROM memory_sources "
             "WHERE source_type='knowledge_resource' AND source_id=? AND deleted_at IS NULL",
             (resource_id,),
         ).fetchall()
-        self._conn.execute(
-            "UPDATE memory_sources SET deleted_at=? "
-            "WHERE source_type='knowledge_resource' AND source_id=? AND deleted_at IS NULL",
-            (now, resource_id),
-        )
+        from cogito.domain.events import DomainEvent
+        from cogito.store.repositories import OutboxRepository
+        import json
         for row in affected:
             memory_id = row["memory_id"]
-            remaining = self._conn.execute(
-                "SELECT 1 FROM memory_sources WHERE memory_id=? AND deleted_at IS NULL LIMIT 1",
-                (memory_id,),
-            ).fetchone()
-            if remaining is None:
-                self._conn.execute(
-                    "UPDATE memory_items SET status='expired', valid_to=?, updated_at=?, version=version+1 "
-                    "WHERE memory_id=? AND status='confirmed' AND deleted_at IS NULL",
-                    (now, now, memory_id),
-                )
-            from cogito.domain.events import DomainEvent
-            from cogito.store.repositories import OutboxRepository
-            import json
-            data = {"memory_id": memory_id, "resource_id": resource_id, "reason": reason}
+            data = {
+                "memory_id": memory_id, "resource_id": resource_id,
+                "reason": reason, "receipt_id": receipt_id,
+            }
             OutboxRepository(self._conn).insert(DomainEvent(
                 event_type="MemorySourceInvalidated",
                 aggregate_type="memory",
@@ -383,11 +386,10 @@ class KnowledgeService:
             ))
         self._emit(
             "KnowledgeResourceDeleted", resource_id,
-            {"resource_id": resource_id, "reason": reason, "segment_count": count},
+            {"resource_id": resource_id, "reason": reason,
+             "segment_count": count, "receipt_id": receipt_id},
         )
         # PLAN-16 M2 TX-05: 不再内部 commit，由调用方统一提交。
-        # NOTE: 此方法会写 memory 表（MemorySourceInvalidated / memory_sources），
-        # 属于跨聚合副作用，详见 KNOW-07 / M5 — 提交边界仍在调用方。
         return count
 
 
@@ -398,3 +400,29 @@ def select_parser(media_type: str) -> ContentParser:
     if media_type in ("text/markdown", "text/x-markdown"):
         return MarkdownParser()
     return PlainTextParser()
+
+
+def _write_knowledge_erasure_receipt(
+    conn: sqlite3.Connection, *, resource_id: str, reason: str, segment_count: int,
+) -> str:
+    """为 Knowledge 擦除写入一条 Erasure Receipt（PLAN-16 M5 KNOW-09）。"""
+    import hashlib
+    import uuid as _uuid
+    from cogito.store.receipt_repo import ReceiptRecord, SideEffectReceiptRepository
+    receipt_id = f"rcpt-know-erase-{resource_id[:8]}-{_uuid.uuid4().hex[:8]}"
+    request_hash = hashlib.sha256(
+        f"knowledge-erase:{resource_id}:{reason}".encode()).hexdigest()[:16]
+    created_at = int(datetime.now(UTC).timestamp() * 1000)
+    SideEffectReceiptRepository(conn).insert(ReceiptRecord(
+        receipt_id=receipt_id,
+        capability_id="knowledge",
+        operation_id=resource_id,
+        request_hash=request_hash,
+        side_effect_class="non_retriable",
+        status="success",
+        reconcile_status="not_needed",
+        summary=f"knowledge resource erased: {reason} ({segment_count} segments)",
+        attempt_type="run",
+        created_at=created_at,
+    ))
+    return receipt_id

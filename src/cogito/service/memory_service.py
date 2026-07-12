@@ -727,6 +727,41 @@ class SqliteMemoryService:
         )
         return created
 
+    # ── Knowledge → Memory invalidation（PLAN-16 M5 KNOW-07）──
+
+    def handle_memory_source_invalidated(
+        self,
+        memory_id: str,
+        *,
+        source_resource_id: str,
+        reason: str = "knowledge_deleted",
+    ) -> None:
+        """Knowledge 来源失效后，根据剩余来源决定 keep/review/expire（KNOW-07）。
+
+        不再由 KnowledgeService 直写 memory 表；由本方法（经 Consumer）决定：
+        - 仍有其他来源 → keep（仅标记该来源 deleted_at）
+        - 无剩余来源 → 标记忆为 expired
+        """
+        now = datetime.now(UTC)
+        # 标记本来源失效
+        self._conn.execute(
+            "UPDATE memory_sources SET deleted_at=? "
+            "WHERE memory_id=? AND source_type='knowledge_resource' "
+            "AND source_id=? AND deleted_at IS NULL",
+            (now.isoformat(), memory_id, source_resource_id),
+        )
+        # 是否仍有其他有效来源
+        remaining = self._conn.execute(
+            "SELECT 1 FROM memory_sources WHERE memory_id=? AND deleted_at IS NULL LIMIT 1",
+            (memory_id,),
+        ).fetchone()
+        if remaining is None:
+            self._repo.expire(memory_id)
+            self._emit_memory_event("MemoryExpired", memory_id, {
+                "reason": reason,
+                "source_resource_id": source_resource_id,
+            })
+
 
 # ── helpers ────────────────────────────────────────────────────────────────
 

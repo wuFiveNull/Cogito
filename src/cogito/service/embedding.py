@@ -28,6 +28,18 @@ class EmbeddingProvider(Protocol):
         """批量将文本转为向量。"""
         ...
 
+    def embed_sync(self, text: str) -> list[float]:
+        """同步单条 embedding（PLAN-16 M5 KNOW-06 hybrid retrieval）。
+
+        用于运行中的同步检索路径，避免在 event loop 内使用 asyncio.run()。
+        默认实现退化为 embed_many_sync([text])[0]。
+        """
+        ...
+
+    def embed_many_sync(self, texts: list[str]) -> list[list[float]]:
+        """同步批量 embedding（PLAN-16 M5 KNOW-06 hybrid retrieval）。"""
+        ...
+
     @property
     def model_name(self) -> str:
         """当前模型名称（用于版本追踪）。"""
@@ -51,6 +63,12 @@ class NoopEmbeddingProvider:
         return []
 
     async def embed_many(self, texts: list[str]) -> list[list[float]]:
+        return [[] for _ in texts]
+
+    def embed_sync(self, text: str) -> list[float]:
+        return []
+
+    def embed_many_sync(self, texts: list[str]) -> list[list[float]]:
         return [[] for _ in texts]
 
     @property
@@ -134,6 +152,37 @@ class OpenAICompatEmbeddingProvider:
             result = await loop.run_in_executor(None, self._embed_batch_sync, batch)
             all_results.extend(result)
 
+        return all_results
+
+    def embed_sync(self, text: str) -> list[float]:
+        """同步单条 embedding（PLAN-16 M5 同步检索路径）。"""
+        result = self.embed_many_sync([text])
+        return result[0] if result else []
+
+    def embed_many_sync(self, texts: list[str]) -> list[list[float]]:
+        """同步批量 embedding（PLAN-16 M5 同步检索路径）。
+
+        用于同步检索路径（ContextBuilder / search_knowledge），
+        避免在运行中的 event loop 内使用 asyncio.run()。
+        """
+        if not texts:
+            return []
+        # 在 executor 中运行同步 HTTP 调用，不阻塞 event loop
+        try:
+            loop = asyncio.get_running_loop()
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(self._embed_many_sync_direct, texts)
+                return future.result()
+        except RuntimeError:
+            # 无 running loop：直接同步执行
+            return self._embed_many_sync_direct(texts)
+
+    def _embed_many_sync_direct(self, texts: list[str]) -> list[list[float]]:
+        all_results: list[list[float]] = []
+        for i in range(0, len(texts), self._max_batch_size):
+            batch = texts[i:i + self._max_batch_size]
+            all_results.extend(self._embed_batch_sync(batch))
         return all_results
 
     def _embed_batch_sync(self, texts: list[str]) -> list[list[float]]:
