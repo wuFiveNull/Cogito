@@ -318,8 +318,12 @@ class ContextBuilder:
         )
         memory_items, memory_ids, memory_excluded = injection
         items.extend(memory_items)
-        # PLAN-16 M6 #14 完整：收集被排除 candidate 完整 provenance（score 分项+原因）
-        all_excluded: list[dict[str, Any]] = list(memory_excluded)
+        # PLAN-16 M6 #14 完整: 收集被排除 candidate 完整 provenance (score 分项+原因)
+        # 把 {id: reason} 映射转为 [{candidate_id, reason}] 以便持久化
+        all_excluded: list[dict[str, Any]] = [
+            {"candidate_id": k, "exclusion_reason": v}
+            for k, v in memory_excluded.items()
+        ]
 
         # 2b. Authorized content memory.  It is an independent source and can be
         # disabled without changing the existing fact-memory path.
@@ -328,12 +332,18 @@ class ContextBuilder:
                 principal_id, input_msg.get("content", ""),
             )
             items.extend(knowledge_items)
-            all_excluded.extend(knowledge_excluded)
+            all_excluded.extend(
+                {"candidate_id": k, "exclusion_reason": v}
+                for k, v in knowledge_excluded.items()
+            )
 
         # 2c. Task/Checkpoint state（PLAN-16 M6 #12 完整：TaskStateRetriever）
         task_state_items, task_state_excluded = self._inject_task_state(principal_id)
         items.extend(task_state_items)
-        all_excluded.extend(task_state_excluded)
+        all_excluded.extend(
+            {"candidate_id": k, "exclusion_reason": v}
+            for k, v in task_state_excluded.items()
+        )
 
         # 3. 上下文压缩（阶段 6）+ SessionSummary 候选（PLAN-16 M6 完整）
         history_itemized = [self._message_to_item(m) for m in history]
@@ -348,7 +358,7 @@ class ContextBuilder:
             if self._max_input_tokens > 0 else 0
         )
 
-        summary_item = None
+        summary_candidate = None
         if token_ratio >= self.BACKGROUND_THRESHOLD:
             summary = self._load_active_summary(session_id)
             if summary:
@@ -364,15 +374,24 @@ class ContextBuilder:
                         recent.append(msg)
 
                 if old_count > 0:
+                    # PLAN-16 M6 #12 完整: SessionSummary 作为 protected RetrievalCandidate
                     summary_content = self._format_summary(summary["content_json"])
-                    summary_item = ContextItem(
-                        item_type="summary",
-                        item_id=summary["summary_id"],
-                        source=session_id,
-                        tokens=estimate_tokens(summary_content),
-                        trust_label="verified",
-                        content=summary_content,
-                        role="system",
+                    summary_candidate = RetrievalCandidate(
+                        candidate_type="session_summary",
+                        candidate_id=summary["summary_id"],
+                        principal_id=principal_id,
+                        scope=session_id,
+                        content_ref=summary_content,
+                        source_refs=(session_id,),
+                        keyword_score=0.0,
+                        semantic_score=0.0,
+                        recency_score=1.0,
+                        importance_score=1.0,
+                        trust_score=1.0,
+                        final_score=1.0,
+                        token_estimate=estimate_tokens(summary_content),
+                        retrieval_path="summary",
+                        policy_version=self._policy_version,
                     )
                     history = recent
 
@@ -391,10 +410,15 @@ class ContextBuilder:
         msg_candidates = normalize_scores(msg_candidates)
         selected_msgs, msg_excluded = self._select_candidates_by_budget(
             msg_candidates,
-            self._budget_config.quota("recent_message", max(1, self._max_input_tokens)),
+            self._budget_allocation["recent_message"].quota,
             protected_indices=protected_msg_indices,
         )
-        all_excluded.extend(msg_excluded)
+        all_excluded.extend(
+            {"candidate_id": k, "exclusion_reason": v}
+            for k, v in msg_excluded.items()
+        )
+        # PLAN-16 M6 #14 完整: 持久化到实例, 避免 snapshot 中 excluded 为空
+        self.all_excluded = all_excluded
 
         # 保持时序Emit：按 receive_sequence（candidate_id 对应 message 顺序）
         selected_by_id = {c.candidate_id: c for c in selected_msgs}
@@ -402,9 +426,15 @@ class ContextBuilder:
             m for m in history if m["message_id"] in selected_by_id
         ]
 
+        # PLAN-16 完整：session_summary 作为 protected candidate 参与统一选择池
+        # protected 包含 summary（永不被 budget 挤出），emit 按 type 顺序
+        if summary_candidate is not None:
+            selected_summary = [summary_candidate]
+        else:
+            selected_summary = []
+
         # 按 type 顺序组装最终 items: ... memory, summary, messages, input
-        if summary_item is not None:
-            items.append(summary_item)
+        items.extend(self._summary_item(c) for c in selected_summary)
         items.extend(self._message_to_item(m) for m in selected_messages_in_order)
 
         # 5. 当前用户输入（最后、protected）
@@ -491,16 +521,19 @@ class ContextBuilder:
 
     def _inject_knowledge(
         self, principal_id: str, query: str,
-    ) -> tuple[list[ContextItem], list[dict]]:
-        """PLAN-13/R-12: 构建知识候选 → 按 knowledge 源预算选择 → ContextItem。"""
+    ) -> tuple[list[ContextItem], dict[str, str]]:
+        """PLAN-13/R-12: 构建知识候选 → 按 knowledge 源预算选择 → ContextItem。
+
+        返回 (选中 ContextItem 列表, excluded {candidate_id: reason})。
+        """
         if not principal_id or not query.strip() or self._knowledge_reader is None:
-            return [], []
+            return [], {}
         try:
             results = self._knowledge_reader.retrieve(
                 principal_id=principal_id, query=query, limit=self._knowledge_top_k,
             )
         except Exception:
-            return [], []
+            return [], {}
 
         candidates = self._build_knowledge_candidates(results)
 
@@ -510,12 +543,9 @@ class ContextBuilder:
         # OPS-04 完整：记录 knowledge 候选数（选择前）
         _record_candidates("knowledge_segment", candidates, selected=False)
 
-        # PLAN-13/R-12: 按 knowledge_segment 源预算配额选择
-        knowledge_budget = self._budget_config.quota(
-            "knowledge_segment", max(1, self._max_input_tokens),
-        )
+        # PLAN-16 M6 #13 完整：消费统一 allocate_budget 决策的 knowledge_segment 配额
         selected, excluded = self._select_candidates_by_budget(
-            candidates, knowledge_budget)
+            candidates, self._budget_allocation["knowledge_segment"].quota)
 
         # OPS-04 完整：记录 knowledge 选中数 + 排除原因 + tokens
         _record_candidates("knowledge_segment", selected, selected=True)
@@ -557,14 +587,16 @@ class ContextBuilder:
 
     # ── PLAN-16 M6 #12 完整：TaskStateRetriever ─────────────────────────────
 
-    def _inject_task_state(self, principal_id: str) -> tuple[list[ContextItem], list[dict]]:
+    def _inject_task_state(
+        self, principal_id: str,
+    ) -> tuple[list[ContextItem], dict[str, str]]:
         """TaskStateRetriever（PLAN-16 M6 #12 / RETRIEVAL-CONTEXT §4）。
 
         召回活跃 Task 状态作为独立检索源（RetrievalCandidate），纳入统一预算选择。
         输出选中 ContextItem + 排除 candidate 的完整 provenance。
         """
         if not principal_id:
-            return [], []
+            return [], {}
         rows = self._conn.execute(
             "SELECT task_id, task_type, payload_ref, origin, priority, status "
             "FROM tasks WHERE status IN ('queued','running') "
@@ -573,7 +605,7 @@ class ContextBuilder:
             (10,),
         ).fetchall()
         if not rows:
-            return [], []
+            return [], {}
         task_candidates: list[RetrievalCandidate] = []
         for r in rows:
             payload = {}
@@ -600,8 +632,9 @@ class ContextBuilder:
             ))
         task_candidates = normalize_scores(task_candidates)
         _record_candidates("task_state", task_candidates, selected=False)
-        budget = self._budget_config.quota("task_state", max(1, self._max_input_tokens))
-        selected, excluded = self._select_candidates_by_budget(task_candidates, budget)
+        # PLAN-16 M6 #13 完整：消费统一 allocate_budget 决策的 task_state 配额
+        selected, excluded = self._select_candidates_by_budget(
+            task_candidates, self._budget_allocation["task_state"].quota)
         _record_candidates("task_state", selected, selected=True)
         _record_exclusions("task_state", excluded)
         _record_tokens("task_state", sum(c.token_estimate for c in selected))
@@ -869,8 +902,8 @@ class ContextBuilder:
         # PLAN-16 M6 RET-04: 组内标准化，使 memory 分数可与其他源比较
         candidates = normalize_scores(candidates)
 
-        # PLAN-16 M6 RET-03: 按 memory 源预算配额选择候选（protected 不被挤出）
-        memory_budget = self._memory_budget_tokens()
+        # PLAN-16 M6 #13 完整: 消费统一 allocate_budget 决策的 memory 配额
+        memory_budget = self._budget_allocation["memory"].quota
         selected, excluded = self._select_candidates_by_budget(
             candidates, memory_budget, protected_indices=protected_indices,
         )
@@ -1113,4 +1146,24 @@ class ContextBuilder:
             trust_label=msg.get("trust_label", "unverified"),
             content=msg.get("content", ""),
             role=msg.get("role", "user"),
+        )
+
+    def _summary_item(self, cand: "RetrievalCandidate") -> ContextItem:
+        """SessionSummary candidate → ContextItem（PLAN-16 完整，保留角色与信任）。"""
+        return ContextItem(
+            item_type="summary",
+            item_id=cand.candidate_id,
+            source=cand.scope or "",
+            tokens=estimate_tokens(cand.content_ref),
+            trust_label="verified",
+            content=cand.content_ref,
+            role="system",
+            score=cand.final_score,
+            retrieval_path=cand.retrieval_path,
+            provenance=(
+                ("candidate_type", cand.candidate_type),
+                ("final_score", f"{cand.final_score:.3f}"),
+                ("policy_version", cand.policy_version),
+                ("query_plan_version", self._query_plan_version),
+            ),
         )

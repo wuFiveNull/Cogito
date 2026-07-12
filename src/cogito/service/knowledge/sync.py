@@ -13,6 +13,23 @@ from cogito.service.knowledge.service import KnowledgeService
 
 _LOGGER = logging.getLogger("cogito.knowledge.sync")
 
+# 共享 PayloadStore 工厂（由 Application 注入，缺失则 inline fallback）
+_shared_payload_store_factory = None
+
+
+def _shared_payload_store():
+    if _shared_payload_store_factory is not None:
+        return _shared_payload_store_factory()
+    # fallback：创建默认实例
+    from cogito.infrastructure.payload_store import PayloadStore
+    return PayloadStore(".workspace/payloads", None)
+
+
+def set_payload_store_factory(factory) -> None:
+    """Application 注入 PayloadStore 工厂（PLAN-16 完整）。"""
+    global _shared_payload_store_factory
+    _shared_payload_store_factory = factory
+
 
 def _compose_raw_text(item: dict) -> str:
     """把 ConnectorItem 的摘要字段拼成 Knowledge 摄取的 raw_text。"""
@@ -43,19 +60,33 @@ def enqueue_knowledge_sync_source(
     """
     if not stable_source_id:
         return None
-    # 完整 payload 边界：明确 config/source/parser 版本 + payload_ref 指向正文
+    # PLAN-16 M4 完整 payload 边界：大正文写入 PayloadStore、Task 仅保存引用
     data = {
         "stable_source_id": stable_source_id,
         "source_kind": source_kind,
         "content_hash": content_hash,
-        "raw_text": raw_text[:50000],
-        "payload_ref": f"knowledge:{stable_source_id}",  # 指向正文/payload store
+        "raw_text": "",
+        "payload_ref": "",
         "principal_id": principal_id,
         "trust_label": trust_label,
         "source_version": content_hash[:8] if content_hash else "",
         "parser_policy_version": "1",
         "config_version": "1",
+        "payload_threshold": 4096,
     }
+    # 正文经 PayloadStore：Task 只保存 payload_ref，不内联无界正文
+    if raw_text:
+        try:
+            store = _shared_payload_store()
+            obj = store.put(raw_text.encode("utf-8"),
+                            content_type="text/plain; charset=utf-8",
+                            retention_class="hot")
+            data["payload_ref"] = obj.payload_id
+            data["content_length"] = len(raw_text)
+        except Exception as e:
+            # PayloadStore 不可用时降级内联（截断上限）
+            _LOGGER.warning("sync_source PayloadStore unavailable, inlining: %s", e)
+            data["raw_text"] = raw_text[:50000]
     # 完整：幂等键加入 content_hash，允许同一来源内容更新后重新摄取
     idem = f"knowledge.sync_source:{stable_source_id}:{content_hash or 'none'}"
     try:
@@ -147,11 +178,17 @@ def sync_resource(
 
     返回 resource_id。
     """
+    # PLAN-16 完整 payload 边界：Task 存 payload_ref、handler 解析为 raw_text
+    effective_raw_text = raw_text
+    if not effective_raw_text and payload_ref:
+        from cogito.service.knowledge.resolver import resolve_payload_ref
+        effective_raw_text = resolve_payload_ref(payload_ref, _shared_payload_store())
+
     resource_id = KnowledgeService(conn).sync_source(
         stable_source_id=stable_source_id,
         source_kind=source_kind,
         content_hash=content_hash,
-        raw_text=raw_text,
+        raw_text=effective_raw_text,
         principal_id=principal_id,
         trust_label=trust_label,
     )

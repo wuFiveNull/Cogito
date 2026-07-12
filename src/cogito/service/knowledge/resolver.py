@@ -39,6 +39,21 @@ def resolve_segment_text(
     return str(segment_row.get("text_ref_or_inline") or "")
 
 
+def resolve_payload_ref(payload_ref: str, store=None) -> str:
+    """从 PayloadStore 解析 payload_ref 为文本（PLAN-16 完整）。"""
+    if not store:
+        store = _shared_payload_store()
+    try:
+        data = store.get(payload_ref)
+        if data is not None:
+            return data.decode("utf-8", errors="replace")
+    except Exception as e:
+        import logging
+        logging.getLogger("cogito.knowledge.resolver").warning(
+            "resolve_payload_ref %s failed: %s", payload_ref, e)
+    return ""
+
+
 def make_payload_store_factory(config=None):
     """构造绑定了 config.resolve_payload_dir() 的 PayloadStore 工厂。
 

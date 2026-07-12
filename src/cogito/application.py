@@ -207,6 +207,7 @@ class RuntimeApplication:
         knowledge_service = None
         knowledge_factory = None
         if config.knowledge.enabled:
+            from cogito.infrastructure.payload_store import PayloadStore
             from cogito.service.embedding import (
                 NoopEmbeddingProvider,
                 OpenAICompatEmbeddingProvider,
@@ -233,7 +234,8 @@ class RuntimeApplication:
             def _make_knowledge_service(knowledge_conn):
                 return KnowledgeService(
                     knowledge_conn, embedder=knowledge_embedder,
-                    payload_store_factory=self._make_payload_store_factory(),
+                    payload_store_factory=lambda c=knowledge_conn: PayloadStore(
+                        config.resolve_payload_dir(), c),
                 )
 
             knowledge_factory = _make_knowledge_service
@@ -391,6 +393,10 @@ class RuntimeApplication:
         app.multimodal_metrics = multimodal_metrics
         # PLAN-16 M7 OPS-04: 注入 Memory/Knowledge 专项指标（metrics_access registry）
         app.cognition_metrics = cognition_metrics
+        # PLAN-16 完整 payload 边界：注入同步/Poll 路径的 PayloadStore 工厂
+        from cogito.service.knowledge.sync import set_payload_store_factory
+        if config.knowledge.enabled:
+            set_payload_store_factory(self._make_payload_store_factory())
         app._wakeup_event = wakeup_event
         app._recovery_counts = recovery_counts
 
@@ -690,9 +696,7 @@ class RuntimeApplication:
     # ── PLAN-16 M4 完整 payload 边界：PayloadStore 工厂 ───────────────────
 
     def _make_payload_store_factory(self) -> Callable[[], Any] | None:
-        """构造 PayloadStore 工厂；multimodal 未启用则返回 None。"""
-        if not self.config.multimodal.enabled:
-            return None
+        """构造 PayloadStore 工厂（PLAN-16 完整：不依赖 multimodal 开关）。"""
         from cogito.infrastructure.payload_store import PayloadStore
         return lambda conn=None: PayloadStore(
             self.config.resolve_payload_dir(), conn or self.conn)
