@@ -325,8 +325,10 @@ def _handle_knowledge_sync_source(task: Task, ctx: TaskHandlerContext) -> str:
             source_kind=str(data.get("source_kind", "connector")),
             content_hash=str(data.get("content_hash", "")),
             raw_text=str(data.get("raw_text", "")),
+            payload_ref=str(data.get("payload_ref", "")),
             principal_id=str(data.get("principal_id", "")),
             trust_label=str(data.get("trust_label", "unverified")),
+            make_payload_store=ctx.payload_store_factory,
         )
         _refresh_knowledge_views_task(ctx, conn)
         # 完整：sync 后明确 enqueue 带版本幂等键的 embed Task（PLAN-16 KNOW-05/07）
