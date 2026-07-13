@@ -47,7 +47,8 @@ max_steps = 8
 | 0 | `enabled=false` | 全关 |
 | 1 | `enabled=true, dry_run=true` | admission/evaluate 仅记录 |
 | 2 | `dry_run=false` | 只读内置 Skill 运行，不发 Candidate |
-| 3 | `allow_candidate_emission=true` | 允许 1 个 Skill 发 Candidate（仍走 Policy） |
+| 3 | `allow_candidate_projection=true` | DriftResult 可投影为 ProactiveCandidate (origin=drift) |
+| 3b | `allow_candidate_emission=true` | 真正送评估 (Candidate status=evaluating，走 Decision Engine) |
 | 4 | `allow_workspace_skills=true` | workspace Skill opt-in（需逐项 review + budget） |
 
 ## Drift 数据流
