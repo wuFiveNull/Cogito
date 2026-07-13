@@ -197,3 +197,51 @@ class TestCheckpoint:
         ok, _ = validate_checkpoint_for_resume(
             ck, current_config_version_id="cfg-1", current_skill_version="1.0")
         assert ok is False
+
+
+class TestShouldPreemptDynamicQueries:
+    """PLAN-17 R4 P0-05: should_preempt_step 默认从 DB 动态查询 active turns /
+    priority backlog，不再置 0 (fix the audit evidence default-0)。"""
+
+    def test_preempts_on_active_turn_db(self, memory_db):
+        """DB 有 running Turn 时应抢占，reason=active_turn。"""
+        memory_db.execute(
+            "INSERT INTO turns (turn_id,status,input_message_id,session_id,"
+            " created_at) VALUES (?,?,?,?,?)",
+            ("tr-1", "running", "m-1", "s-1", int(time.time()*1000)))
+        memory_db.commit()
+        preempted, reason = should_preempt_step(
+            memory_db, principal_id="o", lease_valid=True, budget_remaining=8,
+            active_normal_turns=None, priority_backlog=None)
+        assert preempted is True
+        assert reason == "active_turn"
+
+    def test_preempts_on_high_priority_backlog_db(self, memory_db):
+        """DB 有 priority>=50 queued 任务应抢占，reason=priority_backlog。"""
+        memory_db.execute(
+            "INSERT INTO tasks (task_id,task_type,status,priority,"
+            " idempotency_key, created_at) VALUES (?,?,?,?,?,?)",
+            ("tk-high", "connector.poll", "queued", 80,
+             "id-hi", int(time.time()*1000)))
+        memory_db.commit()
+        preempted, reason = should_preempt_step(
+            memory_db, principal_id="o", lease_valid=True, budget_remaining=8,
+            active_normal_turns=0, priority_backlog=None)
+        assert preempted is True
+        assert reason == "priority_backlog"
+
+    def test_no_preempt_when_db_empty(self, memory_db):
+        """DB 无 active turns + 无 backlog + lease valid + budget > 0 → 不抢占。"""
+        preempted, reason = should_preempt_step(
+            memory_db, principal_id="o", lease_valid=True, budget_remaining=8,
+            active_normal_turns=None, priority_backlog=None)
+        assert preempted is False
+        assert reason == ""
+
+    def test_explicit_arguments_still_honored(self, memory_db):
+        """显式传入非 None 值时覆盖 DB 查询 (测试/特殊场景仍可用)。"""
+        preempted, reason = should_preempt_step(
+            memory_db, principal_id="o", lease_valid=True, budget_remaining=8,
+            active_normal_turns=3, priority_backlog=0)
+        assert preempted is True
+        assert reason == "active_turn"

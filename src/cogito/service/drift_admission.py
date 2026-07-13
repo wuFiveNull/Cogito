@@ -103,13 +103,16 @@ def admit(
     runs_today = row[0] if row else 0
     daily_budget_remaining = max(0, max_runs_per_day - runs_today)
 
-    # 8. drift already active
+    # 8. drift active count vs max_concurrent (PLAN-17 R6 DR-P1-02)
     row = conn.execute(
-        "SELECT 1 FROM drift_runs WHERE principal_id=? AND status IN "
-        "('admitted','running','waiting','paused') LIMIT 1",
+        "SELECT COUNT(*) FROM drift_runs WHERE principal_id=? AND status IN "
+        "('admitted','running','waiting','paused')",
         (principal_id,),
     ).fetchone()
-    drift_already_active = row is not None
+    active_drift_count = int(row[0]) if row else 0
+    # partial unique index (uq_drift_one_active_per_principal) 保证 status='admitted/
+    # running/waiting/paused' 行 per principal 唯一 → active_drift_count 实际最大为 1。
+    drift_already_active = active_drift_count >= max_concurrent
 
     # 判定
     snapshot = DriftAdmissionSnapshot(

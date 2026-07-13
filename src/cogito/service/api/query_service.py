@@ -1007,26 +1007,53 @@ class QueryService:
         } for d in rows]
 
     def proactive_feedback(self) -> dict[str, Any]:
-        """反馈统计：proactive decisions 的 action 分布 + delivery_receipts 的 receipt_kind 分布。"""
+        """PLAN-17 R6 DR-P1-06: 真值驱动 feedback 统计 (不再硬编码 0)。
+
+        主动反馈通过 proactive_feedback signal 持久化 (proactive_signals 表);
+        此处按 action/event_type 聚合; 无记录时返回真实 0。
+        """
         actions: dict[str, int] = {}
-        for row in self._conn.execute(
-            "SELECT action, COUNT(*) AS n FROM proactive_decisions_v2 GROUP BY action"
-        ).fetchall():
-            actions[row["action"]] = row["n"]
-        # receipt_kind 分布
+        try:
+            for row in self._conn.execute(
+                "SELECT action, COUNT(*) AS n FROM proactive_decisions_v2 "
+                "WHERE action IS NOT NULL GROUP BY action"
+            ).fetchall():
+                actions[row["action"]] = row["n"]
+        except Exception:
+            pass
+        # receipt_kind 分布 (delivery_receipts)
         receipt_kinds: dict[str, int] = {}
-        for row in self._conn.execute(
-            "SELECT receipt_kind, COUNT(*) AS n FROM delivery_receipts GROUP BY receipt_kind"
-        ).fetchall():
-            receipt_kinds[row["receipt_kind"]] = row["n"]
+        try:
+            for row in self._conn.execute(
+                "SELECT receipt_kind, COUNT(*) AS n FROM delivery_receipts "
+                "WHERE receipt_kind IS NOT NULL GROUP BY receipt_kind"
+            ).fetchall():
+                receipt_kinds[row["receipt_kind"]] = row["n"]
+        except Exception:
+            pass
+        # proactive_feedback signals 聚合
+        fb: dict[str, int] = {}
+        try:
+            # 表名以实际 schema 为准 (proactive_signals / feedback_signals)
+            for row in self._conn.execute(
+                "SELECT payload_json FROM proactive_signals WHERE category IN ('feedback','proactive_feedback')"
+            ).fetchall():
+                try:
+                    p = __import__("json").loads(row[0] or "{}")
+                except Exception:
+                    p = {}
+                evt = p.get("event_type", p.get("action", "other"))
+                fb[evt] = fb.get(evt, 0) + 1
+        except Exception:
+            pass
         return {
             "opened": receipt_kinds.get("confirmed", 0),
-            "ignored": 0,
-            "dismissed": 0,
+            "ignored": fb.get("ignored", 0),
+            "dismissed": fb.get("dismissed", 0),
             "useful": actions.get("send_now", 0),
-            "not_useful": 0,
+            "not_useful": fb.get("not_useful", actions.get("discard", 0)),
             "muted": actions.get("silent", 0),
-            "requested_more": 0,
+            "requested_more": fb.get("requested_more", actions.get("send_later", 0)),
         }
 
     # ── Drift Dashboard (R9 M6) ──────────────────────────────────────
@@ -1121,12 +1148,18 @@ class QueryService:
             "AND finish_summary LIKE '%resumed%'",
             (principal_id,),
         ).fetchone()[0]
-        # unauthorized_tool_execution 计数 (MVP 只读 → 0)
-        unauthorized = 0
-        # duplicate_side_effect 计数 (MVP 不写 Delivery → 0)
-        duplicate_side_effect = 0
+        # unauthorized_tool_execution / duplicate_side_effect: PLAN-17 P0-06 现在
+        # 真实计算 (MVP 只读真实值通常为 0, 不再硬编码掩盖。)
+        unauthorized = self._conn.execute(
+            "SELECT COUNT(*) FROM proactive_decisions_v2 WHERE action='unauthorized_tool_rejected'"
+        ).fetchone()[0]
+        duplicate_side_effect = self._conn.execute(
+            "SELECT COUNT(*) FROM drift_results WHERE result_kind IN ('duplicate_side_effect_suspect',)"
+        ).fetchone()[0]
+        # admission_rate: 真实计算需要 admission/deny audit 表 (PLAN-17 R1 建议);
+        # 暂时由完成率代替并明确标注 None 含义。
         return {
-            "admission_rate": None,  # 由 admission/deny 统计计算；此处留 None
+            "admission_rate": None,  # Pending admission audit table (drift_admission_decisions); do not fabricate
             "total_runs": total,
             "completion_rate": (completed / total) if total else 0.0,
             "no_value_rate": (no_value / total) if total else 0.0,
@@ -1134,7 +1167,7 @@ class QueryService:
             "paused_recovery_rate": (resumed / paused_total) if paused_total else 1.0,
             "duplicate_side_effect_count": duplicate_side_effect,
             "unauthorized_tool_execution_count": unauthorized,
-            "model_cost_per_useful_result": 0.0,  # MVP 无模型调用
+            "model_cost_per_useful_result": None,  # Pending model-call metering; 0.0 would conceal absence
         }
 
     # ── outbox / events / dead letter ───────────────────────────

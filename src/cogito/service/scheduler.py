@@ -156,7 +156,8 @@ class Scheduler:
 
         - 可注入 Clock/RNG（构造时注入，测试可复现）。
         - misfire coalesce：到期时无论错过了多少 tick 只补一次评估。
-        - Alert 由 Event 立即触发 (schedule_immediate_evaluate)，不走此节流。
+        - Alert immediate evaluation 由 InboundImmediateEvalConsumer 触发
+          (消费 InboundMessageAccepted Outbox 事件)，不走此 cadence 节流。
         """
         if self._proactive_config is None or not self._proactive_config.enabled:
             return []

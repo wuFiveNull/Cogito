@@ -169,7 +169,10 @@ def test_energy_1h_half():
 
 
 def test_energy_never_active():
-    assert compute_energy(None) == 0.0
+    """PLAN-17 R6 PA-P1-01: presence read failure / never seen must fail-safe
+    to medium energy (0.5), not 0.0 (which wrongly triggers ×1.5 urgency)."""
+    assert compute_energy(None) == 0.5
+    assert energy_band(compute_energy(None)) == "medium"
 
 
 def test_energy_band():

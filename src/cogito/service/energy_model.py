@@ -24,9 +24,14 @@ def compute_energy(
     half_life_min: tuple[float, ...] = DEFAULT_HALF_LIFE_MIN,
     weights: tuple[float, ...] = DEFAULT_WEIGHTS,
 ) -> float:
-    """计算当前能量 0..1。last_user_at=None → 能量=0 (从未互动)。"""
+    """计算当前能量 0..1。
+
+    last_user_at=None (从未互动 / PresenceReader 读取失败) → fail-safe 视为 0.5
+    (medium energy)，避免低能量的 ×1.5 urgency 路径在读取失败下被误触发
+    (PLAN-17 R6 PA-P1-01: Presence 失败必须不提高主动性)。
+    """
     if last_user_at is None:
-        return 0.0
+        return 0.5
     if now is None:
         now = datetime.now(UTC)
     if last_user_at.tzinfo is None:

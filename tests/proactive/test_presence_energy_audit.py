@@ -201,9 +201,13 @@ class TestEnergyBands:
         e = compute_energy(now - timedelta(hours=4), now=now)
         assert energy_band(e) in ("medium", "low")
 
-    def test_never_active_is_zero(self):
-        assert compute_energy(None) == 0.0
-        assert energy_band(0.0) == "low"
+    def test_never_active_failsafe_medium(self):
+        """PLAN-17 R6 PA-P1-01: last_user_at=None (从未活动 / PresenceReader
+        读取失败) 必须 fail-safe 视为 medium energy, 不能落入 low energy 的
+        ×1.5 urgency 路径错误地提升主动性。"""
+        e = compute_energy(None)
+        assert e == 0.5, f"presence read failure must fail-safe to 0.5 (medium), got {e}"
+        assert energy_band(e) == "medium"
 
 
 # ── persist_decision dry_run / audit fields ──
@@ -349,11 +353,8 @@ class TestEvaluateCandidates:
         assert row["dry_run"] == 1
 
     def test_presence_reader_failure_fails_safe(self, memory_db):
-        """PresenceReader 返回 None（失败）时 energy=0 → 不得因此创建真实 Delivery。
-
-        energy=0 会 ×1.5 提升 urgency，因此必须配合 dry_run 或 budget 控制；
-        这里验证 dry_run=False + delivery_service=None 路径不会抛异常，仅记录 decision。
-        """
+        """PLAN-17 R6 PA-P1-01: PresenceReader 返回 None (失败) 视为 medium energy,
+        不得再因 low energy 的 ×1.5 urgency 路径而提高主动性; 验证决策时不抛异常。"""
         conn = memory_db
         conn.execute(
             "INSERT INTO proactive_candidates "

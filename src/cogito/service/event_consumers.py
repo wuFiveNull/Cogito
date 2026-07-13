@@ -359,6 +359,75 @@ def _mark_consumed(conn: sqlite3.Connection, consumer_name: str, event_id: str) 
     )
 
 
+class InboundImmediateEvalConsumer(EventConsumer):
+    """PLAN-17 R6 PA-P1-02: 入站 Turn 到达时立即 (不走 cadence 节流) 创建
+    幂等 proactive.evaluate Task — 让 InboundMessageAccepted 事件激活一次主动评估。
+
+    Scheduler 注释提到 schedule_immediate_evaluate 但源码不存在；本 Consumer 是
+    其实生产实现。幂等键基于 turn_id + 日切窗口避免同一天对同 turn 重复触发;
+    若 day 内已有同类任务则静默跳过 (ACK-like window)。
+    """
+
+    name = "inbound-immediate-eval"
+
+    def __init__(self, *, default_principal_id: str = "owner") -> None:
+        self._default_principal_id = default_principal_id
+
+    def can_handle(self, lease: OutboxLease) -> bool:
+        return lease.event_type == "InboundMessageAccepted"
+
+    def handle(self, conn: sqlite3.Connection, lease: OutboxLease) -> bool:
+        if conn.execute(
+            "SELECT 1 FROM event_consumptions WHERE consumer_name=? AND event_id=?",
+            (self.name, lease.event_id)).fetchone() is not None:
+            return True
+
+        import time as _time
+        # 取 turn_id (aggregate_id)
+        turn_id = lease.aggregate_id
+
+        # 幂等: anchor on turn + day window — 同 turn 当天只 1 次
+        day_window = int(_time.time() * 1000) // 86400000
+        idempotency = f"proactive-evaluate-immediate:{turn_id}:{day_window}"
+        existing = conn.execute(
+            "SELECT task_id FROM tasks WHERE idempotency_key=?",
+            (idempotency,),
+        ).fetchone()
+        if existing is not None:
+            with conn:
+                _mark_consumed(conn, self.name, lease.event_id)
+            return True
+
+        try:
+            from cogito.domain.task import Task, TaskStatus
+            task = Task(
+                task_id=f"task-pe-imm-{uuid.uuid4().hex[:16]}",
+                task_type="proactive.evaluate",
+                payload_ref="",
+                status=TaskStatus.queued,
+                priority=15,
+                idempotency_key=idempotency,
+                origin="inbound-immediate-eval",
+            )
+            conn.execute(
+                "INSERT INTO tasks "
+                "(task_id, task_type, status, priority, "
+                " idempotency_key, origin, created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (task.task_id, task.task_type, task.status.value,
+                 task.priority, task.idempotency_key, task.origin,
+                 int(_time.time() * 1000)))
+            with conn:
+                _mark_consumed(conn, self.name, lease.event_id)
+            return True
+        except Exception:
+            import sys
+            import traceback as _tb
+            print("CONSUMER INSERT ERR:", file=sys.stderr)
+            _tb.print_exc()
+            return False
+
+
 class DriftResultCommittedConsumer(EventConsumer):
     """PLAN-17 R5 P0-06: Drift 完成后自动投影为 ProactiveCandidate。
 
@@ -488,6 +557,8 @@ def build_default_registry(default_principal_id: str = "owner",
     registry.register(TurnCompletedMemoryExtractionConsumer())
     registry.register(SessionCompletedMemoryExtractionConsumer())
     registry.register(MemorySourceInvalidatedConsumer())
+    registry.register(InboundImmediateEvalConsumer(
+        default_principal_id=default_principal_id))
     registry.register(DriftResultCommittedConsumer(default_principal_id=default_principal_id,
                                                    drift_config=drift_config))
     return registry
