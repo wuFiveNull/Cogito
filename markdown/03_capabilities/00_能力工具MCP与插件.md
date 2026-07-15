@@ -195,6 +195,12 @@ delegation     子 Agent 派生
 disk           文件系统和磁盘操作
 ```
 
+`delegate_task` 是延迟暴露 Tool，支持 `general`、`researcher`、`coder`、`reviewer`、
+`planner` 五种本地角色预设。只读角色在 Capability Snapshot 阶段排除所有有副作用的
+Tool；所有角色的 Toolset 都是父 Agent 权限、角色策略和请求 Toolset 的交集。子 Agent
+预算只能从父 Attempt 剩余预算中缩小，不能通过参数扩大。（`CAPABILITY-PLUGINS / 4`，
+`TASK-SCHEDULER / 8`）
+
 ### 3.3 模式-Toolset 映射
 
 ```text
@@ -396,6 +402,10 @@ Schema/数量/大小校验、稳定别名、指数退避、熔断和健康状态
 无 Tool 模型角色，并按 `Server + Agent Attempt` 隔离调用次数、Token 与墙钟预算；
 Roots 只来自显式 Workspace/roots 配置。当前 Remote MCP 对 HTTP 重定向采用严格
 拒绝策略，配置必须指向最终 Endpoint。
+
+本地可通过 `cogito tools list|describe` 查看实际 Registry，通过
+`cogito mcp list|status|tools` 查看配置、健康状态和动态原生 Tool。诊断过程只做
+MCP initialize/list/health，不执行模型或副作用 Tool。
 
 ---
 

@@ -188,6 +188,7 @@ class AgentLoop:
         checkpoint_callback: Callable[[dict], None] | None = None,
         checkpoint_loader: Callable[[str], dict[str, Any] | None] | None = None,
         agent_mode: str = "reactive",
+        policy_allowed_capabilities: set[str] | None = None,
     ) -> None:
         self._router = router
         self._registry = registry
@@ -204,6 +205,7 @@ class AgentLoop:
         self._checkpoint_callback = checkpoint_callback
         self._checkpoint_loader = checkpoint_loader
         self._agent_mode = agent_mode
+        self._policy_allowed_capabilities = policy_allowed_capabilities
 
     async def run(
         self,
@@ -223,7 +225,9 @@ class AgentLoop:
         )
         if self._registry is not None:
             snapshot = self._registry.build_snapshot(
-                mode=self._agent_mode, toolsets=self._toolsets,
+                mode=self._agent_mode,
+                toolsets=self._toolsets,
+                policy_allowed=self._policy_allowed_capabilities,
             )
             state.capability_schemas = [
                 {
@@ -396,6 +400,16 @@ class AgentLoop:
             state.usage = state.usage + response.usage
             state.total_latency_ms += iter_latency
 
+            if (
+                state.usage.total_tokens > state.budget.max_input_tokens
+                or state.usage.output_tokens > state.budget.max_output_tokens
+            ):
+                return self._make_result(
+                    LoopResultType.max_tokens,
+                    state,
+                    "Model response exceeded the remaining token budget",
+                )
+
             # 将 assistant 响应加入消息历史
             assistant_msg = self._make_assistant_message(response)
             state.messages.append(assistant_msg)
@@ -492,9 +506,11 @@ class AgentLoop:
         """
         state = LoopState(
             turn_id=context.turn_id,
+            attempt_id=getattr(context, "attempt_id", None) or "",
             context_snapshot_id=context.snapshot_id,
             started_at=datetime.now(UTC),
             iteration_no=0,
+            budget=self._budget,
         )
         output_repaired = False
 
@@ -530,6 +546,11 @@ class AgentLoop:
 
             state.usage = state.usage + response.usage
             state.total_latency_ms += iter_latency
+            if (
+                state.usage.total_tokens > state.budget.max_input_tokens
+                or state.usage.output_tokens > state.budget.max_output_tokens
+            ):
+                return
 
             result = self._classify_response(response)
 
@@ -613,6 +634,20 @@ class AgentLoop:
         return ModelRequest(
             messages=messages,
             tools=tools,
+            max_output_tokens=max(
+                1,
+                state.budget.max_output_tokens - state.usage.output_tokens,
+            ),
+            timeout=timedelta(
+                seconds=max(
+                    1,
+                    state.budget.max_wall_time_s
+                    - int(
+                        ((state.last_iteration_at or datetime.now(UTC))
+                         - (state.started_at or datetime.now(UTC))).total_seconds()
+                    ),
+                ),
+            ),
             stream=stream,
         )
 
@@ -769,6 +804,23 @@ class AgentLoop:
             capability_snapshot_ids=tuple(
                 item["capability_id"] for item in state.capability_schemas
             ),
+            resource_budget=state.budget.to_dict(),
+            resource_usage={
+                "loop_iterations": state.iteration_no,
+                "model_calls": state.model_call_count,
+                "tool_calls": state.tool_call_count,
+                "input_tokens": state.usage.input_tokens,
+                "output_tokens": state.usage.output_tokens,
+                "total_tokens": state.usage.total_tokens,
+                "cost": state.accumulated_cost,
+                "wall_time_s": max(
+                    0,
+                    int(
+                        ((state.last_iteration_at or datetime.now(UTC))
+                         - (state.started_at or datetime.now(UTC))).total_seconds()
+                    ),
+                ),
+            },
         )
 
     def _expose_tool(self, state: LoopState, name: str) -> bool:

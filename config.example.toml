@@ -196,7 +196,7 @@ recovery_grace_period_seconds = 30
 # ── AIHOT（主动推送信息源；可选）──
 # 将 https://aihot.virxact.com 的公开 API 封装为 MCP 工具，
 # 暴露 aihot_fingerprint / aihot_items / aihot_daily / aihot_daily_by_date
-# / aihot_dailies / aihot_hot_topics / aihot_version 共 7 项工具。
+# / aihot_dailies / aihot_hot_topics / aihot_version / aihot_cache_status 共 8 项工具。
 # command 必须使用 cogito conda env 的绝对路径 python（不要用裸 python 或 npx）。
 # 查找方法（PowerShell）：conda activate cogiton; (Get-Command python).Source
 #

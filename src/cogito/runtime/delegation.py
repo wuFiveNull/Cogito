@@ -7,6 +7,7 @@ from typing import Any
 
 from cogito.capability.models import ToolContext, ToolDef
 from cogito.capability.registry import CapabilityRegistry
+from cogito.domain.delegation import DELEGATION_ROLES
 
 
 def create_delegation_tool_defs(
@@ -65,7 +66,8 @@ def create_delegation_tool_defs(
     return [
         ToolDef(
             "delegate_task",
-            "Queue one to three bounded child Agents and resume after their durable join.",
+            "Queue one to three bounded child Agents (general/researcher/coder/reviewer/planner) "
+            "and resume after their durable join.",
             {
                 **schema,
                 "properties": {
@@ -81,15 +83,37 @@ def create_delegation_tool_defs(
                             "properties": {
                                 "client_id": {"type": "string"},
                                 "prompt": {"type": "string"},
+                                "role": {
+                                    "type": "string",
+                                    "enum": sorted(DELEGATION_ROLES),
+                                },
                                 "toolsets": {"type": "array", "items": {"type": "string"}},
+                                "budget": {"$ref": "#/$defs/budget"},
                             },
                             "required": ["prompt"],
                         },
                     },
                     "join_policy": {"type": "string", "enum": ["all", "any"]},
                     "failure_policy": {"type": "string", "enum": ["collect"]},
+                    "role": {"type": "string", "enum": sorted(DELEGATION_ROLES)},
+                    "budget": {"$ref": "#/$defs/budget"},
                     "max_steps": {"type": "integer"},
                     "timeout_seconds": {"type": "integer"},
+                },
+                "$defs": {
+                    "budget": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "max_loop_iterations": {"type": "integer", "minimum": 1},
+                            "max_model_calls": {"type": "integer", "minimum": 1},
+                            "max_tool_calls": {"type": "integer", "minimum": 1},
+                            "max_input_tokens": {"type": "integer", "minimum": 1},
+                            "max_output_tokens": {"type": "integer", "minimum": 1},
+                            "max_wall_time_s": {"type": "integer", "minimum": 1},
+                            "max_cost": {"type": "number", "minimum": 0},
+                        },
+                    }
                 },
                 "anyOf": [{"required": ["prompt"]}, {"required": ["tasks"]}],
             },
@@ -100,7 +124,20 @@ def create_delegation_tool_defs(
             side_effect_class="reconcilable",
             reconcile_fn=lifecycle.reconcile,
             deferred=True,
-            output_schema={"type": "object"},
+            output_schema={
+                "type": "object",
+                "required": ["delegation_id", "status", "children", "usage"],
+                "properties": {
+                    "delegation_id": {"type": "string"},
+                    "status": {"type": "string", "enum": ["completed", "failed"]},
+                    "join_policy": {"type": "string", "enum": ["all", "any"]},
+                    "failure_policy": {"type": "string", "enum": ["collect"]},
+                    "completed_count": {"type": "integer"},
+                    "failed_count": {"type": "integer"},
+                    "usage": {"type": "object"},
+                    "children": {"type": "array", "items": {"type": "object"}},
+                },
+            },
         ),
         ToolDef(
             "subagent_manage",

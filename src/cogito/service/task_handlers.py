@@ -249,6 +249,13 @@ async def _handle_agent_delegate(
             CheckpointRepository(conn).save(turn_id, data)
             conn.commit()
 
+        policy_allowed = None
+        if bool(payload.get("read_only", False)):
+            policy_allowed = {
+                tool.capability_id
+                for tool in ctx.capability_registry.all_tools()
+                if tool.side_effect_class == "none"
+            }
         loop = AgentLoop(
             ctx.model_router,
             registry=ctx.capability_registry,
@@ -258,6 +265,7 @@ async def _handle_agent_delegate(
             checkpoint_callback=save_checkpoint,
             checkpoint_loader=CheckpointRepository(conn).load_latest,
             agent_mode="reactive",
+            policy_allowed_capabilities=policy_allowed,
         )
         snapshot = ContextSnapshot(
             snapshot_id=f"delegation:{payload['delegation_id']}:{payload['client_id']}",
@@ -270,8 +278,12 @@ async def _handle_agent_delegate(
                 ContextItem(
                     item_type="system_policy", item_id=f"{turn_id}:system", source="system",
                     role="system", trust_label="system",
-                    content=("You are a bounded child Agent. Return a concise structured result "
-                             "to the parent only. Never address the end user or send messages."),
+                    content=(
+                        "You are a bounded child Agent. Return a concise structured result to the "
+                        "parent only. Never address the end user or send messages. Your assigned "
+                        f"role is {payload.get('role', 'general')}. "
+                        f"{payload.get('role_instruction', '')}"
+                    ),
                 ),
                 ContextItem(
                     item_type="message", item_id=f"{turn_id}:prompt",
@@ -318,7 +330,11 @@ async def _handle_agent_delegate(
             ("cancelled" if status == "cancelled" else status, turn_id),
         )
         result_payload = {
+            "client_id": payload.get("client_id", ""),
+            "role": payload.get("role", "general"),
             "result_summary": result.text[:2_000], "result": result.text,
+            "toolsets": payload.get("toolsets", []),
+            "budget": payload.get("budget", {}),
             "usage": {
                 "input_tokens": result.usage.input_tokens,
                 "output_tokens": result.usage.output_tokens,

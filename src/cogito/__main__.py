@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import sys
 from pathlib import Path
@@ -97,6 +98,134 @@ def _cmd_mcp_auth(args: argparse.Namespace) -> int:
         else:
             print(f"{entry.name}: {'configured' if path.is_file() else 'auth_required'}")
     return 0
+
+
+def _cmd_tools(args: argparse.Namespace) -> int:
+    config = Config.load(_config_path(args))
+
+    async def run() -> int:
+        from cogito.capability_diagnostics import (
+            CapabilityDiagnosticSession,
+            tool_record,
+        )
+
+        session = await CapabilityDiagnosticSession.open(config, live_mcp=True)
+        try:
+            if args.tools_command == "describe":
+                tool = session.registry.get(args.name)
+                if tool is None:
+                    print(f"Tool not found: {args.name}", file=sys.stderr)
+                    return 2
+                record = tool_record(tool)
+                record.update(
+                    {
+                        "description": tool.description,
+                        "permissions": list(tool.permissions),
+                        "approval_policy": tool.approval_policy,
+                        "side_effect_class": tool.side_effect_class,
+                        "result_trust_label": tool.result_trust_label,
+                        "input_schema": tool.input_schema,
+                        "output_schema": tool.output_schema,
+                    }
+                )
+                print(json.dumps(record, ensure_ascii=False, indent=2))
+                return 0
+
+            records = [tool_record(tool) for tool in session.tools()]
+            print("NAME\tSOURCE\tTOOLSETS\tRISK\tEXPOSURE\tSTATUS")
+            for item in records:
+                exposure = "deferred" if item["deferred"] else "resident"
+                status = "available" if item["available"] else item["reason"] or "unavailable"
+                print(
+                    f"{item['name']}\t{item['source']}\t{','.join(item['toolsets'])}"
+                    f"\t{item['risk']}\t{exposure}\t{status}"
+                )
+            for name, error in sorted(session.mcp_errors.items()):
+                print(f"[mcp:{name}] {error}", file=sys.stderr)
+            print(f"Total: {len(records)}")
+            return 0 if not session.mcp_errors else 1
+        finally:
+            await session.close()
+
+    return asyncio.run(run())
+
+
+def _cmd_mcp_inspect(args: argparse.Namespace) -> int:
+    config = Config.load(_config_path(args))
+    entries = [
+        entry for entry in config.capability.mcp_servers
+        if not getattr(args, "server", "") or entry.name == args.server
+    ]
+    if getattr(args, "server", "") and not entries:
+        print(f"MCP server not found: {args.server}", file=sys.stderr)
+        return 2
+    if args.mcp_command == "list":
+        print("NAME\tTRANSPORT\tENABLED\tTOOLSET\tISOLATION")
+        for entry in entries:
+            print(
+                f"{entry.name}\t{entry.transport}\t{str(entry.enabled).lower()}"
+                f"\t{entry.toolset}\t{entry.isolation}"
+            )
+        print(f"Total: {len(entries)}")
+        return 0
+
+    async def run() -> int:
+        from cogito.capability_diagnostics import CapabilityDiagnosticSession
+
+        session = await CapabilityDiagnosticSession.open(
+            config,
+            live_mcp=True,
+            server_name=getattr(args, "server", ""),
+        )
+        try:
+            if args.mcp_command == "tools":
+                tools = sorted(
+                    session.mcp_tools(getattr(args, "server", "")),
+                    key=lambda tool: tool.name,
+                )
+                print("NAME\tCAPABILITY_ID\tRISK\tTOOLSETS")
+                for tool in tools:
+                    print(
+                        f"{tool.name}\t{tool.capability_id}\t{tool.risk_level}"
+                        f"\t{','.join(tool.toolset)}"
+                    )
+                print(f"Total: {len(tools)}")
+            else:
+                states = session.mcp_manager.health_states() if session.mcp_manager else {}
+                print("NAME\tSTATUS\tTOOLS\tERROR")
+                for entry in entries:
+                    state = states.get(entry.name, {})
+                    status = state.get("status", "disabled" if not entry.enabled else "not_started")
+                    count = len(session.mcp_tools(entry.name))
+                    error = session.mcp_errors.get(entry.name, state.get("last_error", ""))
+                    print(f"{entry.name}\t{status}\t{count}\t{error}")
+            return 0 if not session.mcp_errors else 1
+        finally:
+            await session.close()
+
+    return asyncio.run(run())
+
+
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    config = Config.load(_config_path(args))
+
+    async def run() -> int:
+        from cogito.capability_diagnostics import (
+            CapabilityDiagnosticSession,
+            doctor_checks,
+        )
+
+        session = await CapabilityDiagnosticSession.open(config, live_mcp=True)
+        try:
+            checks = doctor_checks(config, session)
+            for check in checks:
+                marker = "ok" if check["ok"] else "fail"
+                print(f"[{marker}] {check['name']}: {check['detail']}")
+            return 0 if all(check["ok"] for check in checks) else 1
+        finally:
+            await session.close()
+
+    return asyncio.run(run())
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -269,9 +398,20 @@ def main() -> None:
     ).add_parser("check", help="校验配置文件并报告状态", parents=[pre])
 
     sub.add_parser("info", help="显示系统信息", parents=[pre])
+    tools_parser = sub.add_parser("tools", help="Tool 注册与可用性诊断", parents=[pre])
+    tools_sub = tools_parser.add_subparsers(dest="tools_command")
+    tools_sub.add_parser("list", help="列出当前模式已注册 Tool", parents=[pre])
+    tools_describe = tools_sub.add_parser("describe", help="查看 Tool 详细契约", parents=[pre])
+    tools_describe.add_argument("name")
+    sub.add_parser("doctor", help="检查配置、存储、Tool 与 MCP", parents=[pre])
     sub.add_parser("mcp-serve", help="启动只读 stdio MCP Server", parents=[pre])
     mcp_parser = sub.add_parser("mcp", help="MCP 管理", parents=[pre])
     mcp_sub = mcp_parser.add_subparsers(dest="mcp_command")
+    mcp_sub.add_parser("list", help="列出配置的 MCP Server", parents=[pre])
+    mcp_status = mcp_sub.add_parser("status", help="探测 MCP 健康状态", parents=[pre])
+    mcp_status.add_argument("--server", default="")
+    mcp_tools = mcp_sub.add_parser("tools", help="列出 MCP 原生 Tool", parents=[pre])
+    mcp_tools.add_argument("--server", default="")
     auth_parser = mcp_sub.add_parser("auth", help="OAuth token 管理", parents=[pre])
     auth_sub = auth_parser.add_subparsers(dest="auth_command")
     for command in ("status", "reset"):
@@ -312,12 +452,18 @@ def main() -> None:
             sys.exit(_cmd_config_check(args))
         elif args.command == "info":
             sys.exit(_cmd_info(args))
+        elif args.command == "tools" and args.tools_command:
+            sys.exit(_cmd_tools(args))
+        elif args.command == "doctor":
+            sys.exit(_cmd_doctor(args))
         elif args.command == "run":
             sys.exit(_cmd_run(args))
         elif args.command == "mcp-serve":
             sys.exit(_cmd_mcp_serve(args))
         elif args.command == "mcp" and args.mcp_command == "auth" and args.auth_command:
             sys.exit(_cmd_mcp_auth(args))
+        elif args.command == "mcp" and args.mcp_command in {"list", "status", "tools"}:
+            sys.exit(_cmd_mcp_inspect(args))
         elif args.command == "serve":
             sys.exit(_cmd_serve(args))
         else:

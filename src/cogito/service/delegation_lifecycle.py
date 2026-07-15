@@ -9,6 +9,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from cogito.capability.models import DeferredExecution, ToolContext
+from cogito.domain.delegation import (
+    allocate_child_budget,
+    resolve_delegation_role,
+    select_role_toolsets,
+)
 from cogito.domain.task import Task, TaskStatus
 from cogito.store.task_repo import TaskRepository
 
@@ -65,14 +70,45 @@ class DelegationLifecycleService:
         delegation_id = uuid.uuid4().hex
         waiting_id = uuid.uuid4().hex
         now = datetime.now(UTC).isoformat()
-        budget = {
-            "max_loop_iterations": min(int(args.get("max_steps", 6)), 8),
-            "max_model_calls": 10,
-            "max_tool_calls": 20,
-            "max_input_tokens": 16_000,
-            "max_output_tokens": 4_096,
-            "max_wall_time_s": min(int(args.get("timeout_seconds", 120)), 120),
-            "max_cost": 0.0,
+        common_budget = dict(args.get("budget") or {})
+        if "max_steps" in args:
+            common_budget["max_loop_iterations"] = args["max_steps"]
+        if "timeout_seconds" in args:
+            common_budget["max_wall_time_s"] = args["timeout_seconds"]
+        normalized_tasks: list[dict[str, Any]] = []
+        for index, raw in enumerate(raw_tasks):
+            role = resolve_delegation_role(raw.get("role", args.get("role", "general")))
+            requested = {str(value) for value in raw.get("toolsets", args.get("toolsets", []))}
+            selected = select_role_toolsets(
+                role,
+                parent_toolsets=allowed_toolsets,
+                requested_toolsets=requested,
+            )
+            requested_budget = {**common_budget, **dict(raw.get("budget") or {})}
+            budget = allocate_child_budget(
+                role=role,
+                requested=requested_budget,
+                parent_budget=context.resource_budget,
+                parent_usage=context.resource_usage,
+                child_count=len(raw_tasks),
+            )
+            normalized_tasks.append(
+                {
+                    "client_id": str(raw.get("client_id") or f"task-{index + 1}"),
+                    "prompt": str(raw.get("prompt", "")),
+                    "role": role,
+                    "requested_toolsets": requested,
+                    "selected_toolsets": selected,
+                    "budget": budget,
+                }
+            )
+        delegation_budget = {
+            "children": [
+                {"client_id": item["client_id"], "budget": item["budget"]}
+                for item in normalized_tasks
+            ],
+            "parent_budget": context.resource_budget,
+            "parent_usage": context.resource_usage,
         }
         try:
             self._conn.execute(
@@ -86,7 +122,7 @@ class DelegationLifecycleService:
                     context.tool_call_id,
                     context.principal_id,
                     depth + 1,
-                    json.dumps(budget),
+                    json.dumps(delegation_budget),
                     "",
                     join_policy,
                     failure_policy,
@@ -94,13 +130,15 @@ class DelegationLifecycleService:
                     now,
                 ),
             )
-            for index, raw in enumerate(raw_tasks):
-                client_id = str(raw.get("client_id") or f"task-{index + 1}")
-                prompt = str(raw.get("prompt", ""))
+            for index, normalized in enumerate(normalized_tasks):
+                client_id = normalized["client_id"]
+                prompt = normalized["prompt"]
                 if not prompt:
                     raise ValueError("child prompt is required")
-                requested = {str(value) for value in raw.get("toolsets", [])}
-                selected = allowed_toolsets & requested if requested else allowed_toolsets
+                role = normalized["role"]
+                requested = normalized["requested_toolsets"]
+                selected = normalized["selected_toolsets"]
+                budget = normalized["budget"]
                 task = Task(
                     task_type="agent.delegate",
                     payload_ref=json.dumps(
@@ -108,6 +146,10 @@ class DelegationLifecycleService:
                             "delegation_id": delegation_id,
                             "client_id": client_id,
                             "prompt": prompt,
+                            "role": role.name,
+                            "read_only": role.read_only,
+                            "role_instruction": role.system_instruction,
+                            "requested_toolsets": sorted(requested),
                             "toolsets": sorted(selected),
                             "depth": depth + 1,
                             "principal_id": context.principal_id,
@@ -168,7 +210,8 @@ class DelegationLifecycleService:
             (delegation_id,),
         ).fetchone()
         rows = self._conn.execute(
-            "SELECT l.*,t.status AS task_status,t.result_ref AS task_result_ref "
+            "SELECT l.*,t.status AS task_status,t.result_ref AS task_result_ref,"
+            "t.payload_ref AS task_payload_ref "
             "FROM child_task_links l "
             "JOIN tasks t ON t.task_id=l.task_id WHERE l.delegation_id=? ORDER BY l.created_at",
             (delegation_id,),
@@ -214,7 +257,8 @@ class DelegationLifecycleService:
                 (now, delegation_id),
             )
             rows = self._conn.execute(
-                "SELECT l.*,t.status AS task_status,t.result_ref AS task_result_ref "
+                "SELECT l.*,t.status AS task_status,t.result_ref AS task_result_ref,"
+                "t.payload_ref AS task_payload_ref "
                 "FROM child_task_links l JOIN tasks t ON t.task_id=l.task_id "
                 "WHERE l.delegation_id=? ORDER BY l.created_at",
                 (delegation_id,),
@@ -227,22 +271,34 @@ class DelegationLifecycleService:
                 str(row["client_id"]),
             ),
         )
-        children = [
-            {
+        children = []
+        for row in rows:
+            try:
+                task_payload = json.loads(row["task_payload_ref"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                task_payload = {}
+            children.append({
                 "client_id": row["client_id"],
                 "task_id": row["task_id"],
                 "turn_id": row["turn_id"],
+                "role": task_payload.get("role", "general"),
+                "requested_toolsets": task_payload.get("requested_toolsets", []),
+                "toolsets": task_payload.get("toolsets", []),
+                "budget": task_payload.get("budget", {}),
                 "status": row["task_status"],
                 "result_summary": row["result_summary"],
                 "result_ref": row["result_ref"] or row["task_result_ref"] or "",
                 "usage": json.loads(row["usage_json"] or "{}"),
                 "error": row["error"],
-            }
-            for row in rows
-        ]
+            })
         result = {
             "delegation_id": delegation_id,
             "status": "completed" if completed else "failed",
+            "join_policy": delegation["join_policy"],
+            "failure_policy": delegation["failure_policy"],
+            "completed_count": completed,
+            "failed_count": failed,
+            "usage": aggregate_usage,
             "children": children,
         }
         result_json = json.dumps(result, ensure_ascii=False)

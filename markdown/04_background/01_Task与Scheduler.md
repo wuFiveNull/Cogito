@@ -211,6 +211,17 @@ Agent、同一父 Attempt 并发最多两个、深度最多二。权限是父 Ca
 `agent_delegations.usage_json`，供状态查询和后续预算治理使用。Join `all|any` 满足后
 父 Turn 入队，新 Attempt 从 Checkpoint 恢复。
 
+`tasks[]` 支持 `role=general|researcher|coder|reviewer|planner`。角色预设由本地
+确定性策略定义系统指令、可用 Toolset 和预算上限；`researcher`、`reviewer`、
+`planner` 仅能获得 `side_effect_class=none` 的只读 Capability。调用方可通过
+`budget` 请求更小的模型、Tool、Token、墙钟和成本预算，Runtime 取角色上限、
+请求值、父 Attempt 剩余预算三者交集，并按 Child 数量分配父剩余预算。角色、
+实际 Toolset 和实际预算随 Child Task payload 固化，等待或崩溃恢复不得扩大。
+
+Join 结果固定包含 `delegation_id/status/join_policy/failure_policy/usage/children`；
+每个 Child 返回 `client_id/task_id/turn_id/role/toolsets/budget/status/result_summary/
+result_ref/usage/error`。结果正文可进入 Payload Store，父 Agent 只接收结构化摘要与引用。
+
 ## 9. 取消与恢复
 
 取消先更新 Task 版本，再通知 Worker。重启扫描过期 Lease、running Task、waiting 条件和 unknown ToolCall；旧 Attempt abandoned，确认安全后重新排队。

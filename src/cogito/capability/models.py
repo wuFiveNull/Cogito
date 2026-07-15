@@ -257,3 +257,7 @@ class ToolContext:
     constraints: ConstraintSet = field(default_factory=ConstraintSet)
     allowed_toolsets: tuple[str, ...] = ()
     capability_snapshot_ids: tuple[str, ...] = ()
+    # Immutable budget snapshot and cumulative usage of the calling Agent.
+    # Child-Agent tools may only narrow these limits.
+    resource_budget: dict[str, Any] = field(default_factory=dict)
+    resource_usage: dict[str, Any] = field(default_factory=dict)

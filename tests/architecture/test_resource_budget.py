@@ -9,6 +9,7 @@ from cogito.runtime.loop import (
     ResourceBudget,
 )
 from cogito.model.contracts import Usage
+from cogito.runtime.context import ContextItem, ContextSnapshot
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +85,29 @@ def test_agent_loop_legacy_params_build_budget() -> None:
     """Legacy max_iterations/max_tool_calls still construct a budget."""
     loop = AgentLoop(router=_stub_router(), max_iterations=4, max_tool_calls=8)
     assert loop is not None
+
+
+@pytest.mark.asyncio
+async def test_output_budget_is_sent_to_provider() -> None:
+    from cogito.model.router import ModelRouter
+    from cogito.model.stub_provider import StubModelProvider, StubScenario
+
+    provider = StubModelProvider([StubScenario(response_text="ok")])
+    router = ModelRouter(providers={"stub": provider}, role_map={"main": "stub"})
+    loop = AgentLoop(router, budget=ResourceBudget(max_output_tokens=123))
+    snapshot = ContextSnapshot(
+        snapshot_id="snapshot",
+        turn_id="turn",
+        items=(ContextItem(
+            item_type="message", item_id="message", source="test", content="hello",
+        ),),
+    )
+
+    await loop.run(snapshot)
+
+    request = provider.received_requests[0]
+    assert request.max_output_tokens == 123
+    assert request.timeout is not None
 
 
 # ---------------------------------------------------------------------------
