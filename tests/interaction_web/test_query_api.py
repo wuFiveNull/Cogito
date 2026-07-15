@@ -85,3 +85,27 @@ def test_plugins(client):
     r = client.get("/api/plugins")
     assert r.status_code == 200
     assert isinstance(r.json()["items"], list)
+
+
+def test_tool_control_plane(client):
+    response = client.get("/api/tools")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["available"] is True
+    assert body["contract_complete"] is True
+    assert body["items"][0]["name"] == "now"
+
+    detail = client.get("/api/tools/now")
+    assert detail.status_code == 200
+    assert detail.json()["output_schema"] == {"type": "string"}
+    assert client.get("/api/tools/missing").status_code == 404
+
+
+def test_mcp_control_plane(client):
+    response = client.get("/api/mcp/status")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["available"] is True
+    assert body["items"][0]["name"] == "docs"
+    assert body["items"][0]["status"] == "healthy"
+    assert body["items"][0]["schema_changes"] == 2

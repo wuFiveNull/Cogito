@@ -255,6 +255,25 @@ async def test_executor_enforces_snapshot_and_output_schema() -> None:
 
 
 @pytest.mark.asyncio
+async def test_executor_validates_plain_text_string_output_schema() -> None:
+    registry = CapabilityRegistry()
+
+    async def handler(args: dict, context: ToolContext) -> str:
+        return "plain text is valid"
+
+    registry.register(
+        ToolDef(
+            "text", "text", {"type": "object"}, handler,
+            output_schema={"type": "string", "minLength": 1},
+        )
+    )
+    result = await ToolExecutor(registry).execute("call-text", "text", {}, _context())
+
+    assert result.status == "success"
+    assert result.result == "plain text is valid"
+
+
+@pytest.mark.asyncio
 async def test_uncertain_side_effect_queues_reconciliation_without_retry() -> None:
     registry = CapabilityRegistry()
 

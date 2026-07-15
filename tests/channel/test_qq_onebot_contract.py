@@ -122,11 +122,11 @@ class TestExtractMessageId:
 
     def test_dict_event_message_id(self) -> None:
         """aiocqhttp.Event 是 dict，支持 dict 访问。"""
+        aiocqhttp = pytest.importorskip("aiocqhttp", reason="install cogito[qq]")
         friend = lb_entities.Friend(id=str(OWNER_QQ), nickname="TestUser")
         chain = lb_message.MessageChain([lb_message.Plain(text="test")])
         # 模拟 dict 子类
-        from aiocqhttp import Event
-        src_obj = Event({"message_id": 555555, "user_id": int(OWNER_QQ)})
+        src_obj = aiocqhttp.Event({"message_id": 555555, "user_id": int(OWNER_QQ)})
         event = lb_events.FriendMessage(
             sender=friend,
             message_chain=chain,

@@ -145,6 +145,8 @@ class TestRememberMemoryTool:
         tool_def = create_tool_def()
         assert tool_def.name == "remember_memory"
         assert tool_def.risk_level == "low"
+        assert tool_def.side_effect_class == "idempotent"
+        assert tool_def.permissions == ("memory.write",)
         props = tool_def.input_schema["properties"]
         assert "subject" in props
         assert "predicate" in props
@@ -260,7 +262,10 @@ class TestForgetMemoryTool:
 
         tool_def = create_tool_def()
         assert tool_def.name == "forget_memory"
-        assert tool_def.risk_level == "low"
+        assert tool_def.risk_level == "high"
+        assert tool_def.approval_policy == "always"
+        assert tool_def.side_effect_class == "idempotent"
+        assert tool_def.permissions == ("memory.delete",)
         props = tool_def.input_schema["properties"]
         assert "memory_id" in props
         assert "subject" in props

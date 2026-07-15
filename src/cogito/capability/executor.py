@@ -839,8 +839,15 @@ class ToolExecutor:
             try:
                 structured = json.loads(text)
             except (TypeError, ValueError) as exc:
-                structured = None
-                if tool.output_schema:
+                accepts_text = bool(
+                    tool.output_schema
+                    and (
+                        tool.output_schema.get("type") == "string"
+                        or "string" in tool.output_schema.get("type", [])
+                    )
+                )
+                structured = text if accepts_text else None
+                if tool.output_schema and not accepts_text:
                     raise ToolValidationError(
                         f"Tool '{tool.name}': output is not valid JSON",
                     ) from exc

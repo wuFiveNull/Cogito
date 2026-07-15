@@ -108,29 +108,6 @@ def _configured_toolsets(config: Config) -> set[str]:
     return toolsets
 
 
-def tool_record(tool: ToolDef) -> dict[str, Any]:
-    available = not tool.disabled
-    reason = ""
-    if available and tool.check_fn is not None:
-        try:
-            available = bool(tool.check_fn())
-        except Exception as exc:
-            available = False
-            reason = _safe_error(exc)
-    if tool.disabled:
-        reason = "disabled"
-    return {
-        "name": tool.name,
-        "capability_id": tool.capability_id,
-        "source": tool.namespace,
-        "toolsets": list(tool.toolset),
-        "risk": tool.risk_level,
-        "deferred": tool.deferred,
-        "available": available,
-        "reason": reason,
-    }
-
-
 def doctor_checks(config: Config, session: CapabilityDiagnosticSession) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
 

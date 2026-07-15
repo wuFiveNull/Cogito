@@ -56,9 +56,11 @@ def create_save_sticker_def(
         },
         toolset=("core", "multimodal"),
         handler=handler,
+        permissions=("sticker.write",),
         risk_level="low",
         side_effect_class="idempotent",
         resource_requirements={"network_requests": 0, "model_calls": 0},
+        output_schema={"type": "object"},
     )
 
 
@@ -97,9 +99,11 @@ def create_save_sticker_from_url_def(
         },
         toolset=("core", "multimodal"),
         handler=handler,
+        permissions=("network.http", "sticker.write"),
         risk_level="medium",
         side_effect_class="idempotent",
         resource_requirements={"network_requests": 1},
+        output_schema={"type": "object"},
     )
 
 
@@ -134,9 +138,13 @@ def create_send_sticker_def(
         },
         toolset=("core", "multimodal"),
         handler=handler,
-        risk_level="low",
-        side_effect_class="reconcilable",
+        permissions=("message.send",),
+        risk_level="medium",
+        # Delivery can succeed even when the response is lost, so never retry it
+        # automatically without an application-specific reconciliation handler.
+        side_effect_class="non_retriable",
         resource_requirements={"network_requests": 1, "model_calls": 0},
+        output_schema={"type": "object"},
     )
 
 

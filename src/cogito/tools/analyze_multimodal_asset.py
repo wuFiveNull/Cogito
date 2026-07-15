@@ -49,8 +49,11 @@ def create_tool_def(
         },
         toolset=("core", "multimodal"),
         handler=handler,
+        permissions=("multimodal.read",),
         risk_level="low",
         side_effect_class="idempotent",
         resource_requirements={"network_requests": 1, "model_calls": 1},
+        result_trust_label="external_untrusted",
+        output_schema={"type": "object"},
     )
 

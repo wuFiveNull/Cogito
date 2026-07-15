@@ -52,9 +52,15 @@ def test_start_call_health_and_stop_share_one_runner_loop(monkeypatch):
             self.connected = False
 
     monkeypatch.setattr("cogito.capability.mcp.manager.MCPClient", FakeClient)
-    manager = MCPServerManager(CapabilityRegistry())
+    registry = CapabilityRegistry()
+    manager = MCPServerManager(registry)
 
     asyncio.run(manager.start_server(MCPServerConfig(name="fake")))
+    registered = registry.resolve("mcp__fake__items")
+    assert registered.side_effect_class == "non_retriable"
+    assert registered.output_schema == {
+        "type": ["object", "array", "string", "number", "boolean", "null"],
+    }
     result = manager.call_tool_structured_sync(
         "fake", "items", {}, sampling_scope="attempt-1",
     )

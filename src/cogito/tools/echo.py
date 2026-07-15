@@ -32,4 +32,6 @@ tool_def = ToolDef(
     toolset=("core",),
     handler=handler,
     risk_level="low",
+    side_effect_class="none",
+    output_schema={"type": "string"},
 )

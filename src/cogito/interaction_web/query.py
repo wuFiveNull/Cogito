@@ -6,9 +6,11 @@ ACCESS-DELIVERY §2.2。所有读请求经 QueryService，handler 不直接执�
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
 
 from cogito.bench.timing import get_last
-from cogito.contracts.models import AttentionItem, ComponentHealth, DashboardSummary, HealthComponents, Pagination
+from cogito.capability.inspection import tool_inventory, tool_record
+from cogito.contracts.models import DashboardSummary, HealthComponents, Pagination
 from cogito.interaction_web.deps import CommandDeps, get_command_deps
 from cogito.service.api.query_service import SqliteQueryService
 
@@ -403,6 +405,59 @@ def list_audit(
 # ── capabilities / tool-calls / receipts ──────────────────────
 
 
+@router.get("/tools")
+def runtime_tools(request: Request) -> dict:
+    runtime = getattr(request.app.state, "runtime", None)
+    registry = getattr(getattr(runtime, "runner", None), "_registry", None)
+    if registry is None:
+        return {"items": [], "total": 0, "available": False, "reason": "runtime not injected"}
+    return {"available": True, **tool_inventory(registry.all_tools())}
+
+
+@router.get("/tools/{name}")
+def runtime_tool(name: str, request: Request) -> dict:
+    runtime = getattr(request.app.state, "runtime", None)
+    registry = getattr(getattr(runtime, "runner", None), "_registry", None)
+    tool = registry.get(name) if registry is not None else None
+    if tool is None:
+        raise HTTPException(status_code=404, detail=f"tool {name} not found")
+    return tool_record(tool, include_schema=True)
+
+
+@router.get("/mcp/status")
+def runtime_mcp_status(request: Request) -> dict:
+    runtime = getattr(request.app.state, "runtime", None)
+    if runtime is None:
+        return {"items": [], "total": 0, "available": False, "reason": "runtime not injected"}
+    manager = getattr(runtime, "mcp_manager", None)
+    states = manager.health_states() if manager is not None else {}
+    registry = getattr(getattr(runtime, "runner", None), "_registry", None)
+    items = []
+    for entry in runtime.config.capability.mcp_servers:
+        state = states.get(entry.name, {})
+        prefix = f"mcp:{entry.name}"
+        count = sum(
+            tool.namespace == prefix for tool in (registry.all_tools() if registry else [])
+        )
+        items.append(
+            {
+                "name": entry.name,
+                "transport": entry.transport,
+                "enabled": entry.enabled,
+                "toolset": entry.toolset,
+                "isolation": entry.isolation,
+                "status": state.get(
+                    "status", "disabled" if not entry.enabled else "not_started"
+                ),
+                "tool_count": count,
+                "reconnect_attempts": state.get("reconnect_attempts", 0),
+                "schema_changes": state.get("schema_changes", 0),
+                "last_error": state.get("last_error", ""),
+            }
+        )
+    return {"available": manager is not None, "items": items, "total": len(items)}
+
+
 @router.get("/capabilities")
 def list_capabilities(deps: CommandDeps = Depends(get_command_deps)) -> dict:
     return {"items": _svc(deps).list_capabilities(), "total": len(_svc(deps).list_capabilities())}
@@ -479,8 +534,6 @@ def get_connector_detail(connector_id: str, deps: CommandDeps = Depends(get_comm
 def get_proactive_context(deps: CommandDeps = Depends(get_command_deps)) -> dict:
     return _svc(deps).get_proactive_context()
 
-
-from pydantic import BaseModel
 
 class _ContextDiffBody(BaseModel):
     content: str = ""

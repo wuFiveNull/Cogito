@@ -9,7 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 from cogito.config import Config
+from cogito.capability.models import ToolDef
 from cogito.capability.plugin_runtime import PluginManifest, SqlitePluginRuntime
+from cogito.capability.registry import CapabilityRegistry
 from cogito.interaction_web.server import create_app
 from cogito.store.migration import migrate
 
@@ -41,10 +43,42 @@ def client():
     cfg = Config()
     cfg.storage.db_path = db_path
     cfg.workspace_path = db_dir
+    cfg.capability = cfg.capability._from_raw({
+        "mcp": {
+            "servers": {
+                "docs": {
+                    "transport": "stdio", "command": "docs",
+                    "isolation": "host_trusted",
+                },
+            },
+        },
+    })
+
+    async def now_handler(_args, _context):
+        return "now"
+
+    registry = CapabilityRegistry()
+    registry.register(ToolDef(
+        "now", "time", {"type": "object"}, now_handler,
+        output_schema={"type": "string"},
+    ))
+
+    class _MCPManager:
+        @staticmethod
+        def health_states():
+            return {
+                "docs": {
+                    "status": "healthy", "reconnect_attempts": 1,
+                    "schema_changes": 2, "last_error": "",
+                },
+            }
 
     runtime = SimpleNamespace(
         plugin_runtime=plugin_runtime,
         local_gateway_client=None,
+        config=cfg,
+        runner=SimpleNamespace(_registry=registry),
+        mcp_manager=_MCPManager(),
     )
     app = create_app(cfg, recovery_counts={"tasks": 1}, runtime=runtime)
     from fastapi.testclient import TestClient

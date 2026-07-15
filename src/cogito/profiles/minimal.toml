@@ -1,0 +1,27 @@
+workspace_path = ".workspace/minimal"
+
+[runtime]
+profile = "minimal"
+timezone = "Asia/Shanghai"
+
+[interaction]
+bind_host = "127.0.0.1"
+allow_remote = false
+
+[model]
+provider = "echo"
+
+[agent]
+mode = "reactive"
+enabled_toolsets = ["core", "memory"]
+disabled_toolsets = ["file", "skills", "schedule", "subagent", "web", "mcp"]
+streaming_enabled = true
+
+[capability.auto_mode]
+enabled = false
+
+[multimodal]
+enabled = false
+
+[knowledge]
+enabled = false

@@ -170,5 +170,9 @@ def create_tool_def(
         },
         toolset=("core", "memory"),
         handler=_make_handler(reader=reader, writer=writer),
-        risk_level="low",
+        permissions=("memory.delete",),
+        risk_level="high",
+        side_effect_class="idempotent",
+        approval_policy="always",
+        output_schema={"type": "string", "minLength": 1},
     )

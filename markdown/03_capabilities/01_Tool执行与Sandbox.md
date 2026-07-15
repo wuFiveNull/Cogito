@@ -166,7 +166,15 @@ created_at
 
 ## 10. 输出
 
-ToolResult 通过输出 Schema、大小限制、Trust Label 和敏感信息扫描。大型结果写 Payload；给模型的内容使用裁剪摘要和引用，不能把无限输出塞入 Context。
+ToolResult 通过输出 Schema、大小限制、Trust Label 和敏感信息扫描。结构化结果按完整
+JSON Schema 校验；声明为 `string`（或包含 `string` 联合类型）的 Tool 可合法返回普通文本，
+因此文本型 MCP 结果不会被误判为 JSON 失败。大型结果写 Payload；给模型的内容使用裁剪
+摘要和引用，不能把无限输出塞入 Context。
+
+每个 Tool 必须显式声明 `side_effect_class=none|idempotent|reconcilable|non_retriable`。
+`reconcilable` 必须提供对账处理器；未知 MCP 动作和外部消息默认 `non_retriable`，禁止自动
+重放。`cogito tools audit --all` 用于在启动前检查 Schema、Trust Label、审批策略和副作用
+契约是否完整。
 
 ## 11. 配置与指标
 

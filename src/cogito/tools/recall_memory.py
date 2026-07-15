@@ -21,7 +21,7 @@ TOOL_NAME = "recall_memory"
 
 def _make_handler(
     reader: MemoryReader | None = None,
-    on_exposed: "Callable[[list[str]], None] | None" = None,
+    on_exposed: Callable[[list[str]], None] | None = None,
 ):
     """创建 handler 闭包，捕获 reader 依赖。
 
@@ -81,7 +81,7 @@ def _make_handler(
 
 def create_tool_def(
     reader: MemoryReader | None = None,
-    on_exposed: "Callable[[list[str]], None] | None" = None,
+    on_exposed: Callable[[list[str]], None] | None = None,
 ) -> ToolDef:
     """创建 recall_memory 工具定义。
 
@@ -112,5 +112,8 @@ def create_tool_def(
         },
         toolset=("core", "memory"),
         handler=_make_handler(reader=reader, on_exposed=on_exposed),
+        permissions=("memory.read",),
         risk_level="low",
+        side_effect_class="none",
+        output_schema={"type": "string", "minLength": 1},
     )

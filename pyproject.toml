@@ -13,6 +13,8 @@ dependencies = [
     "jsonschema>=4.23",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
+    # Windows does not ship an IANA timezone database for zoneinfo.
+    "tzdata>=2025.2; platform_system == 'Windows'",
 ]
 
 [project.scripts]
@@ -35,6 +37,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+cogito = ["profiles/*.toml"]
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.11", "pytest-asyncio>=0.24"]

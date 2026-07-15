@@ -19,6 +19,8 @@ from pathlib import Path
 from cogito import __version__
 from cogito.config import DEFAULT_CONFIG_PATH, Config, ConfigError
 
+PROFILE_DIR = Path(__file__).with_name("profiles")
+
 
 def _config_path(args: argparse.Namespace) -> Path:
     """从命令行参数中推导出规范化的配置文件路径。"""
@@ -43,6 +45,34 @@ def _cmd_config_check(args: argparse.Namespace) -> int:
     print("[ok] schema:    valid")
     if getattr(config.channel, "qq", None) and config.channel.qq.enabled:
         print(f"[ok] channel.qq: enabled (instance={config.channel.qq.instance_id})")
+    return 0
+
+
+def _cmd_config_profiles(args: argparse.Namespace) -> int:
+    profiles = sorted(path.stem for path in PROFILE_DIR.glob("*.toml"))
+    if args.json:
+        print(json.dumps({"profiles": profiles, "total": len(profiles)}, indent=2))
+    else:
+        for name in profiles:
+            print(name)
+    return 0
+
+
+def _cmd_config_init(args: argparse.Namespace) -> int:
+    source = PROFILE_DIR / f"{args.profile}.toml"
+    if not source.is_file():
+        print(f"Unknown profile: {args.profile}", file=sys.stderr)
+        return 2
+    target = Path(args.output).resolve()
+    if target.exists() and not args.force:
+        print(f"Config already exists: {target}; use --force to replace", file=sys.stderr)
+        return 2
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    temporary.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    temporary.replace(target)
+    Config.load(target)
+    print(f"[ok] created {target} from profile={args.profile}")
     return 0
 
 
@@ -104,10 +134,8 @@ def _cmd_tools(args: argparse.Namespace) -> int:
     config = Config.load(_config_path(args))
 
     async def run() -> int:
-        from cogito.capability_diagnostics import (
-            CapabilityDiagnosticSession,
-            tool_record,
-        )
+        from cogito.capability.inspection import tool_inventory, tool_record
+        from cogito.capability_diagnostics import CapabilityDiagnosticSession
 
         session = await CapabilityDiagnosticSession.open(config, live_mcp=True)
         try:
@@ -116,33 +144,32 @@ def _cmd_tools(args: argparse.Namespace) -> int:
                 if tool is None:
                     print(f"Tool not found: {args.name}", file=sys.stderr)
                     return 2
-                record = tool_record(tool)
-                record.update(
-                    {
-                        "description": tool.description,
-                        "permissions": list(tool.permissions),
-                        "approval_policy": tool.approval_policy,
-                        "side_effect_class": tool.side_effect_class,
-                        "result_trust_label": tool.result_trust_label,
-                        "input_schema": tool.input_schema,
-                        "output_schema": tool.output_schema,
-                    }
-                )
+                record = tool_record(tool, include_schema=True)
                 print(json.dumps(record, ensure_ascii=False, indent=2))
                 return 0
 
-            records = [tool_record(tool) for tool in session.tools()]
-            print("NAME\tSOURCE\tTOOLSETS\tRISK\tEXPOSURE\tSTATUS")
+            tools = session.registry.all_tools() if args.all else session.tools()
+            inventory = tool_inventory(tools)
+            if args.tools_command == "audit" or args.json:
+                print(json.dumps(inventory, ensure_ascii=False, indent=2))
+                if args.tools_command == "audit":
+                    return 0 if inventory["contract_complete"] else 1
+                return 0 if not session.mcp_errors else 1
+            records = inventory["items"]
+            print("NAME\tSOURCE\tTOOLSETS\tRISK\tSIDE_EFFECT\tEXPOSURE\tSTATUS")
             for item in records:
                 exposure = "deferred" if item["deferred"] else "resident"
                 status = "available" if item["available"] else item["reason"] or "unavailable"
                 print(
                     f"{item['name']}\t{item['source']}\t{','.join(item['toolsets'])}"
-                    f"\t{item['risk']}\t{exposure}\t{status}"
+                    f"\t{item['risk']}\t{item['side_effect_class']}\t{exposure}\t{status}"
                 )
             for name, error in sorted(session.mcp_errors.items()):
                 print(f"[mcp:{name}] {error}", file=sys.stderr)
-            print(f"Total: {len(records)}")
+            print(
+                f"Total: {len(records)}; contract issues: "
+                f"{inventory['contract_issue_count']}"
+            )
             return 0 if not session.mcp_errors else 1
         finally:
             await session.close()
@@ -183,6 +210,10 @@ def _cmd_mcp_inspect(args: argparse.Namespace) -> int:
                     session.mcp_tools(getattr(args, "server", "")),
                     key=lambda tool: tool.name,
                 )
+                if args.json:
+                    from cogito.capability.inspection import tool_inventory
+                    print(json.dumps(tool_inventory(tools), ensure_ascii=False, indent=2))
+                    return 0 if not session.mcp_errors else 1
                 print("NAME\tCAPABILITY_ID\tRISK\tTOOLSETS")
                 for tool in tools:
                     print(
@@ -192,6 +223,28 @@ def _cmd_mcp_inspect(args: argparse.Namespace) -> int:
                 print(f"Total: {len(tools)}")
             else:
                 states = session.mcp_manager.health_states() if session.mcp_manager else {}
+                if args.json:
+                    payload = []
+                    for entry in entries:
+                        state = states.get(entry.name, {})
+                        payload.append(
+                            {
+                                "name": entry.name,
+                                "transport": entry.transport,
+                                "enabled": entry.enabled,
+                                "toolset": entry.toolset,
+                                "isolation": entry.isolation,
+                                "status": state.get(
+                                    "status", "disabled" if not entry.enabled else "not_started"
+                                ),
+                                "tool_count": len(session.mcp_tools(entry.name)),
+                                "error": session.mcp_errors.get(
+                                    entry.name, state.get("last_error", "")
+                                ),
+                            }
+                        )
+                    print(json.dumps({"items": payload, "total": len(payload)}, indent=2))
+                    return 0 if not session.mcp_errors else 1
                 print("NAME\tSTATUS\tTOOLS\tERROR")
                 for entry in entries:
                     state = states.get(entry.name, {})
@@ -393,14 +446,27 @@ def main() -> None:
     parser.set_defaults(config=pre_args.config)  # 传递给子命令
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("config", help="配置管理", parents=[pre]).add_subparsers(
-        dest="config_command"
-    ).add_parser("check", help="校验配置文件并报告状态", parents=[pre])
+    config_parser = sub.add_parser("config", help="配置管理", parents=[pre])
+    config_sub = config_parser.add_subparsers(dest="config_command")
+    config_sub.add_parser("check", help="校验配置文件并报告状态", parents=[pre])
+    profiles_parser = config_sub.add_parser("profiles", help="列出内置配置 Profile")
+    profiles_parser.add_argument("--json", action="store_true")
+    config_init = config_sub.add_parser("init", help="从内置 Profile 创建配置")
+    config_init.add_argument(
+        "--profile", choices=["minimal", "developer", "personal"], default="personal",
+    )
+    config_init.add_argument("--output", default="config.toml")
+    config_init.add_argument("--force", action="store_true")
 
     sub.add_parser("info", help="显示系统信息", parents=[pre])
     tools_parser = sub.add_parser("tools", help="Tool 注册与可用性诊断", parents=[pre])
     tools_sub = tools_parser.add_subparsers(dest="tools_command")
-    tools_sub.add_parser("list", help="列出当前模式已注册 Tool", parents=[pre])
+    tools_list = tools_sub.add_parser("list", help="列出当前模式已注册 Tool", parents=[pre])
+    tools_list.add_argument("--json", action="store_true")
+    tools_list.add_argument("--all", action="store_true")
+    tools_audit = tools_sub.add_parser("audit", help="审计 Tool 契约完整性", parents=[pre])
+    tools_audit.add_argument("--all", action="store_true")
+    tools_audit.set_defaults(json=True)
     tools_describe = tools_sub.add_parser("describe", help="查看 Tool 详细契约", parents=[pre])
     tools_describe.add_argument("name")
     sub.add_parser("doctor", help="检查配置、存储、Tool 与 MCP", parents=[pre])
@@ -410,8 +476,10 @@ def main() -> None:
     mcp_sub.add_parser("list", help="列出配置的 MCP Server", parents=[pre])
     mcp_status = mcp_sub.add_parser("status", help="探测 MCP 健康状态", parents=[pre])
     mcp_status.add_argument("--server", default="")
+    mcp_status.add_argument("--json", action="store_true")
     mcp_tools = mcp_sub.add_parser("tools", help="列出 MCP 原生 Tool", parents=[pre])
     mcp_tools.add_argument("--server", default="")
+    mcp_tools.add_argument("--json", action="store_true")
     auth_parser = mcp_sub.add_parser("auth", help="OAuth token 管理", parents=[pre])
     auth_sub = auth_parser.add_subparsers(dest="auth_command")
     for command in ("status", "reset"):
@@ -448,8 +516,12 @@ def main() -> None:
 
     args = parser.parse_args()
     try:
-        if args.command == "config":
+        if args.command == "config" and args.config_command == "check":
             sys.exit(_cmd_config_check(args))
+        elif args.command == "config" and args.config_command == "profiles":
+            sys.exit(_cmd_config_profiles(args))
+        elif args.command == "config" and args.config_command == "init":
+            sys.exit(_cmd_config_init(args))
         elif args.command == "info":
             sys.exit(_cmd_info(args))
         elif args.command == "tools" and args.tools_command:

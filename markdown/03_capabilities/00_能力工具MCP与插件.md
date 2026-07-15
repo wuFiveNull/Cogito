@@ -397,15 +397,20 @@ pinned     — 用户标记为永久保留，跳过自动归档
 MCP Server 提供的 Tool 自动进入 Registry，toolset 默认设为 Server 名称。用户可将其重新分配 Toolset 或禁用单个 Tool。
 
 Registry 对动态 Provider 更新使用并发安全快照。MCP Tool 本地配置决定风险、
-审批策略与权限；Server 自报元数据不得扩大权限。Manager 支持列表变化通知、
+审批策略、权限与副作用分类；Server 自报元数据不得扩大权限。未配置副作用分类的
+远程 Tool 默认为 `non_retriable`，避免响应丢失后重复外部动作。Manager 支持列表变化通知、
 Schema/数量/大小校验、稳定别名、指数退避、熔断和健康状态。Sampling 使用独立
 无 Tool 模型角色，并按 `Server + Agent Attempt` 隔离调用次数、Token 与墙钟预算；
 Roots 只来自显式 Workspace/roots 配置。当前 Remote MCP 对 HTTP 重定向采用严格
 拒绝策略，配置必须指向最终 Endpoint。
 
-本地可通过 `cogito tools list|describe` 查看实际 Registry，通过
+本地可通过 `cogito tools list|describe|audit` 查看实际 Registry、完整输入/输出契约和
+契约问题，通过
 `cogito mcp list|status|tools` 查看配置、健康状态和动态原生 Tool。诊断过程只做
 MCP initialize/list/health，不执行模型或副作用 Tool。
+
+本地 Query API 同时提供只读 `/api/tools`、`/api/tools/{name}` 与 `/api/mcp/status`；
+它们复用当前 Runtime 的 Registry 和 Manager，不创建第二套 MCP 生命周期。
 
 ---
 

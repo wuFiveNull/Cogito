@@ -230,6 +230,12 @@ result_ref/usage/error`。结果正文可进入 Payload Store，父 Agent 只接
 已发生副作用。子 Agent 的高风险审批绑定原始 Principal；子 Turn 可等待用户，
 父 Turn 继续等待 Join。
 
+`subagent_manage list|status` 返回 Delegation、Child Task/Turn/Attempt、实际角色、Toolset、
+预算、用量、结果引用与错误的结构化快照。显式取消 Delegation 会持久化 `cancelled` 结果、
+满足等待条件并恢复仍在等待的父 Turn；因父 Task/Turn 自身取消触发的级联使用
+`resume_parent=false`，不得把已取消父 Turn 重新排队。`join_policy=any` 命中首个结果后取消
+其余非终态子执行。
+
 ## 10. 公平性与资源
 
 队列按优先级、scheduled_at 和 aging 排序。为即时 Turn 保留资源；Connector、主动推送和 Drift 分别设置并发池，避免后台任务占满模型或 SQLite 写入。

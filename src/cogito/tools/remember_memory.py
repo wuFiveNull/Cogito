@@ -141,7 +141,7 @@ def _request_extraction_after_remember(task_svc: Any, ctx: ToolContext) -> None:
         )
         # 完整：提交 Task + Outbox 事件，确保 durable
         conn.commit()
-    except Exception as e:
+    except Exception:
         # 提交失败回滚，避免脏数据
         try:
             conn.rollback()
@@ -227,5 +227,8 @@ def create_tool_def(
             writer=writer, make_writer=make_writer,
             make_task_service=make_task_service,
         ),
+        permissions=("memory.write",),
         risk_level="low",
+        side_effect_class="idempotent",
+        output_schema={"type": "string", "minLength": 1},
     )

@@ -20,7 +20,9 @@ def test_approve_pending(client):
 
 def test_reject_pending(client):
     # 准备新的 pending approval
-    import sqlite3, os, tempfile
+    import os
+    import sqlite3
+    import tempfile
     # 直接通过一个已有 pending 测试：先验证 404
     r = client.post("/api/commands/reject", json={"approval_id": "missing"})
     assert r.status_code == 404

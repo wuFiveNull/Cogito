@@ -1,0 +1,42 @@
+workspace_path = ".workspace/personal"
+
+[runtime]
+profile = "personal"
+timezone = "Asia/Shanghai"
+
+[interaction]
+bind_host = "127.0.0.1"
+allow_remote = false
+
+[model]
+provider = "echo"
+
+[agent]
+mode = "reactive"
+enabled_toolsets = ["core", "memory", "skills", "schedule", "subagent", "mcp", "knowledge"]
+disabled_toolsets = ["file", "web"]
+streaming_enabled = true
+
+[capability.skills]
+root = ".cogito/skills"
+
+[capability.auto_mode]
+enabled = true
+model_role = "fast"
+stage1_timeout_seconds = 10
+stage2_timeout_seconds = 30
+max_argument_chars = 8000
+safe_tools = ["core:now", "core:echo", "core:tool_search", "core:tool_describe", "core:todo_read"]
+
+[capability.read_only_mcp]
+principal_id = "owner"
+page_size = 50
+
+[capability.proactive]
+enabled = true
+
+[multimodal]
+enabled = false
+
+[knowledge]
+enabled = true

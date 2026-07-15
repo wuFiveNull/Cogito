@@ -342,6 +342,8 @@ class MCPServerManager:
                 )
                 if result.is_error:
                     raise RuntimeError(result.text_content or "MCP tool call failed")
+                if result.structured_content is not None:
+                    return json.dumps(result.structured_content, ensure_ascii=False)
                 return sanitize_mcp_output(
                     result.text_content,
                     max_chars=policy.max_output_chars,
@@ -354,6 +356,9 @@ class MCPServerManager:
             approval = str(local.get("approval_policy", "auto"))
             if approval not in {"auto", "always", "never"}:
                 raise ValueError(f"invalid MCP approval policy for {native_name}")
+            side_effect = str(local.get("side_effect_class", "non_retriable"))
+            if side_effect not in {"none", "idempotent", "reconcilable", "non_retriable"}:
+                raise ValueError(f"invalid MCP side-effect class for {native_name}")
             tool = ToolDef(
                 name=f"mcp__{config.name}__{native_name}",
                 description=str(info.get("description", "")),
@@ -365,8 +370,13 @@ class MCPServerManager:
                 permissions=tuple(str(v) for v in local.get("permissions", [])),
                 risk_level=risk,
                 approval_policy=approval,
-                side_effect_class="reconcilable",
+                # Unknown remote actions must not be retried automatically.  A server
+                # can be classified more precisely only through trusted local policy.
+                side_effect_class=side_effect,
                 result_trust_label="external_untrusted",
+                output_schema=info.get("output_schema") or {
+                    "type": ["object", "array", "string", "number", "boolean", "null"],
+                },
                 deferred=True,
             )
             self._registry.register(tool)
@@ -391,6 +401,7 @@ class MCPServerManager:
                     approval_policy=tool.approval_policy,
                     side_effect_class=tool.side_effect_class,
                     result_trust_label="external_untrusted",
+                    output_schema=tool.output_schema,
                     deferred=True,
                 )
                 self._registry.register(alias_tool)
@@ -505,6 +516,11 @@ class MCPServerManager:
                 namespace="mcp",
                 toolset=("mcp",),
                 result_trust_label="external_untrusted",
+                output_schema={
+                    "type": "object",
+                    "required": ["resources"],
+                    "properties": {"resources": {"type": "array"}},
+                },
             ),
             ToolDef(
                 "mcp_read_resource",
@@ -518,6 +534,14 @@ class MCPServerManager:
                 namespace="mcp",
                 toolset=("mcp",),
                 result_trust_label="external_untrusted",
+                output_schema={
+                    "type": "object",
+                    "required": ["content", "trust_label"],
+                    "properties": {
+                        "content": {"type": "string"},
+                        "trust_label": {"const": "external_untrusted"},
+                    },
+                },
             ),
             ToolDef(
                 "mcp_list_prompts",
@@ -527,6 +551,11 @@ class MCPServerManager:
                 namespace="mcp",
                 toolset=("mcp",),
                 result_trust_label="external_untrusted",
+                output_schema={
+                    "type": "object",
+                    "required": ["prompts"],
+                    "properties": {"prompts": {"type": "array"}},
+                },
             ),
             ToolDef(
                 "mcp_get_prompt",
@@ -544,6 +573,14 @@ class MCPServerManager:
                 namespace="mcp",
                 toolset=("mcp",),
                 result_trust_label="external_untrusted",
+                output_schema={
+                    "type": "object",
+                    "required": ["prompt", "trust_label"],
+                    "properties": {
+                        "prompt": {"type": "string"},
+                        "trust_label": {"const": "external_untrusted"},
+                    },
+                },
             ),
         ]
         for tool in defs:

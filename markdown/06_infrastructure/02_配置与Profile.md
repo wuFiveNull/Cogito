@@ -43,13 +43,17 @@ observability/retention/backup
 ## 3. Profile
 
 ```text
-personal      正常本机运行
-development   明文 Payload、详细 Trace、Stub 可用
-test          临时目录、固定时钟、禁止真实副作用
-recovery      只读检查和人工恢复命令
+minimal       最小 reactive Agent，仅 core/memory，Auto Mode 关闭
+developer     显式 Workspace Root，启用常用 Toolset 和 Auto Mode
+personal      不注册文件/Web Tool，启用个人 Skill、Schedule、子 Agent 与主动能力
 ```
 
 Profile 不能通过名称隐式放宽 Tool 权限；权限仍由 Policy 配置明确表达。
+三套模板均不预装或配置网页搜索 MCP；需要时必须单独增加可信 Server 配置。
+
+使用 `cogito config profiles` 枚举内置模板；使用
+`cogito config init --profile developer --output config.toml` 原子生成配置。目标已存在时默认
+拒绝覆盖，只有显式 `--force` 才替换；写入前会使用当前 Config Schema 完整校验。
 
 ## 4. 当前默认值
 
@@ -81,7 +85,9 @@ capability:
     granted_permissions: []     # Manifest 权限必须是该集合的子集
 ```
 
-当前 personal Profile 仍按项目阶段使用明文 Payload，以便检查 Agent 行为；development 额外启用更详细 Trace 和 Stub。明文策略不代表未来远程或共享部署默认值。
+当前模板用于本地先落地：模型 Provider 默认为 `echo`，用户应在真实运行前替换；developer
+的 Workspace Root 为当前目录且保护 `.git/.env/.workspace/.venv/config.toml`，personal
+未配置 Workspace Root，因此不会注册文件 Tool。
 
 ## 5. Secret
 

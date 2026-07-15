@@ -12,6 +12,7 @@ from cogito.capability.models import ToolContext, ToolDef
 from cogito.capability.policy import ToolPolicy
 from cogito.capability.registry import CapabilityRegistry
 from cogito.config import CapabilityConfig, ConfigError
+from cogito.service.approval_service import SqliteApprovalService
 
 
 async def _handler(args, context):
@@ -161,6 +162,51 @@ async def test_auto_mode_block_prevents_handler_execution():
     assert result.status == "error"
     assert "auto mode blocked" in result.error_message.lower()
     assert not called
+
+
+@pytest.mark.asyncio
+async def test_classifier_unavailable_creates_approval_when_service_exists(in_memory_db):
+    in_memory_db.execute(
+        "INSERT INTO turns(turn_id,status,created_at) VALUES ('turn','running',0)",
+    )
+    registry = CapabilityRegistry()
+    registry.register(_tool())
+    executor = ToolExecutor(
+        registry,
+        auto_mode=AutoModeGate(_Classifier(error=TimeoutError())),
+        approval_service=SqliteApprovalService(in_memory_db),
+    )
+
+    result = await executor.execute(
+        "tc-unavailable", "tool", {}, _context(turn_id="turn", principal_id="owner"),
+    )
+
+    assert result.status == "approval_required"
+    assert result.approval_id
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_allows_ordinary_idempotent_write():
+    called = False
+
+    async def handler(args, context):
+        nonlocal called
+        called = True
+        return "written"
+
+    registry = CapabilityRegistry()
+    registry.register(_tool(handler=handler, side_effect_class="idempotent"))
+    executor = ToolExecutor(
+        registry,
+        auto_mode=AutoModeGate(_Classifier(AutoModeResult(
+            AutoModeDecision.allow, "ordinary write", "classifier_stage1",
+        ))),
+    )
+
+    result = await executor.execute("tc-write", "tool", {}, _context())
+
+    assert result.status == "success"
+    assert called is True
 
 
 def test_auto_mode_config_parsing_and_validation():

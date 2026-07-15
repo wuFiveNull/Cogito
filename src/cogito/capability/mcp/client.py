@@ -164,6 +164,7 @@ class MCPClient:
                     "name": tool.name,
                     "description": tool.description or "",
                     "input_schema": tool.inputSchema,
+                    "output_schema": getattr(tool, "outputSchema", None),
                 }
             )
         self._tools = tools

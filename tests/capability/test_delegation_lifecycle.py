@@ -139,3 +139,80 @@ def test_role_policy_narrows_requested_toolsets(in_memory_db) -> None:
     assert payload["read_only"] is True
     assert payload["requested_toolsets"] == ["file", "subagent", "web"]
     assert payload["toolsets"] == ["file"]
+
+
+def test_cancel_cascades_child_task_turn_attempt_and_resumes_parent(in_memory_db) -> None:
+    in_memory_db.execute(
+        "INSERT INTO turns(turn_id,status,created_at) VALUES ('parent','waiting_external',0)",
+    )
+    context = ToolContext(
+        attempt_id="attempt", trace_id="trace", tool_call_id="call",
+        turn_id="parent", principal_id="owner", tool_state={},
+    )
+    service = DelegationLifecycleService(in_memory_db)
+    service.create(
+        {"tasks": [{"client_id": "child", "prompt": "work"}]},
+        context,
+        allowed_toolsets={"core"},
+    )
+    row = in_memory_db.execute(
+        "SELECT delegation_id,task_id FROM child_task_links",
+    ).fetchone()
+    in_memory_db.execute(
+        "INSERT INTO turns(turn_id,status,active_attempt_id,created_at) "
+        "VALUES ('child-turn','running','child-attempt',0)",
+    )
+    in_memory_db.execute(
+        "INSERT INTO run_attempts(attempt_id,turn_id,status,started_at) "
+        "VALUES ('child-attempt','child-turn','running',0)",
+    )
+    in_memory_db.execute(
+        "UPDATE child_task_links SET turn_id='child-turn',status='running' WHERE task_id=?",
+        (row["task_id"],),
+    )
+    in_memory_db.execute(
+        "UPDATE tasks SET status='running' WHERE task_id=?", (row["task_id"],),
+    )
+    in_memory_db.commit()
+
+    before = service.status(row["delegation_id"], "parent")
+    assert before is not None
+    assert before["children"][0]["attempt_id"] == "child-attempt"
+    assert service.cancel(row["delegation_id"], "parent") is True
+
+    assert in_memory_db.execute(
+        "SELECT status FROM tasks WHERE task_id=?", (row["task_id"],),
+    ).fetchone()["status"] == "cancelled"
+    assert in_memory_db.execute(
+        "SELECT status FROM turns WHERE turn_id='child-turn'",
+    ).fetchone()["status"] == "cancelled"
+    assert in_memory_db.execute(
+        "SELECT status FROM run_attempts WHERE attempt_id='child-attempt'",
+    ).fetchone()["status"] == "cancelled"
+    assert in_memory_db.execute(
+        "SELECT status FROM turns WHERE turn_id='parent'",
+    ).fetchone()["status"] == "queued"
+    after = service.status(row["delegation_id"], "parent")
+    assert after is not None
+    assert after["status"] == "cancelled"
+    assert after["children"][0]["status"] == "cancelled"
+
+
+def test_parent_cancel_does_not_requeue_parent(in_memory_db) -> None:
+    in_memory_db.execute(
+        "INSERT INTO turns(turn_id,status,created_at) VALUES ('parent','cancelled',0)",
+    )
+    service = DelegationLifecycleService(in_memory_db)
+    service.create(
+        {"prompt": "work"},
+        ToolContext(
+            attempt_id="attempt", trace_id="trace", tool_call_id="call",
+            turn_id="parent", principal_id="owner", tool_state={},
+        ),
+        allowed_toolsets={"core"},
+    )
+
+    assert service.cancel_for_parent("parent") == 1
+    assert in_memory_db.execute(
+        "SELECT status FROM turns WHERE turn_id='parent'",
+    ).fetchone()["status"] == "cancelled"

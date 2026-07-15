@@ -209,6 +209,8 @@ class DelegationLifecycleService:
             "SELECT * FROM agent_delegations WHERE delegation_id=?",
             (delegation_id,),
         ).fetchone()
+        if delegation is None or delegation["status"] in {"completed", "failed", "cancelled"}:
+            return delegation is not None
         rows = self._conn.execute(
             "SELECT l.*,t.status AS task_status,t.result_ref AS task_result_ref,"
             "t.payload_ref AS task_payload_ref "
@@ -244,18 +246,7 @@ class DelegationLifecycleService:
             return False
         if delegation["join_policy"] == "any" and completed > 0:
             now = datetime.now(UTC).isoformat()
-            self._conn.execute(
-                "UPDATE tasks SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL "
-                "WHERE task_id IN (SELECT task_id FROM child_task_links "
-                "WHERE delegation_id=?) AND status IN "
-                "('queued','running','waiting_user','waiting_external')",
-                (delegation_id,),
-            )
-            self._conn.execute(
-                "UPDATE child_task_links SET status='cancelled',completed_at=?,version=version+1 "
-                "WHERE delegation_id=? AND status IN ('queued','running','waiting_user')",
-                (now, delegation_id),
-            )
+            self._cancel_child_execution(delegation_id, now)
             rows = self._conn.execute(
                 "SELECT l.*,t.status AS task_status,t.result_ref AS task_result_ref,"
                 "t.payload_ref AS task_payload_ref "
@@ -321,35 +312,152 @@ class DelegationLifecycleService:
         self._conn.commit()
         return True
 
-    def cancel(self, delegation_id: str, parent_turn_id: str) -> bool:
+    def cancel(
+        self, delegation_id: str, parent_turn_id: str, *, resume_parent: bool = True,
+    ) -> bool:
         now = datetime.now(UTC).isoformat()
         cur = self._conn.execute(
-            "UPDATE agent_delegations SET status='cancel_requested',cancel_requested_at=?,"
-            "version=version+1 WHERE delegation_id=? AND parent_turn_id=? "
+            "UPDATE agent_delegations SET status='cancelled',cancel_requested_at=?,"
+            "completed_at=?,version=version+1 WHERE delegation_id=? AND parent_turn_id=? "
             "AND status IN ('queued','running')",
-            (now, delegation_id, parent_turn_id),
+            (now, now, delegation_id, parent_turn_id),
         )
         if cur.rowcount:
+            self._cancel_child_execution(delegation_id, now)
+            result = self.status(delegation_id, parent_turn_id) or {
+                "delegation_id": delegation_id,
+                "status": "cancelled",
+                "children": [],
+            }
+            result["status"] = "cancelled"
+            result_json = json.dumps(result, ensure_ascii=False)
             self._conn.execute(
-                "UPDATE tasks SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL "
-                "WHERE task_id IN (SELECT task_id FROM child_task_links WHERE delegation_id=?) "
-                "AND status IN ('queued','running','waiting_user','waiting_external')",
-                (delegation_id,),
+                "UPDATE agent_delegations SET result_text=?,result_ref=? WHERE delegation_id=?",
+                (result_json[:100_000], result_json, delegation_id),
             )
+            waiting_status = "satisfied" if resume_parent else "cancelled"
             self._conn.execute(
-                "UPDATE child_task_links SET status='cancelled',completed_at=?,version=version+1 "
-                "WHERE delegation_id=? AND status IN ('queued','running','waiting_user')",
-                (now, delegation_id),
+                "UPDATE waiting_conditions SET status=?,satisfied_at=?,version=version+1 "
+                "WHERE subject_id=? AND condition_type='child_join' AND status='pending'",
+                (waiting_status, now, delegation_id),
             )
+            if resume_parent:
+                self._conn.execute(
+                    "UPDATE turns SET status='queued',version=version+1 "
+                    "WHERE turn_id=? AND status='waiting_external' AND active_attempt_id IS NULL",
+                    (parent_turn_id,),
+                )
         self._conn.commit()
         return bool(cur.rowcount)
+
     def cancel_for_parent(self, parent_turn_id: str) -> int:
         rows = self._conn.execute(
             "SELECT delegation_id FROM agent_delegations WHERE parent_turn_id=? "
             "AND status IN ('queued','running')",
             (parent_turn_id,),
         ).fetchall()
-        return sum(self.cancel(row["delegation_id"], parent_turn_id) for row in rows)
+        return sum(
+            self.cancel(row["delegation_id"], parent_turn_id, resume_parent=False)
+            for row in rows
+        )
+
+    def list_for_parent(self, parent_turn_id: str) -> dict[str, Any]:
+        rows = self._conn.execute(
+            "SELECT delegation_id FROM agent_delegations WHERE parent_turn_id=? "
+            "ORDER BY created_at DESC LIMIT 20",
+            (parent_turn_id,),
+        ).fetchall()
+        items = [
+            view for row in rows
+            if (view := self.status(str(row["delegation_id"]), parent_turn_id)) is not None
+        ]
+        return {"delegations": items, "total": len(items)}
+
+    def status(self, delegation_id: str, parent_turn_id: str) -> dict[str, Any] | None:
+        delegation = self._conn.execute(
+            "SELECT * FROM agent_delegations WHERE delegation_id=? AND parent_turn_id=?",
+            (delegation_id, parent_turn_id),
+        ).fetchone()
+        if delegation is None:
+            return None
+        rows = self._conn.execute(
+            "SELECT l.*,t.status AS task_status,t.payload_ref AS task_payload_ref,"
+            "tr.status AS turn_status,tr.active_attempt_id "
+            "FROM child_task_links l JOIN tasks t ON t.task_id=l.task_id "
+            "LEFT JOIN turns tr ON tr.turn_id=l.turn_id "
+            "WHERE l.delegation_id=? ORDER BY l.created_at,l.client_id",
+            (delegation_id,),
+        ).fetchall()
+        children = []
+        for row in rows:
+            payload = _json_object(row["task_payload_ref"])
+            children.append(
+                {
+                    "client_id": row["client_id"],
+                    "task_id": row["task_id"],
+                    "turn_id": row["turn_id"],
+                    "attempt_id": row["active_attempt_id"] or "",
+                    "role": payload.get("role", "general"),
+                    "status": row["task_status"],
+                    "turn_status": row["turn_status"] or "",
+                    "requested_toolsets": payload.get("requested_toolsets", []),
+                    "toolsets": payload.get("toolsets", []),
+                    "budget": payload.get("budget", {}),
+                    "usage": _json_object(row["usage_json"]),
+                    "result_summary": row["result_summary"],
+                    "result_ref": row["result_ref"],
+                    "error": row["error"],
+                }
+            )
+        return {
+            "delegation_id": delegation_id,
+            "parent_turn_id": parent_turn_id,
+            "depth": delegation["depth"],
+            "status": delegation["status"],
+            "join_policy": delegation["join_policy"],
+            "failure_policy": delegation["failure_policy"],
+            "child_count": delegation["child_count"],
+            "completed_count": delegation["completed_count"],
+            "failed_count": delegation["failed_count"],
+            "budget": _json_object(delegation["budget_json"]),
+            "usage": _json_object(delegation["usage_json"]),
+            "created_at": delegation["created_at"],
+            "completed_at": delegation["completed_at"],
+            "children": children,
+        }
+
+    def _cancel_child_execution(self, delegation_id: str, now: str) -> None:
+        turn_ids = [
+            str(row["turn_id"])
+            for row in self._conn.execute(
+                "SELECT turn_id FROM child_task_links WHERE delegation_id=? AND turn_id<>''",
+                (delegation_id,),
+            ).fetchall()
+        ]
+        self._conn.execute(
+            "UPDATE tasks SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL "
+            "WHERE task_id IN (SELECT task_id FROM child_task_links WHERE delegation_id=?) "
+            "AND status IN ('created','scheduled','queued','running','waiting_user',"
+            "'waiting_external','retry_scheduled')",
+            (delegation_id,),
+        )
+        self._conn.execute(
+            "UPDATE child_task_links SET status='cancelled',completed_at=?,version=version+1 "
+            "WHERE delegation_id=? AND status IN ('queued','running','waiting_user')",
+            (now, delegation_id),
+        )
+        for turn_id in turn_ids:
+            self._conn.execute(
+                "UPDATE run_attempts SET status='cancelled',finished_at=? "
+                "WHERE turn_id=? AND status IN ('created','running')",
+                (now, turn_id),
+            )
+            self._conn.execute(
+                "UPDATE turns SET status='cancelled',cancel_requested_at=?,"
+                "active_attempt_id=NULL,version=version+1 WHERE turn_id=? "
+                "AND status IN ('accepted','queued','running','waiting_user','waiting_external')",
+                (now, turn_id),
+            )
 
     def reconcile(self, receipt: dict[str, Any]) -> dict[str, str]:
         """Reconcile delegate_task by its globally unique ToolCall operation ID."""
@@ -408,3 +516,11 @@ def _aggregate_child_usage(rows: list[Any]) -> dict[str, int]:
     minimum_total = totals["input_tokens"] + totals["output_tokens"]
     totals["total_tokens"] = max(totals["total_tokens"], minimum_total)
     return totals
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}

@@ -8,8 +8,8 @@ from cogito.config import Config
 from cogito.capability_diagnostics import (
     CapabilityDiagnosticSession,
     doctor_checks,
-    tool_record,
 )
+from cogito.capability.inspection import tool_inventory, tool_record
 from cogito.store.connection import get_connection
 from cogito.store.migration import migrate
 
@@ -36,6 +36,9 @@ async def test_inventory_uses_configured_workspace_skills_and_delegation(tmp_pat
         read_file = tool_record(session.registry.resolve("read_file"))
         assert read_file["deferred"] is True
         assert read_file["available"] is True
+        inventory = tool_inventory(session.tools())
+        assert inventory["contract_complete"] is True
+        assert inventory["contract_issue_count"] == 0
     finally:
         await session.close()
 

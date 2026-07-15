@@ -39,28 +39,10 @@ def create_delegation_tool_defs(
                 }
             )
         if delegation_id:
-            row = connection.execute(
-                "SELECT * FROM agent_delegations WHERE delegation_id=? AND parent_turn_id=?",
-                (delegation_id, ctx.turn_id),
-            ).fetchone()
-            if row is None:
-                return "{}"
-            children = connection.execute(
-                "SELECT client_id,task_id,turn_id,status,result_summary,result_ref,"
-                "usage_json,error "
-                "FROM child_task_links WHERE delegation_id=? ORDER BY created_at",
-                (delegation_id,),
-            ).fetchall()
-            data = dict(row)
-            data["children"] = [dict(child) for child in children]
-            return json.dumps(data, ensure_ascii=False)
-        rows = connection.execute(
-            "SELECT delegation_id,depth,status,join_policy,child_count,completed_count,"
-            "failed_count,created_at,completed_at FROM agent_delegations "
-            "WHERE parent_turn_id=? ORDER BY created_at DESC LIMIT 20",
-            (ctx.turn_id,),
-        ).fetchall()
-        return json.dumps({"delegations": [dict(row) for row in rows]}, ensure_ascii=False)
+            return json.dumps(
+                lifecycle.status(delegation_id, ctx.turn_id) or {}, ensure_ascii=False,
+            )
+        return json.dumps(lifecycle.list_for_parent(ctx.turn_id), ensure_ascii=False)
 
     schema = {"type": "object", "additionalProperties": False}
     return [
@@ -129,7 +111,9 @@ def create_delegation_tool_defs(
                 "required": ["delegation_id", "status", "children", "usage"],
                 "properties": {
                     "delegation_id": {"type": "string"},
-                    "status": {"type": "string", "enum": ["completed", "failed"]},
+                    "status": {
+                        "type": "string", "enum": ["completed", "failed", "cancelled"]
+                    },
                     "join_policy": {"type": "string", "enum": ["all", "any"]},
                     "failure_policy": {"type": "string", "enum": ["collect"]},
                     "completed_count": {"type": "integer"},
