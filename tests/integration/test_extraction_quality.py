@@ -92,16 +92,22 @@ class TestConflictHandling:
     def test_same_value_reinforces(self, service):
         """同 canonical_key + 同值 → 不创建新记忆。"""
         r1 = service.propose(
-            kind="preference", subject="user", predicate="lang",
-            value="Python", principal_id="p1",
+            kind="preference",
+            subject="user",
+            predicate="lang",
+            value="Python",
+            principal_id="p1",
             explicitness="model_inference",
         )
         assert r1 is not None
         initial_id = r1.memory_id
 
         r2 = service.propose(
-            kind="preference", subject="user", predicate="lang",
-            value="python", principal_id="p1",  # 大小写不同
+            kind="preference",
+            subject="user",
+            predicate="lang",
+            value="python",
+            principal_id="p1",  # 大小写不同
             explicitness="model_inference",
         )
         assert r2 is not None
@@ -111,16 +117,24 @@ class TestConflictHandling:
         """用户明确陈述覆盖旧推断。"""
         # 先写入推断
         service.propose(
-            kind="preference", subject="user", predicate="theme",
-            value="dark", principal_id="p1",
-            explicitness="model_inference", status="candidate",
+            kind="preference",
+            subject="user",
+            predicate="theme",
+            value="dark",
+            principal_id="p1",
+            explicitness="model_inference",
+            status="candidate",
         )
 
         # 明确陈述覆盖
         result = service.propose(
-            kind="preference", subject="user", predicate="theme",
-            value="light", principal_id="p1",
-            explicitness="explicit_user_statement", status="confirmed",
+            kind="preference",
+            subject="user",
+            predicate="theme",
+            value="light",
+            principal_id="p1",
+            explicitness="explicit_user_statement",
+            status="confirmed",
         )
         assert result is not None
 
@@ -131,26 +145,33 @@ class TestConflictHandling:
     def test_two_low_confidence_inference_contradicts(self, service):
         """两个低置信推断 → contradicts 关系。"""
         r1 = service.propose(
-            kind="preference", subject="user", predicate="editor",
-            value="VS Code", principal_id="p1",
-            explicitness="model_inference", confidence=0.4,
+            kind="preference",
+            subject="user",
+            predicate="editor",
+            value="VS Code",
+            principal_id="p1",
+            explicitness="model_inference",
+            confidence=0.4,
         )
         assert r1 is not None
 
         r2 = service.propose(
-            kind="preference", subject="user", predicate="editor",
-            value="Vim", principal_id="p1",
-            explicitness="model_inference", confidence=0.3,
+            kind="preference",
+            subject="user",
+            predicate="editor",
+            value="Vim",
+            principal_id="p1",
+            explicitness="model_inference",
+            confidence=0.3,
         )
         assert r2 is not None
 
         # 验证 contradicts 关系存在
         from cogito.store.memory_repo import MemoryRepository
+
         repo = MemoryRepository(service._repo._conn)
         relations = repo.get_relations(r2.memory_id, direction="from")
-        has_contradicts = any(
-            r["relation_type"] == "contradicts" for r in relations
-        )
+        has_contradicts = any(r["relation_type"] == "contradicts" for r in relations)
         assert has_contradicts
 
 
@@ -161,8 +182,11 @@ class TestExtractionWriteRules:
         """Tool 输出不能自动变成 Owner 事实。"""
         # 模拟 tool 输出作为来源
         result = service.propose(
-            kind="fact", subject="project", predicate="status",
-            value="deployed", principal_id="p1",
+            kind="fact",
+            subject="project",
+            predicate="status",
+            value="deployed",
+            principal_id="p1",
             source_type="tool_output",
             explicitness="model_inference",
         )
@@ -175,8 +199,11 @@ class TestExtractionWriteRules:
     def test_explicit_user_statement_confirmed(self, service):
         """显式用户陈述 → confirmed。"""
         result = service.propose(
-            kind="preference", subject="user", predicate="lang",
-            value="Python", principal_id="p1",
+            kind="preference",
+            subject="user",
+            predicate="lang",
+            value="Python",
+            principal_id="p1",
             source_type="extractor",
             explicitness="explicit_user_statement",
             status="confirmed",
@@ -190,24 +217,31 @@ class TestExtractionWriteRules:
         """相同 canonical_key 重复提取不产生重复项。"""
         # 第一次写入
         service.propose(
-            kind="preference", subject="user", predicate="os",
-            value="Linux", principal_id="p1",
+            kind="preference",
+            subject="user",
+            predicate="os",
+            value="Linux",
+            principal_id="p1",
             explicitness="explicit_user_statement",
             status="confirmed",
         )
 
         # 第二次写入相同 key + 相同值
         service.propose(
-            kind="preference", subject="user", predicate="os",
-            value="Linux", principal_id="p1",
+            kind="preference",
+            subject="user",
+            predicate="os",
+            value="Linux",
+            principal_id="p1",
             explicitness="explicit_user_statement",
             status="confirmed",
         )
 
         # 应只有一条 confirmed
         memories = service.retrieve(principal_id="p1", query="os")
-        confirmed = [m for m in memories if m.status == MemoryStatus.confirmed
-                     and m.predicate == "os"]
+        confirmed = [
+            m for m in memories if m.status == MemoryStatus.confirmed and m.predicate == "os"
+        ]
         assert len(confirmed) == 1
 
 
@@ -252,14 +286,21 @@ class TestForgetByCanonicalKey:
     def test_forget_with_scope(self, service):
         """带 scope 的 forget 正常工作。"""
         service.remember(
-            kind="preference", subject="user", predicate="lang",
-            value="Python", principal_id="p1",
-            scope_type="session", scope_id="s1",
+            kind="preference",
+            subject="user",
+            predicate="lang",
+            value="Python",
+            principal_id="p1",
+            scope_type="session",
+            scope_id="s1",
         )
 
         ok = service.forget_by_canonical_key(
-            "p1", "user", "lang",
-            scope_type="session", scope_id="s1",
+            "p1",
+            "user",
+            "lang",
+            scope_type="session",
+            scope_id="s1",
         )
         assert ok
 

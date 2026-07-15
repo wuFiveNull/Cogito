@@ -8,6 +8,7 @@
 5. SQLite 短事务写 metadata 和业务引用
 6. 事务失败留下的文件由安全期后的 GC 清理
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -16,8 +17,8 @@ import sqlite3
 import tempfile
 import threading
 from dataclasses import dataclass
-from pathlib import Path
 from datetime import UTC, datetime
+from pathlib import Path
 
 _lock = threading.Lock()
 
@@ -25,6 +26,7 @@ _lock = threading.Lock()
 @dataclass(frozen=True)
 class PayloadObject:
     """Payload 元数据 (Plan 06 M3, 12 字段)。"""
+
     payload_id: str = ""
     storage_uri: str = ""
     sha256: str = ""
@@ -33,7 +35,7 @@ class PayloadObject:
     compression: str = "none"
     encryption: str = "none"
     redaction_level: str = "none"
-    retention_class: str = "hot"        # hot|warm|archive|volatile|secret
+    retention_class: str = "hot"  # hot|warm|archive|volatile|secret
     reference_count_hint: int = 0
     created_at: str = ""
 
@@ -50,9 +52,13 @@ class PayloadStore:
         """内容寻址路径：root/ab/cdef...（前 2 字符子目录）。"""
         return self._root / sha256[:2] / sha256
 
-    def put(self, data: bytes, *,
-            content_type: str = "application/octet-stream",
-            retention_class: str = "hot") -> PayloadObject:
+    def put(
+        self,
+        data: bytes,
+        *,
+        content_type: str = "application/octet-stream",
+        retention_class: str = "hot",
+    ) -> PayloadObject:
         """写入内容寻址对象（原子写）。"""
         sha = hashlib.sha256(data).hexdigest()
         size = len(data)
@@ -93,8 +99,14 @@ class PayloadStore:
                 "INSERT OR IGNORE INTO payload_objects "
                 "(payload_ref,sha256,content_type,size,storage_path,created_at) "
                 "VALUES (?,?,?,?,?,?)",
-                (obj.payload_id, obj.sha256, obj.content_type, obj.size_bytes,
-                 obj.storage_uri, created_at),
+                (
+                    obj.payload_id,
+                    obj.sha256,
+                    obj.content_type,
+                    obj.size_bytes,
+                    obj.storage_uri,
+                    created_at,
+                ),
             )
         except sqlite3.OperationalError:
             pass

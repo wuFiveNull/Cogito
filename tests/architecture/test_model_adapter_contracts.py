@@ -4,6 +4,7 @@
 text / JSON Schema / single+multi tool / stream event order / cancel /
 timeout / rate-limit / context overflow / usage / error desensitization.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -26,6 +27,7 @@ from cogito.model.stub_provider import StubModelProvider, StubScenario
 
 # ── 1. Text response ────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_text_response() -> None:
     """文本回复：stub provider 按 scenario 返回预设响应。"""
@@ -38,6 +40,7 @@ async def test_text_response() -> None:
 
 # ── 2. Usage tracked ────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_usage_tracked() -> None:
     """Usage 追踪：回复包含 input/output token。"""
@@ -49,6 +52,7 @@ async def test_usage_tracked() -> None:
 
 
 # ── 3. Capabilities negotiation ─────────────────────────────────
+
 
 def test_capabilities_declare_support() -> None:
     """Provider 能力快照声明 streaming/tools/json_schema。"""
@@ -66,6 +70,7 @@ def test_echo_capabilities() -> None:
 
 # ── 4. Stream yields responses ──────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_stream_yields_responses() -> None:
     """流生成器产生 ModelResponse 对象。"""
@@ -80,10 +85,12 @@ async def test_stream_yields_responses() -> None:
 
 # ── 5+6. Timeout / connection → retryable ───────────────────────
 
+
 @pytest.mark.asyncio
 async def test_timeout_maps_to_retryable() -> None:
     """超时映射到 retryable error。"""
     from cogito.model.openai_compat import OpenAICompatProvider
+
     prov = _make_openai_provider()
     try:
         await prov.generate(ModelRequest())
@@ -96,10 +103,12 @@ async def test_timeout_maps_to_retryable() -> None:
 
 # ── 7. HTTP error mapping ───────────────────────────────────────
 
+
 def test_http_429_maps_to_rate_limit() -> None:
     """HTTP 429 → rate_limit 分类。"""
     from cogito.model.openai_compat import OpenAICompatProvider
     import httpx
+
     prov = _make_openai_provider()
     resp = httpx.Response(429, request=httpx.Request("GET", "http://x"))
     err = prov._map_http_error(resp)
@@ -108,23 +117,26 @@ def test_http_429_maps_to_rate_limit() -> None:
 
 # ── 8. HTTP error context overflow ──────────────────────────────
 
+
 def test_http_400_maps_to_invalid_request() -> None:
     """HTTP 400 → invalid_request 分类（或 context_overlap 子路径）。"""
     from cogito.model.openai_compat import OpenAICompatProvider
     import httpx
+
     prov = _make_openai_provider()
     resp = httpx.Response(400, request=httpx.Request("GET", "http://x"))
     err = prov._map_http_error(resp)
-    assert err.envelope.category in (ErrorCategory.invalid_request,
-                                      ErrorCategory.context_overflow)
+    assert err.envelope.category in (ErrorCategory.invalid_request, ErrorCategory.context_overflow)
 
 
 # ── 9. Error desensitization (no secret leak) ──────────────────
 
+
 def test_error_desensitization() -> None:
     """ErrorEnvelope 默认不包含 Secret 或原始 Provider 错误细节。"""
-    err = ErrorEnvelope(category=ErrorCategory.rate_limit,
-                        message="too many requests", retryable=True)
+    err = ErrorEnvelope(
+        category=ErrorCategory.rate_limit, message="too many requests", retryable=True
+    )
     # safe message 不含 API key / secret
     assert "api_key" not in err.message.lower()
     assert "sk-" not in err.message
@@ -133,14 +145,22 @@ def test_error_desensitization() -> None:
 
 # ── 10. FinishReason mapping ────────────────────────────────────
 
+
 def test_finish_reason_enum_complete() -> None:
     """FinishReason 枚举覆盖工具调用/停止/长度/内容过滤。"""
-    assert {f.value for f in FinishReason} == {"stop", "tool_calls", "length", "error",
-                                                 "content_filter", "cancelled"}
+    assert {f.value for f in FinishReason} == {
+        "stop",
+        "tool_calls",
+        "length",
+        "error",
+        "content_filter",
+        "cancelled",
+    }
 
 
 def _make_openai_provider() -> Any:
     from cogito.model.openai_compat import OpenAICompatProvider
+
     prov = OpenAICompatProvider.__new__(OpenAICompatProvider)
     prov._base_url = "http://localhost"
     prov._api_key = "test"

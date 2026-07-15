@@ -54,9 +54,12 @@ diff --git a/old.txt b/old.txt
 @@ -1,1 +0,0 @@
 -remove
 """
-    result = asyncio.run(_tool(boundary, "apply_patch").handler(
-        {"patch": patch}, _context(),
-    ))
+    result = asyncio.run(
+        _tool(boundary, "apply_patch").handler(
+            {"patch": patch},
+            _context(),
+        )
+    )
     decoded = json.loads(result)
     assert decoded["applied"] is True
     assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "one\nchanged\n"
@@ -75,9 +78,12 @@ def test_context_mismatch_changes_nothing(tmp_path) -> None:
 +changed
 """
     with pytest.raises(UnifiedPatchError):
-        asyncio.run(_tool(boundary, "apply_patch").handler(
-            {"patch": patch}, _context(),
-        ))
+        asyncio.run(
+            _tool(boundary, "apply_patch").handler(
+                {"patch": patch},
+                _context(),
+            )
+        )
     assert path.read_text(encoding="utf-8") == "actual\n"
 
 

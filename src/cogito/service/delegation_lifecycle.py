@@ -268,20 +268,22 @@ class DelegationLifecycleService:
                 task_payload = json.loads(row["task_payload_ref"] or "{}")
             except (TypeError, json.JSONDecodeError):
                 task_payload = {}
-            children.append({
-                "client_id": row["client_id"],
-                "task_id": row["task_id"],
-                "turn_id": row["turn_id"],
-                "role": task_payload.get("role", "general"),
-                "requested_toolsets": task_payload.get("requested_toolsets", []),
-                "toolsets": task_payload.get("toolsets", []),
-                "budget": task_payload.get("budget", {}),
-                "status": row["task_status"],
-                "result_summary": row["result_summary"],
-                "result_ref": row["result_ref"] or row["task_result_ref"] or "",
-                "usage": json.loads(row["usage_json"] or "{}"),
-                "error": row["error"],
-            })
+            children.append(
+                {
+                    "client_id": row["client_id"],
+                    "task_id": row["task_id"],
+                    "turn_id": row["turn_id"],
+                    "role": task_payload.get("role", "general"),
+                    "requested_toolsets": task_payload.get("requested_toolsets", []),
+                    "toolsets": task_payload.get("toolsets", []),
+                    "budget": task_payload.get("budget", {}),
+                    "status": row["task_status"],
+                    "result_summary": row["result_summary"],
+                    "result_ref": row["result_ref"] or row["task_result_ref"] or "",
+                    "usage": json.loads(row["usage_json"] or "{}"),
+                    "error": row["error"],
+                }
+            )
         result = {
             "delegation_id": delegation_id,
             "status": "completed" if completed else "failed",
@@ -313,7 +315,11 @@ class DelegationLifecycleService:
         return True
 
     def cancel(
-        self, delegation_id: str, parent_turn_id: str, *, resume_parent: bool = True,
+        self,
+        delegation_id: str,
+        parent_turn_id: str,
+        *,
+        resume_parent: bool = True,
     ) -> bool:
         now = datetime.now(UTC).isoformat()
         cur = self._conn.execute(
@@ -357,8 +363,7 @@ class DelegationLifecycleService:
             (parent_turn_id,),
         ).fetchall()
         return sum(
-            self.cancel(row["delegation_id"], parent_turn_id, resume_parent=False)
-            for row in rows
+            self.cancel(row["delegation_id"], parent_turn_id, resume_parent=False) for row in rows
         )
 
     def list_for_parent(self, parent_turn_id: str) -> dict[str, Any]:
@@ -368,7 +373,8 @@ class DelegationLifecycleService:
             (parent_turn_id,),
         ).fetchall()
         items = [
-            view for row in rows
+            view
+            for row in rows
             if (view := self.status(str(row["delegation_id"]), parent_turn_id)) is not None
         ]
         return {"delegations": items, "total": len(items)}

@@ -135,9 +135,7 @@ class AssetIngestionService:
             part_id=part.part_id,
             asset_id=asset_id,
             ordinal=part.ordinal,
-            original_filename=str(
-                part.metadata.get("name") or part.metadata.get("filename") or ""
-            ),
+            original_filename=str(part.metadata.get("name") or part.metadata.get("filename") or ""),
         )
 
     @staticmethod

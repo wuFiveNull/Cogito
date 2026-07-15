@@ -1,4 +1,5 @@
 """P13-12: Token Budget + Snapshot provenance tests."""
+
 from __future__ import annotations
 
 from cogito.contracts.budget import (
@@ -36,8 +37,11 @@ class TestContextProvenance:
     def test_context_item_provenance(self):
         """ContextItem 携带来源版本/score 分项（PLAN-13 §13.6）。"""
         item = ContextItem(
-            item_type="memory", item_id="m1", source="session-1",
-            score=0.8, retrieval_path="keyword",
+            item_type="memory",
+            item_id="m1",
+            source="session-1",
+            score=0.8,
+            retrieval_path="keyword",
             provenance=(
                 ("source_version", "v2"),
                 ("policy_version", "2"),

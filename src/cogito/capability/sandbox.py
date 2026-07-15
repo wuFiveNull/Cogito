@@ -11,6 +11,7 @@ Host/IP/端口/协议、CPU/内存/进程数/磁盘/输出/超时、取消和进
 
 当前阶段为纯配置声明 + 校验逻辑（实际进程隔离由 Phase 2 部署形态决定）。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -19,20 +20,21 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class SandboxProfile:
     """Sandbox 执行 Profile（Plan 03 M4）。"""
+
     name: str
     description: str = ""
-    allowed_roots: tuple[str, ...] = ()         # 允许的工作目录 Root
-    env_whitelist: tuple[str, ...] = ()          # 环境变量白名单
+    allowed_roots: tuple[str, ...] = ()  # 允许的工作目录 Root
+    env_whitelist: tuple[str, ...] = ()  # 环境变量白名单
     allow_network: bool = False
     allow_shell: bool = False
-    allowed_hosts: tuple[str, ...] = ()          # host + port + scheme allowlist
-    max_cpu_s: int = 30                          # CPU 时间限制
-    max_memory_mb: int = 256                     # 内存限制
-    max_processes: int = 4                       # 进程数限制
+    allowed_hosts: tuple[str, ...] = ()  # host + port + scheme allowlist
+    max_cpu_s: int = 30  # CPU 时间限制
+    max_memory_mb: int = 256  # 内存限制
+    max_processes: int = 4  # 进程数限制
     max_disk_mb: int = 100
     max_output_chars: int = 100_000
     timeout_s: int = 30
-    subprocess: bool = False                     # 是否进程外执行
+    subprocess: bool = False  # 是否进程外执行
 
 
 # ── 预定义 Profile（Plan 03 M4）──

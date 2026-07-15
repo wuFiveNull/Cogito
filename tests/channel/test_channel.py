@@ -37,11 +37,13 @@ class TestCompatibilityLayer:
             Plain,
         )
 
-        chain = MessageChain([
-            Plain(text="Hello"),
-            Image(base64="abc123"),
-            File(name="test.pdf", size=1024),
-        ])
+        chain = MessageChain(
+            [
+                Plain(text="Hello"),
+                Image(base64="abc123"),
+                File(name="test.pdf", size=1024),
+            ]
+        )
         assert len(chain) == 3
         assert isinstance(chain[0], Plain)
         assert isinstance(chain[1], Image)
@@ -73,7 +75,9 @@ class TestCompatibilityLayer:
             sender=friend,
             message_chain=chain,
             time=1000.0,
-            source_platform_object=type("Obj", (), {"message": type("Msg", (), {"message_id": "m1"})()})(),
+            source_platform_object=type(
+                "Obj", (), {"message": type("Msg", (), {"message_id": "m1"})()}
+            )(),
         )
         assert event.sender.id == "123"
         assert event.sender.nickname == "TestUser"
@@ -95,7 +99,9 @@ class TestCompatibilityLayer:
             sender=member,
             message_chain=chain,
             time=2000.0,
-            source_platform_object=type("Obj", (), {"message": type("Msg", (), {"message_id": "m2"})()})(),
+            source_platform_object=type(
+                "Obj", (), {"message": type("Msg", (), {"message_id": "m2"})()}
+            )(),
         )
         assert event.sender.group.id == "g1"
         assert event.sender.group.name == "Test Group"
@@ -136,7 +142,9 @@ class TestBridge:
             sender=friend,
             message_chain=chain,
             time=3000.0,
-            source_platform_object=type("Obj", (), {"message": type("Msg", (), {"message_id": "m_1"})()})(),
+            source_platform_object=type(
+                "Obj", (), {"message": type("Msg", (), {"message_id": "m_1"})()}
+            )(),
         )
 
         inbound = await langbot_event_to_inbound(event, "telegram", "tg_bot_1")
@@ -162,13 +170,17 @@ class TestBridge:
         from cogito.channel.vendor.langbot.compatibility.message import MessageChain, Plain
 
         group = Group(id="g999", name="Group")
-        member = GroupMember(id="u456", member_name="User", permission=Permission.Member, group=group)
+        member = GroupMember(
+            id="u456", member_name="User", permission=Permission.Member, group=group
+        )
         chain = MessageChain([Plain(text="Group msg")])
         event = GroupMessage(
             sender=member,
             message_chain=chain,
             time=4000.0,
-            source_platform_object=type("Obj", (), {"message": type("Msg", (), {"message_id": "m_2"})()})(),
+            source_platform_object=type(
+                "Obj", (), {"message": type("Msg", (), {"message_id": "m_2"})()}
+            )(),
         )
 
         inbound = await langbot_event_to_inbound(event, "telegram", "tg_bot_1")
@@ -189,16 +201,20 @@ class TestBridge:
         )
 
         friend = Friend(id="u1", nickname="User")
-        chain = MessageChain([
-            Plain(text="Text"),
-            Image(base64="img_data"),
-            File(name="doc.pdf", size=2048),
-        ])
+        chain = MessageChain(
+            [
+                Plain(text="Text"),
+                Image(base64="img_data"),
+                File(name="doc.pdf", size=2048),
+            ]
+        )
         event = FriendMessage(
             sender=friend,
             message_chain=chain,
             time=5000.0,
-            source_platform_object=type("Obj", (), {"message": type("Msg", (), {"message_id": "m_3"})()})(),
+            source_platform_object=type(
+                "Obj", (), {"message": type("Msg", (), {"message_id": "m_3"})()}
+            )(),
         )
 
         inbound = await langbot_event_to_inbound(event, "test", "inst1")
@@ -223,7 +239,9 @@ class TestBridge:
             sender=friend,
             message_chain=MessageChain([]),
             time=6000.0,
-            source_platform_object=type("Obj", (), {"message": type("Msg", (), {"message_id": "m_4"})()})(),
+            source_platform_object=type(
+                "Obj", (), {"message": type("Msg", (), {"message_id": "m_4"})()}
+            )(),
         )
 
         inbound = await langbot_event_to_inbound(event, "test", "inst1")
@@ -257,6 +275,7 @@ class TestInboundDispatcher:
         )
 
         import asyncio
+
         asyncio.run(dispatcher.dispatch(inbound))
 
         # Verify the message was created via InboundService
@@ -281,7 +300,9 @@ class TestInboundDispatcher:
                 InboundContent(type="text", data="Hello"),
                 InboundContent(type="image", data="img_base64", mime="image/png"),
             ],
-            route=InboundRoute(adapter_id="a1", channel_type="test", conversation_id="c1", source_message_id="m1"),
+            route=InboundRoute(
+                adapter_id="a1", channel_type="test", conversation_id="c1", source_message_id="m1"
+            ),
         )
 
         # Access the private method for unit testing
@@ -396,13 +417,17 @@ class TestChannelGateway:
         from cogito.service.inbound_service import InboundService
 
         svc = InboundService(in_memory_db)
-        result = svc.accept(ChannelEnvelope(
-            channel_type="test", channel_instance_id="ci1",
-            platform_sender_id="user1", platform_conversation_id="conv1",
-            platform_message_id="pm_gw1",
-            content_parts=[{"content_type": "text", "inline_data": "Hello World"}],
-            received_at=datetime.now(UTC).isoformat(),
-        ))
+        result = svc.accept(
+            ChannelEnvelope(
+                channel_type="test",
+                channel_instance_id="ci1",
+                platform_sender_id="user1",
+                platform_conversation_id="conv1",
+                platform_message_id="pm_gw1",
+                content_parts=[{"content_type": "text", "inline_data": "Hello World"}],
+                received_at=datetime.now(UTC).isoformat(),
+            )
+        )
 
         row = in_memory_db.execute(
             "SELECT inline_data FROM content_parts WHERE message_id=?",

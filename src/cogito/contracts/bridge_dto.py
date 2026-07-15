@@ -15,18 +15,21 @@ from datetime import UTC, datetime
 
 # ── 错误码 ──
 
-BRIDGE_ERROR_CODES = frozenset({
-    "route_expired",
-    "rate_limit",
-    "auth_failed",
-    "unsupported",
-    "too_large",
-    "temporary",
-    "permanent",
-})
+BRIDGE_ERROR_CODES = frozenset(
+    {
+        "route_expired",
+        "rate_limit",
+        "auth_failed",
+        "unsupported",
+        "too_large",
+        "temporary",
+        "permanent",
+    }
+)
 
 
 # ── 公共值对象 ──
+
 
 @dataclass(frozen=True)
 class ContentPart:
@@ -40,6 +43,7 @@ class ContentPart:
 @dataclass(frozen=True)
 class ReplyRoute:
     """回复路由快照 —— Token 过期返回 route_expired。"""
+
     adapter_id: str
     channel_type: str
     conversation_id: str
@@ -51,6 +55,7 @@ class ReplyRoute:
 @dataclass(frozen=True)
 class TargetSnapshot:
     """主动发送时固定的投递目标。"""
+
     adapter_id: str
     channel_type: str
     conversation_id: str
@@ -66,6 +71,7 @@ class TraceContext:
 
 
 # ── V1 DTO（当前版本）──
+
 
 def _parts_to_list(parts: list[ContentPart]) -> list[dict]:
     return [
@@ -96,38 +102,42 @@ def _parts_from_list(items: list[dict]) -> list[ContentPart]:
 @dataclass(frozen=True)
 class InboundMessage:
     """入站消息（Gateway → Core）。"""
+
     schema_version: str = "1"
     event_id: str = ""
     channel_name: str = ""
     instance_id: str = ""
-    conversation_ref: str = ""        # 不透明稳定字符串
+    conversation_ref: str = ""  # 不透明稳定字符串
     thread_ref: str | None = None
-    sender_ref: str = ""              # 不透明，Core 不解析内部
+    sender_ref: str = ""  # 不透明，Core 不解析内部
     content_parts: list[ContentPart] = field(default_factory=list)
     reply_route: ReplyRoute | None = None
     trust_label: str = "external_untrusted"
     capability_ref: str = ""
     raw_payload_ref: str = ""
     trace: TraceContext = field(default_factory=TraceContext)
-    received_at: str = ""             # RFC3339
+    received_at: str = ""  # RFC3339
 
     def to_json(self) -> str:
-        return json.dumps({
-            "schema_version": self.schema_version,
-            "event_id": self.event_id,
-            "channel_name": self.channel_name,
-            "instance_id": self.instance_id,
-            "conversation_ref": self.conversation_ref,
-            "thread_ref": self.thread_ref,
-            "sender_ref": self.sender_ref,
-            "content_parts": _parts_to_list(self.content_parts),
-            "reply_route": self.reply_route.__dict__ if self.reply_route else None,
-            "trust_label": self.trust_label,
-            "capability_ref": self.capability_ref,
-            "raw_payload_ref": self.raw_payload_ref,
-            "trace": self.trace.__dict__,
-            "received_at": self.received_at,
-        }, ensure_ascii=False)
+        return json.dumps(
+            {
+                "schema_version": self.schema_version,
+                "event_id": self.event_id,
+                "channel_name": self.channel_name,
+                "instance_id": self.instance_id,
+                "conversation_ref": self.conversation_ref,
+                "thread_ref": self.thread_ref,
+                "sender_ref": self.sender_ref,
+                "content_parts": _parts_to_list(self.content_parts),
+                "reply_route": self.reply_route.__dict__ if self.reply_route else None,
+                "trust_label": self.trust_label,
+                "capability_ref": self.capability_ref,
+                "raw_payload_ref": self.raw_payload_ref,
+                "trace": self.trace.__dict__,
+                "received_at": self.received_at,
+            },
+            ensure_ascii=False,
+        )
 
     @classmethod
     def from_json(cls, data: str | dict) -> InboundMessage:
@@ -167,6 +177,7 @@ class InboundMessage:
 @dataclass(frozen=True)
 class DeliveryOperation:
     """出站投递操作（Core → Gateway）。"""
+
     schema_version: str = "1"
     operation_id: str = ""
     delivery_id: str = ""
@@ -180,18 +191,21 @@ class DeliveryOperation:
     platform_message_id: str | None = None
 
     def to_json(self) -> str:
-        return json.dumps({
-            "schema_version": self.schema_version,
-            "operation_id": self.operation_id,
-            "delivery_id": self.delivery_id,
-            "attempt_id": self.attempt_id,
-            "operation_seq": self.operation_seq,
-            "idempotency_key": self.idempotency_key,
-            "target_snapshot": self.target_snapshot.__dict__ if self.target_snapshot else None,
-            "action": self.action,
-            "content": _parts_to_list(self.content),
-            "platform_message_id": self.platform_message_id,
-        }, ensure_ascii=False)
+        return json.dumps(
+            {
+                "schema_version": self.schema_version,
+                "operation_id": self.operation_id,
+                "delivery_id": self.delivery_id,
+                "attempt_id": self.attempt_id,
+                "operation_seq": self.operation_seq,
+                "idempotency_key": self.idempotency_key,
+                "target_snapshot": self.target_snapshot.__dict__ if self.target_snapshot else None,
+                "action": self.action,
+                "content": _parts_to_list(self.content),
+                "platform_message_id": self.platform_message_id,
+            },
+            ensure_ascii=False,
+        )
 
     @classmethod
     def from_json(cls, data: str | dict) -> DeliveryOperation:
@@ -219,9 +233,11 @@ class DeliveryOperation:
 
 # ── V0 → V1 升级器 ──
 
+
 @dataclass(frozen=True)
 class DeliveryOperationV0:
     """V0 出站投递（旧版，无 schema_version）。"""
+
     delivery_id: str = ""
     attempt_id: str = ""
     channel: str = ""
@@ -252,6 +268,7 @@ class DeliveryOperationV0:
 @dataclass(frozen=True)
 class InboundMessageV0:
     """V0 入站消息（旧版，无 schema_version）。"""
+
     event_id: str = ""
     channel: str = ""
     instance: str = ""
@@ -263,9 +280,7 @@ class InboundMessageV0:
     def to_v1(self) -> InboundMessage:
         """升级到 V1。"""
         received = (
-            datetime.fromtimestamp(self.timestamp, tz=UTC).isoformat()
-            if self.timestamp
-            else ""
+            datetime.fromtimestamp(self.timestamp, tz=UTC).isoformat() if self.timestamp else ""
         )
         return InboundMessage(
             schema_version="1",
@@ -300,16 +315,20 @@ def decode_inbound(data: str | dict) -> InboundMessage:
 
 # ── 错误响应 ──
 
+
 @dataclass(frozen=True)
 class BridgeError:
     """Bridge 错误响应（不携带 Secret 原文）。"""
+
     error_code: str = ""
     message: str = ""
     retry_after_seconds: float | None = None
 
     def to_json(self) -> str:
-        return json.dumps({
-            "error_code": self.error_code,
-            "message": self.message,
-            "retry_after_seconds": self.retry_after_seconds,
-        })
+        return json.dumps(
+            {
+                "error_code": self.error_code,
+                "message": self.message,
+                "retry_after_seconds": self.retry_after_seconds,
+            }
+        )

@@ -3,6 +3,7 @@
 - 100 次并发 admission 只产生一个 active Drift。
 - Drift → Candidate 投影 → Candidate 可追溯 DriftRun。
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -53,15 +54,23 @@ class TestDriftToCandidateE2E:
         conn.execute(
             "INSERT INTO tasks (task_id, task_type, status, priority, idempotency_key, created_at) "
             "VALUES (?,?,?,?,?,?)",
-            ("t-e2e", "drift.run", "running", 5, "id-e2e", int(time.time()*1000)),
+            ("t-e2e", "drift.run", "running", 5, "id-e2e", int(time.time() * 1000)),
         )
         conn.execute(
             "INSERT INTO drift_runs "
             "(drift_run_id, task_id, principal_id, skill_name, skill_version, "
             " status, admission_snapshot_json, created_at) "
             "VALUES (?,?,?,?,?,?,?,?)",
-            ("dr-e2e", "t-e2e", "owner", "proactive-policy-view-audit",
-             "1.0", "completed", "{}", int(time.time()*1000)),
+            (
+                "dr-e2e",
+                "t-e2e",
+                "owner",
+                "proactive-policy-view-audit",
+                "1.0",
+                "completed",
+                "{}",
+                int(time.time() * 1000),
+            ),
         )
         conn.commit()
 
@@ -70,7 +79,9 @@ class TestDriftToCandidateE2E:
             summary="E2E policy view",
             evidence_refs=("dr-e2e", "step-0"),
             trust_label="system_generated",
-            urgency=0.6, confidence=0.8, relevance=0.7,
+            urgency=0.6,
+            confidence=0.8,
+            relevance=0.7,
         )
         svc = DriftProjectionService(conn, dry_run=False)
         cid = svc.project(drift_run_id="dr-e2e", draft=draft, principal_id="owner")
@@ -91,5 +102,4 @@ class TestDriftToCandidateE2E:
         conn = _fresh_db()
         svc = DriftProjectionService(conn, dry_run=False)
         draft = DriftCandidateDraft(topic="x", summary="y")
-        assert svc.project(drift_run_id="nonexistent",
-                           draft=draft) is None
+        assert svc.project(drift_run_id="nonexistent", draft=draft) is None

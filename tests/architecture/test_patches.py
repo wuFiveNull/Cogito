@@ -1,4 +1,5 @@
 """Patch applier + protected-field tests — Plan 01 M4."""
+
 from __future__ import annotations
 
 import pytest
@@ -52,7 +53,8 @@ def test_remove_field_cannot_touch_protected() -> None:
 def test_append_content_part() -> None:
     target: dict = {"content_parts": []}
     result = apply_patches(
-        target, [AppendContentPart({"type": "text", "text": "hi"})],
+        target,
+        [AppendContentPart({"type": "text", "text": "hi"})],
     )
     assert target["content_parts"] == [{"type": "text", "text": "hi"}]
     assert len(result.applied) == 1

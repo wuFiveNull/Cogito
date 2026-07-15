@@ -6,6 +6,7 @@
 验收: 通过真实 InboundService.accept (envelope) 创建 Turn 后，drift_preemption_signals 表
 中应有 preempt_requested=1 记录，无需测试直接调用 helper。
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -50,8 +51,8 @@ def test_inbound_new_turn_emits_preemption_signal():
     assert res.is_new
     # 入站事务提交后抢占信号已写表
     row = conn.execute(
-        "SELECT preempt_requested, reason FROM drift_preemption_signals "
-        "WHERE principal_id='owner'").fetchone()
+        "SELECT preempt_requested, reason FROM drift_preemption_signals WHERE principal_id='owner'"
+    ).fetchone()
     assert row is not None, "入站后必须发射 preemption signal"
     assert row["preempt_requested"] == 1
     assert "inbound_turn" in (row["reason"] or "")
@@ -66,8 +67,7 @@ def test_inbound_idempotent_repeat_no_new_signal_overwrite():
     # 同 message_id 再次 → 幂等，is_new=False，不重复发射
     res2 = svc.accept(_env("pm-1", "m-1"))
     assert res2.is_new is False
-    n = conn.execute(
-        "SELECT COUNT(*) FROM drift_preemption_signals").fetchone()[0]
+    n = conn.execute("SELECT COUNT(*) FROM drift_preemption_signals").fetchone()[0]
     assert n == 1
 
 
@@ -76,6 +76,5 @@ def test_inbound_with_drift_disabled_no_signal():
     conn = _fresh_db()
     svc = InboundService(conn, drift_preemption=None)
     svc.accept(_env("pm-x", "m-x"))
-    n = conn.execute(
-        "SELECT COUNT(*) FROM drift_preemption_signals").fetchone()[0]
+    n = conn.execute("SELECT COUNT(*) FROM drift_preemption_signals").fetchone()[0]
     assert n == 0

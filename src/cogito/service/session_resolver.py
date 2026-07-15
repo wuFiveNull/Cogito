@@ -8,6 +8,7 @@
   reset_generation
 - 只有 /new、/reset、配置 reset policy 或显式 ResetSession Command 创建新 generation
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from typing import Any
 @dataclass(frozen=True)
 class SessionResolution:
     """Session 解析结果。"""
+
     session_id: str
     conversation_id: str
     principal_id: str
@@ -34,6 +36,7 @@ class SessionResolver:
             ConversationRepository,
             SessionRepository,
         )
+
         self._conn = conn
         self._session_repo = SessionRepository(conn)
         self._conversation_repo = ConversationRepository(conn)
@@ -67,6 +70,7 @@ class SessionResolver:
         if conversation is None:
             conversation_id = uuid.uuid4().hex
             from cogito.domain.conversation import Conversation, ConversationType
+
             conversation = Conversation(
                 conversation_id=conversation_id,
                 conversation_type=ConversationType.private,
@@ -76,19 +80,25 @@ class SessionResolver:
             self._conversation_repo.insert(conversation)
 
         partition_key = self._build_partition_key(
-            channel_instance_id, conversation_ref, thread_id,
-            principal_id, multi_party_policy, reset_generation,
+            channel_instance_id,
+            conversation_ref,
+            thread_id,
+            principal_id,
+            multi_party_policy,
+            reset_generation,
         )
 
         # 查找现有 active Session（精确匹配 partition_key）
         session = self._session_repo.find_active(
-            conversation.conversation_id, partition_key,
+            conversation.conversation_id,
+            partition_key,
         )
 
         is_new = False
         if session is None or reset_generation > 0:
             # 创建新 Session generation
             from cogito.domain.conversation import Session, SessionStatus
+
             session_id = uuid.uuid4().hex
             gen = reset_generation if reset_generation > 0 else 0
             session = Session(

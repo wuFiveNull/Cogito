@@ -5,6 +5,7 @@ SYSTEM-BOUNDARIES / 4: Approval 的唯一写入者是 ApprovalService。
 
 当前实现：`SqliteApprovalService`（SQLite 后端）。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from typing import Any, Protocol
 @dataclass(frozen=True)
 class ApprovalRequest:
     """审批请求参数。"""
+
     approval_id: str
     turn_id: str
     request: dict[str, Any]
@@ -24,6 +26,7 @@ class ApprovalRequest:
 @dataclass(frozen=True)
 class ApprovalDecision:
     """审批决策结果。"""
+
     approval_id: str
     status: str  # 'approved' | 'rejected'
     responder_id: str
@@ -47,14 +50,21 @@ class ApprovalService(Protocol):
         ...
 
     def approve(
-        self, approval_id: str, responder_id: str, *,
-        expected_version: int | None = None, action_hash: str = "",
+        self,
+        approval_id: str,
+        responder_id: str,
+        *,
+        expected_version: int | None = None,
+        action_hash: str = "",
     ) -> ApprovalDecision:
         """批准。返回新状态；非法转换由异常表达。"""
         ...
 
     def reject(
-        self, approval_id: str, responder_id: str, *,
+        self,
+        approval_id: str,
+        responder_id: str,
+        *,
         expected_version: int | None = None,
     ) -> ApprovalDecision:
         """拒绝。返回新状态；非法转换由异常表达。"""
@@ -109,8 +119,13 @@ class SqliteApprovalService:
             self._conn.execute(
                 "INSERT INTO approvals(approval_id,turn_id,request,status,expires_at,created_at) "
                 "VALUES (?,?,?,'pending',?,?)",
-                (approval_id, turn_id, json.dumps(request, ensure_ascii=False),
-                 expires_at.isoformat(), now.isoformat()),
+                (
+                    approval_id,
+                    turn_id,
+                    json.dumps(request, ensure_ascii=False),
+                    expires_at.isoformat(),
+                    now.isoformat(),
+                ),
             )
             self._conn.commit()
             return ApprovalRequest(approval_id, turn_id, request, expires_at)
@@ -152,8 +167,13 @@ class SqliteApprovalService:
         )
 
     def _transition(
-        self, approval_id: str, responder_id: str, decision: str,
-        *, expected_version: int | None = None, action_hash: str = "",
+        self,
+        approval_id: str,
+        responder_id: str,
+        decision: str,
+        *,
+        expected_version: int | None = None,
+        action_hash: str = "",
     ) -> ApprovalDecision:
         now = datetime.now(UTC)
         columns = self._columns()
@@ -185,12 +205,11 @@ class SqliteApprovalService:
         if row is None:
             raise ApprovalNotFoundError(approval_id)
         if row["status"] != "pending":
-            raise ApprovalStateError(
-                f"approval {approval_id} already {row['status']}"
-            )
+            raise ApprovalStateError(f"approval {approval_id} already {row['status']}")
         if row["expires_at"] and datetime.fromisoformat(row["expires_at"]) < now:
             raise ApprovalStateError(f"approval {approval_id} expired")
         import json
+
         allowed = set(json.loads(row["allowed_responder_principal_ids"] or "[]"))
         if allowed and responder_id not in allowed:
             raise ApprovalStateError("responder principal is not allowed")
@@ -201,8 +220,7 @@ class SqliteApprovalService:
         cur = self._conn.execute(
             "UPDATE approvals SET status=?, responder_id=?, decided_at=?, responded_at=?, "
             "version=version+1 WHERE approval_id=? AND status='pending' AND version=?",
-            (decision, responder_id, now.isoformat(), now.isoformat(), approval_id,
-             row["version"]),
+            (decision, responder_id, now.isoformat(), now.isoformat(), approval_id, row["version"]),
         )
         if not cur.rowcount:
             raise ApprovalStateError("approval was concurrently decided")
@@ -215,20 +233,33 @@ class SqliteApprovalService:
         )
 
     def approve(
-        self, approval_id: str, responder_id: str, *,
-        expected_version: int | None = None, action_hash: str = "",
+        self,
+        approval_id: str,
+        responder_id: str,
+        *,
+        expected_version: int | None = None,
+        action_hash: str = "",
     ) -> ApprovalDecision:
         return self._transition(
-            approval_id, responder_id, "approved",
-            expected_version=expected_version, action_hash=action_hash,
+            approval_id,
+            responder_id,
+            "approved",
+            expected_version=expected_version,
+            action_hash=action_hash,
         )
 
     def reject(
-        self, approval_id: str, responder_id: str, *,
+        self,
+        approval_id: str,
+        responder_id: str,
+        *,
         expected_version: int | None = None,
     ) -> ApprovalDecision:
         return self._transition(
-            approval_id, responder_id, "rejected", expected_version=expected_version,
+            approval_id,
+            responder_id,
+            "rejected",
+            expected_version=expected_version,
         )
 
     def expire(self, approval_id: str) -> bool:
@@ -279,8 +310,7 @@ class SqliteApprovalService:
         import json
 
         rows = self._conn.execute(
-            "SELECT * FROM approvals WHERE turn_id=? AND status='pending' "
-            "ORDER BY created_at DESC",
+            "SELECT * FROM approvals WHERE turn_id=? AND status='pending' ORDER BY created_at DESC",
             (turn_id,),
         ).fetchall()
         for row in rows:

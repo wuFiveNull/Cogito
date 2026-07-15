@@ -1,4 +1,5 @@
 """P13-13: KNOWLEDGE.md view + Explain tests."""
+
 from __future__ import annotations
 
 import sqlite3
@@ -15,6 +16,7 @@ def db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     from cogito.store.migration import migrate
+
     migrate(conn)
     return conn
 
@@ -30,6 +32,7 @@ class TestKnowledgeViews:
     def test_generate_with_resources(self, db):
         from cogito.domain.knowledge import KnowledgeResource, ResourceStatus
         from cogito.store import knowledge_repo
+
         r = KnowledgeResource(
             source_kind="explicit_local_file",
             source_uri_hash="abcdefghijklmnop1234567890",

@@ -12,9 +12,12 @@ class TestTask:
 
     def test_create_with_values(self):
         t = Task(
-            task_id="tk1", task_type="connector.poll",
-            status=TaskStatus.running, priority=20,
-            idempotency_key="ik1", origin="scheduler",
+            task_id="tk1",
+            task_type="connector.poll",
+            status=TaskStatus.running,
+            priority=20,
+            idempotency_key="ik1",
+            origin="scheduler",
         )
         assert t.task_type == "connector.poll"
         assert t.idempotency_key == "ik1"
@@ -37,8 +40,11 @@ class TestTaskAttempt:
 
     def test_create_with_values(self):
         ta = TaskAttempt(
-            task_attempt_id="ta1", task_id="tk1", attempt_no=2,
-            lease_version=1, lease_owner="worker1",
+            task_attempt_id="ta1",
+            task_id="tk1",
+            attempt_no=2,
+            lease_version=1,
+            lease_owner="worker1",
             status=TaskAttemptStatus.running,
         )
         assert ta.attempt_no == 2

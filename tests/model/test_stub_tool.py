@@ -18,21 +18,23 @@ from cogito.model.stub_provider import StubModelProvider, StubScenario
 class TestStubToolCalls:
     @pytest.mark.asyncio
     async def test_single_tool_call(self):
-        provider = StubModelProvider([
-            StubScenario(
-                finish_reason=FinishReason.tool_calls,
-                tool_calls=(
-                    {
-                        "id": "call_abc",
-                        "type": "function",
-                        "function": {
-                            "name": "echo",
-                            "arguments": '{"text": "hello"}',
+        provider = StubModelProvider(
+            [
+                StubScenario(
+                    finish_reason=FinishReason.tool_calls,
+                    tool_calls=(
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {
+                                "name": "echo",
+                                "arguments": '{"text": "hello"}',
+                            },
                         },
-                    },
+                    ),
                 ),
-            ),
-        ])
+            ]
+        )
 
         response = await provider.generate(ModelRequest())
         assert response.finish_reason == FinishReason.tool_calls
@@ -42,15 +44,25 @@ class TestStubToolCalls:
 
     @pytest.mark.asyncio
     async def test_parallel_tool_calls(self):
-        provider = StubModelProvider([
-            StubScenario(
-                finish_reason=FinishReason.tool_calls,
-                tool_calls=(
-                    {"id": "c1", "type": "function", "function": {"name": "a", "arguments": "{}"}},
-                    {"id": "c2", "type": "function", "function": {"name": "b", "arguments": "{}"}},
+        provider = StubModelProvider(
+            [
+                StubScenario(
+                    finish_reason=FinishReason.tool_calls,
+                    tool_calls=(
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": "a", "arguments": "{}"},
+                        },
+                        {
+                            "id": "c2",
+                            "type": "function",
+                            "function": {"name": "b", "arguments": "{}"},
+                        },
+                    ),
                 ),
-            ),
-        ])
+            ]
+        )
 
         response = await provider.generate(ModelRequest())
         assert response.finish_reason == FinishReason.tool_calls
@@ -59,15 +71,21 @@ class TestStubToolCalls:
     @pytest.mark.asyncio
     async def test_mixed_text_and_tool(self):
         """模型同时返回文本和工具调用。"""
-        provider = StubModelProvider([
-            StubScenario(
-                response_text="I will use a tool.",
-                finish_reason=FinishReason.tool_calls,
-                tool_calls=(
-                    {"id": "c1", "type": "function", "function": {"name": "echo", "arguments": '{"text":"ok"}'}},
+        provider = StubModelProvider(
+            [
+                StubScenario(
+                    response_text="I will use a tool.",
+                    finish_reason=FinishReason.tool_calls,
+                    tool_calls=(
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": "echo", "arguments": '{"text":"ok"}'},
+                        },
+                    ),
                 ),
-            ),
-        ])
+            ]
+        )
 
         response = await provider.generate(ModelRequest())
         assert response.finish_reason == FinishReason.tool_calls
@@ -77,18 +95,24 @@ class TestStubToolCalls:
     @pytest.mark.asyncio
     async def test_tool_call_sequence(self):
         """多轮调用返回不同的工具。"""
-        provider = StubModelProvider([
-            StubScenario(
-                finish_reason=FinishReason.tool_calls,
-                tool_calls=(
-                    {"id": "c1", "type": "function", "function": {"name": "tool_a", "arguments": "{}"}},
+        provider = StubModelProvider(
+            [
+                StubScenario(
+                    finish_reason=FinishReason.tool_calls,
+                    tool_calls=(
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": "tool_a", "arguments": "{}"},
+                        },
+                    ),
                 ),
-            ),
-            StubScenario(
-                response_text="Final answer",
-                finish_reason=FinishReason.stop,
-            ),
-        ])
+                StubScenario(
+                    response_text="Final answer",
+                    finish_reason=FinishReason.stop,
+                ),
+            ]
+        )
 
         r1 = await provider.generate(ModelRequest())
         assert r1.finish_reason == FinishReason.tool_calls

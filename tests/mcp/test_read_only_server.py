@@ -55,11 +55,11 @@ async def test_read_only_mcp_stdio_protocol_round_trip(tmp_path):
     config_path = tmp_path / "cogito.toml"
     config_path.write_text(
         f'workspace_path = "{workspace.as_posix()}"\n'
-        '[storage]\n'
+        "[storage]\n"
         'db_path = "cogito.db"\n'
-        '[capability.read_only_mcp]\n'
+        "[capability.read_only_mcp]\n"
         'principal_id = "owner"\n'
-        'page_size = 10\n',
+        "page_size = 10\n",
         encoding="utf-8",
     )
     from cogito.store.connection import get_connection
@@ -119,16 +119,22 @@ def test_query_facade_filters_tasks_and_schedules_by_fixed_principal(in_memory_d
     commands = AgentToolCommandService(in_memory_db)
     commands.create_schedule(
         {
-            "prompt": "owner prompt", "expression": "5m", "timezone": "UTC",
-            "schedule_type": "interval", "session_id": "session",
+            "prompt": "owner prompt",
+            "expression": "5m",
+            "timezone": "UTC",
+            "schedule_type": "interval",
+            "session_id": "session",
         },
         actor="owner",
         tool_call_id="owner-schedule",
     )
     commands.create_schedule(
         {
-            "prompt": "other prompt", "expression": "5m", "timezone": "UTC",
-            "schedule_type": "interval", "session_id": "session",
+            "prompt": "other prompt",
+            "expression": "5m",
+            "timezone": "UTC",
+            "schedule_type": "interval",
+            "session_id": "session",
         },
         actor="other",
         tool_call_id="other-schedule",

@@ -30,13 +30,16 @@ class CognitionMetricsService:
         try:
             out["memory_items"] = {
                 "total": self._conn.execute(
-                    "SELECT COUNT(*) c FROM memory_items WHERE deleted_at IS NULL").fetchone()[0],
+                    "SELECT COUNT(*) c FROM memory_items WHERE deleted_at IS NULL"
+                ).fetchone()[0],
                 "confirmed": self._conn.execute(
                     "SELECT COUNT(*) c FROM memory_items WHERE deleted_at IS NULL "
-                    "AND status='confirmed'").fetchone()[0],
+                    "AND status='confirmed'"
+                ).fetchone()[0],
                 "candidates": self._conn.execute(
                     "SELECT COUNT(*) c FROM memory_items WHERE deleted_at IS NULL "
-                    "AND status='candidate'").fetchone()[0],
+                    "AND status='candidate'"
+                ).fetchone()[0],
             }
         except Exception as e:
             out["memory_items"] = {"error": str(e)}

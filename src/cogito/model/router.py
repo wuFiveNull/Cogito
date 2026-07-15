@@ -17,6 +17,7 @@ import logging
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 
+from cogito.contracts.clock import epoch_ms
 from cogito.model.contracts import (
     ErrorCategory,
     ErrorEnvelope,
@@ -25,13 +26,13 @@ from cogito.model.contracts import (
 )
 from cogito.model.errors import ModelProviderError
 from cogito.model.provider import ModelProvider
-from cogito.contracts.clock import epoch_ms
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class RouterError(Exception):
     """路由层错误。"""
+
     def __init__(self, message: str, envelope: ErrorEnvelope | None = None) -> None:
         self.envelope = envelope
         super().__init__(message)
@@ -96,9 +97,7 @@ class ModelRouter:
         provider_ids = self._resolve_provider_chain(model_role)
 
         # MODEL-ADAPTER / 8: 已交付 Tool Call 后不得切换 Provider
-        has_tool_messages = any(
-            m.get("role") == "tool" for m in request.messages
-        )
+        has_tool_messages = any(m.get("role") == "tool" for m in request.messages)
         if has_tool_messages and not self._allow_fallback_after_tool_delivery:
             provider_ids = provider_ids[:1]
 
@@ -117,38 +116,44 @@ class ModelRouter:
                 try:
                     health = await provider.health()
                     if not health.healthy:
-                        self._emit_call({
-                            "request_id": request.request_id,
-                            "provider_id": provider_id,
-                            "model_id": "",
-                            "status": "error",
-                            "error_category": "health_check",
-                            "latency_ms": 0,
-                            "attempt": attempt,
-                            "retry_count": attempt,
-                        })
+                        self._emit_call(
+                            {
+                                "request_id": request.request_id,
+                                "provider_id": provider_id,
+                                "model_id": "",
+                                "status": "error",
+                                "error_category": "health_check",
+                                "latency_ms": 0,
+                                "attempt": attempt,
+                                "retry_count": attempt,
+                            }
+                        )
                         continue
 
                     response = await provider.generate(request)
                     call_latency = epoch_ms(datetime.now(UTC)) - started_at
 
                     # 记录成功调用
-                    self._emit_call({
-                        "request_id": request.request_id,
-                        "provider_id": provider_id,
-                        "model_id": response.model_id or provider_id,
-                        "status": "success",
-                        "usage": response.usage,
-                        "finish_reason": response.finish_reason.value,
-                        "latency_ms": call_latency,
-                        "attempt": attempt,
-                        "retry_count": attempt,
-                    })
+                    self._emit_call(
+                        {
+                            "request_id": request.request_id,
+                            "provider_id": provider_id,
+                            "model_id": response.model_id or provider_id,
+                            "status": "success",
+                            "usage": response.usage,
+                            "finish_reason": response.finish_reason.value,
+                            "latency_ms": call_latency,
+                            "attempt": attempt,
+                            "retry_count": attempt,
+                        }
+                    )
 
                     # 附加路由元信息
                     object.__setattr__(response, "provider_id", provider_id)
                     object.__setattr__(
-                        response, "router_policy_version", self._router_policy_version,
+                        response,
+                        "router_policy_version",
+                        self._router_policy_version,
                     )
                     return response
 
@@ -156,16 +161,18 @@ class ModelRouter:
                     call_latency = epoch_ms(datetime.now(UTC)) - started_at
 
                     # 记录错误
-                    self._emit_call({
-                        "request_id": request.request_id,
-                        "provider_id": provider_id,
-                        "model_id": provider_id,
-                        "status": "error",
-                        "error_category": e.envelope.category.value,
-                        "latency_ms": call_latency,
-                        "attempt": attempt,
-                        "retry_count": attempt,
-                    })
+                    self._emit_call(
+                        {
+                            "request_id": request.request_id,
+                            "provider_id": provider_id,
+                            "model_id": provider_id,
+                            "status": "error",
+                            "error_category": e.envelope.category.value,
+                            "latency_ms": call_latency,
+                            "attempt": attempt,
+                            "retry_count": attempt,
+                        }
+                    )
 
                     last_error = e
                     if e.envelope.category == ErrorCategory.context_overflow:
@@ -183,8 +190,7 @@ class ModelRouter:
         raise RouterError(
             f"All providers exhausted after {len(tried_providers)} attempts. "
             f"Tried: {tried_providers}",
-            envelope=getattr(last_error, "envelope", None)
-            if last_error else None,
+            envelope=getattr(last_error, "envelope", None) if last_error else None,
         )
 
     def _emit_call(self, info: dict) -> None:
@@ -212,14 +218,16 @@ class ModelRouter:
         try:
             health = await provider.health()
             if not health.healthy:
-                self._emit_call({
-                    "request_id": request.request_id,
-                    "provider_id": provider_id,
-                    "model_id": "",
-                    "status": "error",
-                    "error_category": "health_check",
-                    "latency_ms": 0,
-                })
+                self._emit_call(
+                    {
+                        "request_id": request.request_id,
+                        "provider_id": provider_id,
+                        "model_id": "",
+                        "status": "error",
+                        "error_category": "health_check",
+                        "latency_ms": 0,
+                    }
+                )
                 raise RouterError(f"Provider {provider_id} unhealthy")
 
             last_chunk: ModelResponse | None = None
@@ -228,24 +236,28 @@ class ModelRouter:
                 yield chunk
 
             call_latency = epoch_ms(datetime.now(UTC)) - started_at
-            self._emit_call({
-                "request_id": request.request_id,
-                "provider_id": provider_id,
-                "model_id": (last_chunk.model_id if last_chunk else provider_id),
-                "status": "success",
-                "latency_ms": call_latency,
-            })
+            self._emit_call(
+                {
+                    "request_id": request.request_id,
+                    "provider_id": provider_id,
+                    "model_id": (last_chunk.model_id if last_chunk else provider_id),
+                    "status": "success",
+                    "latency_ms": call_latency,
+                }
+            )
 
         except ModelProviderError as e:
             call_latency = epoch_ms(datetime.now(UTC)) - started_at
-            self._emit_call({
-                "request_id": request.request_id,
-                "provider_id": provider_id,
-                "model_id": provider_id,
-                "status": "error",
-                "error_category": e.envelope.category.value,
-                "latency_ms": call_latency,
-            })
+            self._emit_call(
+                {
+                    "request_id": request.request_id,
+                    "provider_id": provider_id,
+                    "model_id": provider_id,
+                    "status": "error",
+                    "error_category": e.envelope.category.value,
+                    "latency_ms": call_latency,
+                }
+            )
             raise RouterError(
                 f"Streaming error on {provider_id}: {e.envelope.category}",
                 envelope=e.envelope,

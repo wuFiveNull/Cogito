@@ -4,6 +4,7 @@ Verifies cross-process models can survive JSON round-trips and that the
 current release can decode the previous schema version.
 Design refs: DOMAIN-CONTRACTS / 2, GLOBAL-INVARIANTS / 6.
 """
+
 from __future__ import annotations
 
 import json
@@ -33,9 +34,12 @@ from cogito.model.contracts import ContentPart, ContentPartType
 # Round-trip: to_dict -> from_dict must reproduce the message.
 # ---------------------------------------------------------------------------
 
+
 def _trace() -> TraceContext:
     return TraceContext(
-        trace_id="trace-1", span_id="span-1", principal_id="owner",
+        trace_id="trace-1",
+        span_id="span-1",
+        principal_id="owner",
     )
 
 
@@ -141,7 +145,8 @@ def test_content_part_frozen() -> None:
 def test_agent_request_reply_roundtrip() -> None:
     req = AgentRequest(turn_id="t1", trace_context=_trace())
     rep = AgentReply(
-        turn_id="t1", reply_mode=ReplyMode.streaming,
+        turn_id="t1",
+        reply_mode=ReplyMode.streaming,
         content_parts=[{"type": "text", "text": "hi"}],
     )
     assert AgentRequest.from_dict(req.to_dict()).turn_id == "t1"
@@ -153,6 +158,7 @@ def test_agent_request_reply_roundtrip() -> None:
 # ---------------------------------------------------------------------------
 # Version compat: current decoders tolerate a "previous" schema_version.
 # ---------------------------------------------------------------------------
+
 
 def test_channel_envelope_accepts_previous_version() -> None:
     """schema_version '1.0' payloads decode identically (back-compat baseline)."""
@@ -174,12 +180,19 @@ def test_event_envelope_accepts_previous_version() -> None:
 # Protected fields: PROTECTED_FIELDS exists and includes the documented set.
 # ---------------------------------------------------------------------------
 
+
 def test_protected_fields_complete() -> None:
     from cogito.contracts.envelope import PROTECTED_FIELDS
 
     expected = {
-        "trace_id", "principal_id", "conversation_id", "turn_id",
-        "attempt_id", "origin", "reply_route", "schema_version",
+        "trace_id",
+        "principal_id",
+        "conversation_id",
+        "turn_id",
+        "attempt_id",
+        "origin",
+        "reply_route",
+        "schema_version",
         "idempotency_key",
     }
     assert expected.issubset(PROTECTED_FIELDS)
@@ -188,6 +201,7 @@ def test_protected_fields_complete() -> None:
 # ---------------------------------------------------------------------------
 # No Secret leak: ErrorEnvelope must not carry raw provider payloads.
 # ---------------------------------------------------------------------------
+
 
 def test_error_envelope_no_secret_leak() -> None:
     err = ErrorEnvelope(
@@ -209,6 +223,7 @@ def test_error_envelope_no_secret_leak() -> None:
 # TraceContext.new_child builds a proper child span.
 # ---------------------------------------------------------------------------
 
+
 def test_trace_context_new_child() -> None:
     root = TraceContext(trace_id="t", span_id="s1")
     child = root.new_child()
@@ -221,10 +236,12 @@ def test_trace_context_new_child() -> None:
 # ReplyRoute round-trip preserves expiry.
 # ---------------------------------------------------------------------------
 
+
 def test_reply_route_roundtrip() -> None:
     when = datetime.now(UTC)
     route = ReplyRoute(
-        channel_instance_id="ci", reply_token="tok",
+        channel_instance_id="ci",
+        reply_token="tok",
         reply_token_expires_at=when,
     )
     restored = ReplyRoute.from_dict(route.to_dict())

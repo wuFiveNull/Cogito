@@ -44,7 +44,10 @@ def build_read_only_mcp_server(config: Config) -> tuple[FastMCP, Any]:
         offset = _cursor_offset(cursor)
         size = _page_size(limit, default_page_size)
         result = query.list_tasks_for_principal(
-            principal_id, status=status, limit=size, offset=offset,
+            principal_id,
+            status=status,
+            limit=size,
+            offset=offset,
         )
         return _redact(
             {
@@ -63,7 +66,9 @@ def build_read_only_mcp_server(config: Config) -> tuple[FastMCP, Any]:
         offset = _cursor_offset(cursor)
         size = _page_size(limit, default_page_size)
         result = query.list_schedules_for_principal(
-            principal_id, limit=size, offset=offset,
+            principal_id,
+            limit=size,
+            offset=offset,
         )
         return _paged_result(result, offset, size)
 
@@ -72,7 +77,10 @@ def build_read_only_mcp_server(config: Config) -> tuple[FastMCP, Any]:
         offset = _cursor_offset(cursor)
         size = _page_size(limit, default_page_size)
         result = query.search_memory_page(
-            q, principal_id=principal_id, limit=size, offset=offset,
+            q,
+            principal_id=principal_id,
+            limit=size,
+            offset=offset,
         )
         return _paged_result(result, offset, size)
 
@@ -81,7 +89,10 @@ def build_read_only_mcp_server(config: Config) -> tuple[FastMCP, Any]:
         offset = _cursor_offset(cursor)
         size = _page_size(limit, default_page_size)
         result = query.search_knowledge_page(
-            q, principal_id=principal_id, limit=size, offset=offset,
+            q,
+            principal_id=principal_id,
+            limit=size,
+            offset=offset,
         )
         return _paged_result(result, offset, size)
 
@@ -108,9 +119,19 @@ def run_read_only_mcp_server(config: Config) -> None:
 
 
 _SENSITIVE = {
-    "api_key", "token", "secret", "password", "request", "raw_payload_ref",
-    "payload_ref", "result_ref", "checkpoint_ref", "task_payload",
-    "arguments_snapshot_ref", "arguments", "prompt",
+    "api_key",
+    "token",
+    "secret",
+    "password",
+    "request",
+    "raw_payload_ref",
+    "payload_ref",
+    "result_ref",
+    "checkpoint_ref",
+    "task_payload",
+    "arguments_snapshot_ref",
+    "arguments",
+    "prompt",
 }
 
 

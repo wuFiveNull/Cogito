@@ -199,4 +199,5 @@ def compute_content_hash(title: str, link: str, summary: str) -> str:
 def _strip_html(text: str) -> str:
     """简单 HTML 标签剥离（不依赖 bs4）。"""
     import re
+
     return re.sub(r"<[^>]+>", "", text or "")

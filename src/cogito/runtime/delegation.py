@@ -40,7 +40,8 @@ def create_delegation_tool_defs(
             )
         if delegation_id:
             return json.dumps(
-                lifecycle.status(delegation_id, ctx.turn_id) or {}, ensure_ascii=False,
+                lifecycle.status(delegation_id, ctx.turn_id) or {},
+                ensure_ascii=False,
             )
         return json.dumps(lifecycle.list_for_parent(ctx.turn_id), ensure_ascii=False)
 
@@ -111,9 +112,7 @@ def create_delegation_tool_defs(
                 "required": ["delegation_id", "status", "children", "usage"],
                 "properties": {
                     "delegation_id": {"type": "string"},
-                    "status": {
-                        "type": "string", "enum": ["completed", "failed", "cancelled"]
-                    },
+                    "status": {"type": "string", "enum": ["completed", "failed", "cancelled"]},
                     "join_policy": {"type": "string", "enum": ["all", "any"]},
                     "failure_policy": {"type": "string", "enum": ["collect"]},
                     "completed_count": {"type": "integer"},

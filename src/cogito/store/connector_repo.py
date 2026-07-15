@@ -6,6 +6,7 @@ import json
 import sqlite3
 from datetime import UTC, datetime
 
+from cogito.contracts.clock import epoch_ms, from_epoch_ms
 from cogito.domain.connector import (
     Connector,
     ConnectorCursor,
@@ -14,7 +15,6 @@ from cogito.domain.connector import (
     ConnectorStatus,
     ItemStatus,
 )
-from cogito.contracts.clock import epoch_ms, from_epoch_ms
 
 
 class ConnectorRepository:
@@ -23,7 +23,8 @@ class ConnectorRepository:
 
     def get(self, connector_id: str) -> Connector | None:
         row = self._conn.execute(
-            "SELECT * FROM connectors WHERE connector_id=?", (connector_id,),
+            "SELECT * FROM connectors WHERE connector_id=?",
+            (connector_id,),
         ).fetchone()
         return self._row_to_connector(row) if row else None
 
@@ -51,7 +52,8 @@ class ConnectorRepository:
 
     def find_active(self, limit: int = 20) -> list[Connector]:
         rows = self._conn.execute(
-            "SELECT * FROM connectors WHERE status='active' LIMIT ?", (limit,),
+            "SELECT * FROM connectors WHERE status='active' LIMIT ?",
+            (limit,),
         ).fetchall()
         return [self._row_to_connector(r) for r in rows]
 
@@ -101,7 +103,8 @@ class ConnectorCursorRepository:
 
     def get(self, connector_id: str) -> ConnectorCursor | None:
         row = self._conn.execute(
-            "SELECT * FROM connector_cursors WHERE connector_id=?", (connector_id,),
+            "SELECT * FROM connector_cursors WHERE connector_id=?",
+            (connector_id,),
         ).fetchone()
         if row is None:
             return None
@@ -163,8 +166,7 @@ class ConnectorRawRepository:
 
     def find_by_content_hash(self, connector_id: str, content_hash: str) -> ConnectorRawItem | None:
         row = self._conn.execute(
-            "SELECT * FROM connector_raw_items "
-            "WHERE connector_id=? AND content_hash=?",
+            "SELECT * FROM connector_raw_items WHERE connector_id=? AND content_hash=?",
             (connector_id, content_hash),
         ).fetchone()
         return self._row_to_raw(row) if row else None
@@ -216,16 +218,14 @@ class ConnectorItemRepository:
 
     def find_by_source_id(self, connector_id: str, source_item_id: str) -> ConnectorItem | None:
         row = self._conn.execute(
-            "SELECT * FROM connector_items "
-            "WHERE connector_id=? AND source_item_id=?",
+            "SELECT * FROM connector_items WHERE connector_id=? AND source_item_id=?",
             (connector_id, source_item_id),
         ).fetchone()
         return self._row_to_item(row) if row else None
 
     def find_by_content_hash(self, connector_id: str, content_hash: str) -> ConnectorItem | None:
         row = self._conn.execute(
-            "SELECT * FROM connector_items "
-            "WHERE connector_id=? AND content_hash=?",
+            "SELECT * FROM connector_items WHERE connector_id=? AND content_hash=?",
             (connector_id, content_hash),
         ).fetchone()
         return self._row_to_item(row) if row else None
@@ -243,7 +243,10 @@ class ConnectorItemRepository:
         )
 
     def find_by_status(
-        self, connector_id: str, status: ItemStatus, limit: int = 50,
+        self,
+        connector_id: str,
+        status: ItemStatus,
+        limit: int = 50,
     ) -> list[ConnectorItem]:
         rows = self._conn.execute(
             "SELECT * FROM connector_items "
@@ -254,7 +257,8 @@ class ConnectorItemRepository:
 
     def find_all(self, limit: int = 100) -> list[ConnectorItem]:
         rows = self._conn.execute(
-            "SELECT * FROM connector_items ORDER BY created_at DESC LIMIT ?", (limit,),
+            "SELECT * FROM connector_items ORDER BY created_at DESC LIMIT ?",
+            (limit,),
         ).fetchall()
         return [self._row_to_item(r) for r in rows]
 

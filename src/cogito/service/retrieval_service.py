@@ -43,6 +43,7 @@ _EXPLICITNESS_SCORE: dict[str, float] = {
 @dataclass
 class ScoredMemory:
     """带评分的记忆条目。"""
+
     item: MemoryItem
     score: float
     retrieval_path: str = "fts"  # "fts" | "like" | "fallback" | "list"
@@ -98,11 +99,13 @@ class RetrievalService:
             return self._fts_available, self._fts_tokenizer
 
         try:
-            self._conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts "
-                               "USING fts5("
-                               "  memory_id UNINDEXED,"
-                               "  subject, predicate, value,"
-                               "  tokenize='unicode61'")
+            self._conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts "
+                "USING fts5("
+                "  memory_id UNINDEXED,"
+                "  subject, predicate, value,"
+                "  tokenize='unicode61'"
+            )
             self._fts_available = True
 
             # 尝试 trigram tokenizer（中文支持更好）
@@ -145,8 +148,7 @@ class RetrievalService:
             return
         try:
             self._conn.execute(
-                "INSERT INTO memory_fts (memory_id, subject, predicate, value) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT INTO memory_fts (memory_id, subject, predicate, value) VALUES (?, ?, ?, ?)",
                 (memory_id, subject, predicate, value),
             )
         except sqlite3.OperationalError:
@@ -158,7 +160,8 @@ class RetrievalService:
             return
         try:
             self._conn.execute(
-                "DELETE FROM memory_fts WHERE memory_id=?", (memory_id,),
+                "DELETE FROM memory_fts WHERE memory_id=?",
+                (memory_id,),
             )
         except sqlite3.OperationalError:
             pass
@@ -295,8 +298,12 @@ class RetrievalService:
                 ).fetchall()
                 if rows:
                     return self._build_results(
-                        rows, query=query, scope_type=scope_type,
-                        scope_id=scope_id, keyword_hit=True, now=now,
+                        rows,
+                        query=query,
+                        scope_type=scope_type,
+                        scope_id=scope_id,
+                        keyword_hit=True,
+                        now=now,
                         retrieval_path="fts",
                         limit=limit,
                     )
@@ -311,30 +318,42 @@ class RetrievalService:
             ]
             like_params = params + [like_pattern, like_pattern, like_pattern]
 
-            sql = ("SELECT mi.* FROM memory_items mi WHERE "
-                   + " AND ".join(like_conditions)
-                   + " ORDER BY mi.importance DESC, mi.confidence DESC, mi.created_at DESC"
-                   + f" LIMIT {int(limit)}")
+            sql = (
+                "SELECT mi.* FROM memory_items mi WHERE "
+                + " AND ".join(like_conditions)
+                + " ORDER BY mi.importance DESC, mi.confidence DESC, mi.created_at DESC"
+                + f" LIMIT {int(limit)}"
+            )
 
             rows = self._conn.execute(sql, like_params).fetchall()
             if rows:
                 return self._build_results(
-                    rows, query=query, scope_type=scope_type,
-                    scope_id=scope_id, keyword_hit=True, now=now,
+                    rows,
+                    query=query,
+                    scope_type=scope_type,
+                    scope_id=scope_id,
+                    keyword_hit=True,
+                    now=now,
                     retrieval_path="like",
                     limit=limit,
                 )
 
         # ── (3) recency fallback：无 query 匹配 → 返回近期高重要性记忆 ──
         if not has_query or True:  # list 模式始终走此路径
-            sql = ("SELECT mi.* FROM memory_items mi WHERE "
-                   + " AND ".join(conditions)
-                   + " ORDER BY mi.importance DESC, mi.confidence DESC, mi.created_at DESC"
-                   + f" LIMIT {int(limit)}")
+            sql = (
+                "SELECT mi.* FROM memory_items mi WHERE "
+                + " AND ".join(conditions)
+                + " ORDER BY mi.importance DESC, mi.confidence DESC, mi.created_at DESC"
+                + f" LIMIT {int(limit)}"
+            )
             rows = self._conn.execute(sql, params).fetchall()
             return self._build_results(
-                rows, query=query, scope_type=scope_type,
-                scope_id=scope_id, keyword_hit=False, now=now,
+                rows,
+                query=query,
+                scope_type=scope_type,
+                scope_id=scope_id,
+                keyword_hit=False,
+                now=now,
                 retrieval_path="list",
                 limit=limit,
             )
@@ -354,24 +373,28 @@ class RetrievalService:
         results: list[ScoredMemory] = []
         for r in rows:
             item = _row_to_memory(r)
-            scope_match = (
-                (not scope_type or item.scope_type == scope_type)
-                and (not scope_id or item.scope_id == scope_id)
+            scope_match = (not scope_type or item.scope_type == scope_type) and (
+                not scope_id or item.scope_id == scope_id
             )
             score = _compute_weighted_score(
-                item, keyword_hit=keyword_hit, scope_match=scope_match,
-                semantic_similarity=0.0, now=now,
-            )
-            results.append(ScoredMemory(
-                item=item,
-                score=score,
-                retrieval_path=retrieval_path,
+                item,
                 keyword_hit=keyword_hit,
                 scope_match=scope_match,
-                principal_id=item.principal_id,
-                conversation_id=getattr(item, "conversation_id", "") or "",
-                session_id="",
-            ))
+                semantic_similarity=0.0,
+                now=now,
+            )
+            results.append(
+                ScoredMemory(
+                    item=item,
+                    score=score,
+                    retrieval_path=retrieval_path,
+                    keyword_hit=keyword_hit,
+                    scope_match=scope_match,
+                    principal_id=item.principal_id,
+                    conversation_id=getattr(item, "conversation_id", "") or "",
+                    session_id="",
+                )
+            )
 
         results.sort(key=lambda sm: -sm.score)
         return results[:limit]

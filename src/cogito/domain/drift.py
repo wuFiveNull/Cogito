@@ -3,17 +3,17 @@
 Drift 复用 tasks / task_attempts 作为生命周期权威；本模块仅保存
 Drift 专属属性（Skill 选择、准入快照、检查点、结果）。
 """
+
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
 
 class DriftReasonCode(StrEnum):
     """Admission / 抢占 / 结束的 deterministic reason code。"""
+
     # admission deny reasons
     active_turn = "active_turn"
     priority_backlog = "priority_backlog"
@@ -49,11 +49,12 @@ class DriftSkillManifest:
 
     manifest 声明的工具仍需 Capability Policy 逐次授权；声明本身不能放行权限。
     """
+
     name: str
     version: str = "1.0"
     description: str = ""
-    handler: str = ""                       # 内置 handler 路径
-    risk_level: str = "low"                  # low | medium | high
+    handler: str = ""  # 内置 handler 路径
+    risk_level: str = "low"  # low | medium | high
     allowed_tools: tuple[str, ...] = ()
     max_steps: int = 6
     max_runtime_seconds: int = 30
@@ -65,11 +66,16 @@ class DriftSkillManifest:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "name": self.name, "version": self.version,
-            "description": self.description, "handler": self.handler,
-            "risk_level": self.risk_level, "allowed_tools": list(self.allowed_tools),
-            "max_steps": self.max_steps, "max_runtime_seconds": self.max_runtime_seconds,
-            "max_model_calls": self.max_model_calls, "max_tool_calls": self.max_tool_calls,
+            "name": self.name,
+            "version": self.version,
+            "description": self.description,
+            "handler": self.handler,
+            "risk_level": self.risk_level,
+            "allowed_tools": list(self.allowed_tools),
+            "max_steps": self.max_steps,
+            "max_runtime_seconds": self.max_runtime_seconds,
+            "max_model_calls": self.max_model_calls,
+            "max_tool_calls": self.max_tool_calls,
             "can_emit_candidate": self.can_emit_candidate,
             "requires_approval": self.requires_approval,
             "checkpoint_schema_version": self.checkpoint_schema_version,
@@ -97,6 +103,7 @@ class DriftSkillManifest:
 @dataclass(frozen=True)
 class DriftAdmissionSnapshot:
     """单次 admission 读取的全局 idle 快照（确定性、事务性读取）。"""
+
     active_normal_turns: int = 0
     high_priority_task_backlog: int = 0
     ready_delivery_backlog: int = 0
@@ -127,6 +134,7 @@ class DriftCheckpointV1:
 
     不得保存 Secret、原始大 Payload、未脱敏 Tool 输出或可变 Provider 对象。
     """
+
     drift_run_id: str
     task_id: str
     attempt_id: str
@@ -165,22 +173,26 @@ class DriftCandidateDraft:
 
     投影服务校验来源/PO，生成幂等 ProactiveCandidate(origin=drift)。
     """
+
     topic: str
     summary: str
     evidence_refs: tuple[str, ...] = ()
-    trust_label: str = "system_generated"   # unverified | system_generated | confirmed_inference
+    trust_label: str = "system_generated"  # unverified | system_generated | confirmed_inference
     urgency: float = 0.5
     confidence: float = 0.5
     relevance: float = 0.5
-    expires_at: int | None = None           # epoch ms
+    expires_at: int | None = None  # epoch ms
     suggested_target: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "topic": self.topic, "summary": self.summary,
+            "topic": self.topic,
+            "summary": self.summary,
             "evidence_refs": list(self.evidence_refs),
-            "trust_label": self.trust_label, "urgency": self.urgency,
-            "confidence": self.confidence, "relevance": self.relevance,
+            "trust_label": self.trust_label,
+            "urgency": self.urgency,
+            "confidence": self.confidence,
+            "relevance": self.relevance,
             "expires_at": self.expires_at,
             "suggested_target": self.suggested_target,
         }
@@ -189,6 +201,7 @@ class DriftCandidateDraft:
 @dataclass
 class DriftRunResult:
     """Drift run 完成后的内部结果（不含用户可见 Candidate）。"""
+
     drift_run_id: str
     status: DriftRunStatus = DriftRunStatus.completed
     summary: str = ""

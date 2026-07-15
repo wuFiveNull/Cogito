@@ -79,8 +79,13 @@ class InboxRepository:
         self._conn.execute(
             "INSERT INTO inbound_inbox (channel_instance_id, platform_event_id, status, message_id, received_at) "
             "VALUES (?, ?, ?, ?, ?)",
-            (record.channel_instance_id, record.platform_event_id,
-             record.status, record.message_id, record.received_at),
+            (
+                record.channel_instance_id,
+                record.platform_event_id,
+                record.status,
+                record.message_id,
+                record.received_at,
+            ),
         )
 
 
@@ -112,9 +117,13 @@ class PrincipalRepository:
         self._conn.execute(
             "INSERT INTO principals (principal_id, principal_type, status, created_at, metadata) "
             "VALUES (?, ?, ?, ?, ?)",
-            (principal.principal_id, principal.principal_type.value,
-             principal.status.value, principal.created_at.isoformat(),
-             "{}"),
+            (
+                principal.principal_id,
+                principal.principal_type.value,
+                principal.status.value,
+                principal.created_at.isoformat(),
+                "{}",
+            ),
         )
 
     def find_by_platform(self, channel_type: str, platform_account_id: str) -> Principal | None:
@@ -170,10 +179,17 @@ class EndpointRepository:
             "INSERT INTO endpoints (endpoint_id, channel_type, channel_instance_id, "
             "platform_account_id, principal_id, endpoint_ref, capabilities, status, verified_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (endpoint.endpoint_id, endpoint.channel_type, endpoint.channel_instance_id,
-             endpoint.platform_account_id, endpoint.principal_id,
-             endpoint.endpoint_ref,
-             "[]", endpoint.status.value, None),
+            (
+                endpoint.endpoint_id,
+                endpoint.channel_type,
+                endpoint.channel_instance_id,
+                endpoint.platform_account_id,
+                endpoint.principal_id,
+                endpoint.endpoint_ref,
+                "[]",
+                endpoint.status.value,
+                None,
+            ),
         )
 
     def find_by_platform(
@@ -257,12 +273,16 @@ class ConversationRepository:
             "platform_conversation_id, conversation_endpoint_ref, conversation_type, principal_scope, "
             "context_partition_policy, status) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (conversation.conversation_id, conversation.conversation_endpoint_id,
-             conversation.platform_conversation_id,
-             conversation.conversation_endpoint_ref,
-             conversation.conversation_type.value,
-             conversation.principal_scope, conversation.context_partition_policy.value,
-             conversation.status.value),
+            (
+                conversation.conversation_id,
+                conversation.conversation_endpoint_id,
+                conversation.platform_conversation_id,
+                conversation.conversation_endpoint_ref,
+                conversation.conversation_type.value,
+                conversation.principal_scope,
+                conversation.context_partition_policy.value,
+                conversation.status.value,
+            ),
         )
 
     def find_by_platform(
@@ -344,13 +364,17 @@ class SessionRepository:
             "INSERT INTO sessions (session_id, conversation_id, context_partition_key, "
             "reset_generation, status, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (session.session_id, session.conversation_id, session.context_partition_key,
-             session.reset_generation, session.status.value, session.created_at.isoformat()),
+            (
+                session.session_id,
+                session.conversation_id,
+                session.context_partition_key,
+                session.reset_generation,
+                session.status.value,
+                session.created_at.isoformat(),
+            ),
         )
 
-    def find_active(
-        self, conversation_id: str, context_partition_key: str
-    ) -> Session | None:
+    def find_active(self, conversation_id: str, context_partition_key: str) -> Session | None:
         row = self._conn.execute(
             "SELECT session_id, conversation_id, context_partition_key, "
             "reset_generation, status, created_at "
@@ -382,8 +406,7 @@ class MessageRepository:
 
     def next_receive_sequence(self, conversation_id: str) -> int:
         row = self._conn.execute(
-            "SELECT COALESCE(MAX(receive_sequence), 0) + 1 "
-            "FROM messages WHERE conversation_id=?",
+            "SELECT COALESCE(MAX(receive_sequence), 0) + 1 FROM messages WHERE conversation_id=?",
             (conversation_id,),
         ).fetchone()
         return row[0]
@@ -396,15 +419,24 @@ class MessageRepository:
             "receive_sequence, trust_label, raw_payload_ref, "
             "reply_route_json, capability_snapshot_json, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (message.message_id, message.conversation_id, message.session_id,
-             message.sender_principal_id, message.sender_endpoint_id,
-             message.role.value, message.direction.value,
-             message.reply_to_message_id, message.platform_message_id,
-             message.current_revision_no, message.receive_sequence,
-             message.trust_label, message.raw_payload_ref,
-             json.dumps(message.reply_route),
-             json.dumps(message.capability_snapshot),
-             message.created_at.isoformat()),
+            (
+                message.message_id,
+                message.conversation_id,
+                message.session_id,
+                message.sender_principal_id,
+                message.sender_endpoint_id,
+                message.role.value,
+                message.direction.value,
+                message.reply_to_message_id,
+                message.platform_message_id,
+                message.current_revision_no,
+                message.receive_sequence,
+                message.trust_label,
+                message.raw_payload_ref,
+                json.dumps(message.reply_route),
+                json.dumps(message.capability_snapshot),
+                message.created_at.isoformat(),
+            ),
         )
 
     def insert_content_part(self, part: ContentPart, message_id: str) -> None:
@@ -412,9 +444,18 @@ class MessageRepository:
             "INSERT INTO content_parts (part_id, message_id, content_type, inline_data, "
             "payload_ref, size, sha256, metadata, trust_label, ordinal) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (part.part_id, message_id, part.content_type, part.inline_data,
-             part.payload_ref, part.size, part.sha256,
-             json.dumps(part.metadata), part.trust_label, part.ordinal),
+            (
+                part.part_id,
+                message_id,
+                part.content_type,
+                part.inline_data,
+                part.payload_ref,
+                part.size,
+                part.sha256,
+                json.dumps(part.metadata),
+                part.trust_label,
+                part.ordinal,
+            ),
         )
 
 
@@ -433,20 +474,24 @@ class TurnRepository:
             "priority, version, cancel_requested_at, active_attempt_id, "
             "final_message_id, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (turn.turn_id, turn.session_id, turn.input_message_id,
-             turn.status.value, turn.priority, turn.version,
-             epoch_ms(turn.cancel_requested_at),
-             turn.active_attempt_id, turn.final_message_id,
-             epoch_ms(turn.created_at)),
+            (
+                turn.turn_id,
+                turn.session_id,
+                turn.input_message_id,
+                turn.status.value,
+                turn.priority,
+                turn.version,
+                epoch_ms(turn.cancel_requested_at),
+                turn.active_attempt_id,
+                turn.final_message_id,
+                epoch_ms(turn.created_at),
+            ),
         )
 
-    def update_status(
-        self, turn_id: str, new_status: TurnStatus, expected_version: int
-    ) -> bool:
+    def update_status(self, turn_id: str, new_status: TurnStatus, expected_version: int) -> bool:
         """版本条件更新状态。返回 True 表示更新成功。"""
         cursor = self._conn.execute(
-            "UPDATE turns SET status=?, version=version+1 "
-            "WHERE turn_id=? AND version=?",
+            "UPDATE turns SET status=?, version=version+1 WHERE turn_id=? AND version=?",
             (new_status.value, turn_id, expected_version),
         )
         return cursor.rowcount > 0
@@ -473,15 +518,15 @@ class TurnRepository:
             ).fetchall()
         else:
             rows = self._conn.execute(
-                "SELECT * FROM turns WHERE status=? "
-                "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                "SELECT * FROM turns WHERE status=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 (status, limit, offset),
             ).fetchall()
         return [self._row_to_turn(r) for r in rows]
 
     def get(self, turn_id: str) -> Turn | None:
         row = self._conn.execute(
-            "SELECT * FROM turns WHERE turn_id=?", (turn_id,),
+            "SELECT * FROM turns WHERE turn_id=?",
+            (turn_id,),
         ).fetchone()
         return self._row_to_turn(row) if row else None
 
@@ -499,7 +544,8 @@ class TurnRepository:
             row = self._conn.execute("SELECT COUNT(*) FROM turns").fetchone()
         else:
             row = self._conn.execute(
-                "SELECT COUNT(*) FROM turns WHERE status=?", (status,),
+                "SELECT COUNT(*) FROM turns WHERE status=?",
+                (status,),
             ).fetchone()
         return int(row[0]) if row else 0
 
@@ -562,11 +608,21 @@ class OutboxRepository:
             "aggregate_version, payload_ref, content_hash, schema_version, "
             "correlation_id, causation_id, origin, trust_label, status, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
-            (event.event_id, event.event_type, event.aggregate_type,
-             event.aggregate_id, event.aggregate_version,
-             event.payload_ref, event.content_hash, event.schema_version,
-             event.correlation_id, event.causation_id, event.origin,
-             event.trust_label, epoch_ms(event.occurred_at)),
+            (
+                event.event_id,
+                event.event_type,
+                event.aggregate_type,
+                event.aggregate_id,
+                event.aggregate_version,
+                event.payload_ref,
+                event.content_hash,
+                event.schema_version,
+                event.correlation_id,
+                event.causation_id,
+                event.origin,
+                event.trust_label,
+                epoch_ms(event.occurred_at),
+            ),
         )
 
 
@@ -591,8 +647,12 @@ class DeliveryRepository:
         target_snapshot 从 DomainDelivery.target_snapshot (dict) 序列化为 JSON。
         """
         import json
-        target_json = json.dumps(delivery.target_snapshot, ensure_ascii=False) \
-            if isinstance(delivery.target_snapshot, dict) else str(delivery.target_snapshot)
+
+        target_json = (
+            json.dumps(delivery.target_snapshot, ensure_ascii=False)
+            if isinstance(delivery.target_snapshot, dict)
+            else str(delivery.target_snapshot)
+        )
         now_int = epoch_ms(self._clock.now())
         self._conn.execute(
             "INSERT INTO deliveries "
@@ -631,8 +691,16 @@ class DeliveryRepository:
             "idempotency_key, created_at, content_mode, degradation_mode, policy_json, "
             "last_confirmed_revision, turn_id) "
             "VALUES (?, ?, ?, 'streaming', ?, ?, 'provisional', ?, ?, 0, ?)",
-            (delivery_id, json.dumps(target), content_ref, idempotency_key,
-             now_int, degradation_mode, json.dumps(policy), turn_id),
+            (
+                delivery_id,
+                json.dumps(target),
+                content_ref,
+                idempotency_key,
+                now_int,
+                degradation_mode,
+                json.dumps(policy),
+                turn_id,
+            ),
         )
         self._conn.execute(
             "INSERT INTO delivery_attempts (attempt_id, delivery_id, attempt_no, status, "
@@ -663,7 +731,8 @@ class DeliveryRepository:
         """记录一次 edit 操作（增量证据 + 推进 last_confirmed_revision）。"""
         observed = epoch_ms(self._clock.now())
         lv_row = self._conn.execute(
-            "SELECT lease_version FROM deliveries WHERE delivery_id=?", (delivery_id,),
+            "SELECT lease_version FROM deliveries WHERE delivery_id=?",
+            (delivery_id,),
         ).fetchone()
         lease_version = lv_row["lease_version"] if lv_row else 1
         self._conn.execute(
@@ -671,8 +740,17 @@ class DeliveryRepository:
             "(receipt_id, delivery_id, delivery_attempt_id, operation_seq, request_hash, "
             "receipt_kind, platform_message_id, safe_result, observed_at, lease_version) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, 'ok', ?, ?)",
-            (uuid.uuid4().hex, delivery_id, attempt_id, operation_seq,
-             f"edit:{operation_seq}", receipt_kind, platform_message_id, observed, lease_version),
+            (
+                uuid.uuid4().hex,
+                delivery_id,
+                attempt_id,
+                operation_seq,
+                f"edit:{operation_seq}",
+                receipt_kind,
+                platform_message_id,
+                observed,
+                lease_version,
+            ),
         )
         self._conn.execute(
             "UPDATE deliveries SET stream_status='streaming', last_confirmed_revision=?, "
@@ -703,8 +781,7 @@ class DeliveryRepository:
         """撤回占位（取消/失败）：标记 interrupted，不再发送。"""
         now_int = epoch_ms(self._clock.now())
         self._conn.execute(
-            "UPDATE deliveries SET status='interrupted', stream_status=NULL "
-            "WHERE delivery_id=?",
+            "UPDATE deliveries SET status='interrupted', stream_status=NULL WHERE delivery_id=?",
             (delivery_id,),
         )
         self._conn.execute(

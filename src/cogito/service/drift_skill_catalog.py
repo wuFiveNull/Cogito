@@ -3,14 +3,13 @@
 同名 Skill 冲突采用确定性优先级：内置优先；workspace 覆盖需显式配置。
 manifest 声明仍是声明，不能放行权限。
 """
+
 from __future__ import annotations
 
 import logging
-import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from cogito.domain.drift import DriftSkillManifest
 
@@ -33,8 +32,10 @@ def load_builtin_skills() -> dict[str, ResolvedSkill]:
     return _scan_dir(BUILTIN_SKILLS_DIR, builtin=True)
 
 
-def load_workspace_skills(workspace_path: str, allow_workspace: bool = False,
-                          ) -> dict[str, ResolvedSkill]:
+def load_workspace_skills(
+    workspace_path: str,
+    allow_workspace: bool = False,
+) -> dict[str, ResolvedSkill]:
     """扫描 workspace Skill 目录。需 allow_workspace=True 才启用。"""
     if not allow_workspace:
         return {}
@@ -44,8 +45,10 @@ def load_workspace_skills(workspace_path: str, allow_workspace: bool = False,
     return _scan_dir(ws, builtin=False)
 
 
-def resolve_catalog(workspace_path: str, allow_workspace: bool = False,
-                    ) -> dict[str, ResolvedSkill]:
+def resolve_catalog(
+    workspace_path: str,
+    allow_workspace: bool = False,
+) -> dict[str, ResolvedSkill]:
     """合并内置与 workspace；内置优先。"""
     catalog: dict[str, ResolvedSkill] = {}
     # 内置优先

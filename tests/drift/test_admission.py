@@ -7,6 +7,7 @@ drift_already_active → 各 deny；全满足 → admit。
 
 并发唯一性：同 Principal/Profile 同时最多一个 active Drift。
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -27,7 +28,7 @@ _SEQ = [0]
 
 def _uniq(tag: str) -> str:
     _SEQ[0] += 1
-    return f"{tag}-{_SEQ[0]}-{int(time.time()*1000)%100000}"
+    return f"{tag}-{_SEQ[0]}-{int(time.time() * 1000) % 100000}"
 
 
 def _fresh_db():
@@ -54,8 +55,7 @@ def _seed_turn(conn, status="running"):
     conn.execute(
         "INSERT INTO turns (turn_id, session_id, input_message_id, status, priority, created_at) "
         "VALUES (?,?,?,?,?,?)",
-        (tid, "sess-1", "msg-1", status, 80,
-         (datetime.now(UTC)).isoformat()),
+        (tid, "sess-1", "msg-1", status, 80, (datetime.now(UTC)).isoformat()),
     )
     conn.commit()
     return tid
@@ -66,8 +66,7 @@ def _seed_task(conn, priority=50, status="queued", task_type="knowledge.embed"):
     conn.execute(
         "INSERT INTO tasks (task_id, task_type, status, priority, idempotency_key, created_at) "
         "VALUES (?,?,?,?,?,?)",
-        (tid, task_type, status, priority, f"idemp-{tid}",
-         int(time.time()*1000)),
+        (tid, task_type, status, priority, f"idemp-{tid}", int(time.time() * 1000)),
     )
     conn.commit()
     return tid
@@ -81,7 +80,7 @@ def _seed_drift_run(conn, run_id, task_id=None, status="completed"):
         "(drift_run_id, task_id, principal_id, skill_name, skill_version, "
         " status, admission_snapshot_json, created_at) "
         "VALUES (?,?,?,?,?,?,?,?)",
-        (run_id, tid, "owner", "s", "1.0", status, "{}", int(time.time()*1000)),
+        (run_id, tid, "owner", "s", "1.0", status, "{}", int(time.time() * 1000)),
     )
     conn.commit()
     return tid
@@ -92,14 +91,14 @@ def _seed_delivery(conn, status="pending"):
     conn.execute(
         "INSERT INTO deliveries (delivery_id, status, idempotency_key, created_at) "
         "VALUES (?,?,?,?)",
-        (did, status, f"idem-{did}", int(time.time()*1000)),
+        (did, status, f"idem-{did}", int(time.time() * 1000)),
     )
     conn.commit()
 
 
 def _seed_outbox(conn, age_ms=0):
     eid = _uniq("evt")
-    created = int(time.time()*1000) - age_ms
+    created = int(time.time() * 1000) - age_ms
     conn.execute(
         "INSERT INTO outbox_events "
         "(event_id, event_type, aggregate_type, aggregate_id, "
@@ -112,14 +111,17 @@ def _seed_outbox(conn, age_ms=0):
 
 class _ReaderFactory:
     """通过 last_user_at 构建 reader。"""
+
     def __init__(self, last_user_at):
         self._at = last_user_at
 
     def make(self):
         at = self._at
+
         class R:
-            def get_last_user_activity(inner_self, principal_id):
+            def get_last_user_activity(self, principal_id):
                 return at
+
         return R()
 
 
@@ -215,9 +217,11 @@ class TestAdmissionMatrix:
 
     def test_presence_reader_failure_tolerated(self, memory_db):
         """reader 抛异常 → 不崩溃，last_activity 视为 None。"""
+
         class BoomReader:
             def get_last_user_activity(self, principal_id):
                 raise RuntimeError("db down")
+
         # 未活动(None) → not_idle_long_enough (age=None 不触发) → 其他满足 → admit
         r = admit(memory_db, presence_reader=BoomReader())
         assert r.admit is True

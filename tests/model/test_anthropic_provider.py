@@ -74,7 +74,10 @@ class TestContentBlockConversion:
         }
 
     def test_passthrough_anthropic_native(self):
-        native = {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "x"}}
+        native = {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg", "data": "x"},
+        }
         assert _to_anthropic_content_block(native) is native
 
     def test_passthrough_tool_use_result(self):
@@ -124,11 +127,13 @@ class TestToolNameSafety:
         assert safe == "mcp_server_tool"
         import re
         from cogito.model.anthropic_provider import _TOOL_NAME_RE
+
         assert _TOOL_NAME_RE.match(safe)
 
     def test_tool_name_matches_rule(self):
         import re
         from cogito.model.anthropic_provider import _TOOL_NAME_RE
+
         assert _TOOL_NAME_RE.match(_safe_tool_name("a.b c!d"))
 
     def test_long_name_truncated(self):
@@ -160,10 +165,12 @@ class TestStopReasonNormalization:
 class TestBuildPayload:
     def test_system_prompt_extracted_to_top_level(self):
         prov = _provider()
-        request = ModelRequest(messages=(
-            {"role": "system", "content": "You are helpful."},
-            {"role": "user", "content": "Hi"},
-        ))
+        request = ModelRequest(
+            messages=(
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Hi"},
+            )
+        )
         payload = prov._build_payload(request)
         assert payload["system"] == {"type": "text", "text": "You are helpful."}
         # system 消息不出现在 messages 数组
@@ -172,13 +179,23 @@ class TestBuildPayload:
 
     def test_tool_message_converted_to_user_tool_result(self):
         prov = _provider()
-        request = ModelRequest(messages=(
-            {"role": "user", "content": "Hi"},
-            {"role": "assistant", "content": "", "tool_calls": [
-                {"id": "tc1", "type": "function", "function": {"name": "t", "arguments": "{}"}},
-            ]},
-            {"role": "tool", "content": "result", "tool_call_id": "tc1"},
-        ))
+        request = ModelRequest(
+            messages=(
+                {"role": "user", "content": "Hi"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "tc1",
+                            "type": "function",
+                            "function": {"name": "t", "arguments": "{}"},
+                        },
+                    ],
+                },
+                {"role": "tool", "content": "result", "tool_call_id": "tc1"},
+            )
+        )
         payload = prov._build_payload(request)
         tool_result_msg = payload["messages"][-1]
         assert tool_result_msg["role"] == "user"
@@ -187,30 +204,36 @@ class TestBuildPayload:
 
     def test_user_image_preserved(self):
         prov = _provider()
-        request = ModelRequest(messages=(
-            {"role": "user", "content": [
-                {"type": "text", "text": "What is this?"},
-                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
-            ]},
-        ))
+        request = ModelRequest(
+            messages=(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What is this?"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                    ],
+                },
+            )
+        )
         payload = prov._build_payload(request)
         assert isinstance(payload["messages"][0]["content"], list)
         assert payload["messages"][0]["content"][1]["type"] == "image"
 
     def test_response_format_json_uses_tool_choice(self):
         prov = _provider()
-        request = ModelRequest(messages=(
-            {"role": "user", "content": "Hi"},
-        ), response_format="json")
+        request = ModelRequest(
+            messages=({"role": "user", "content": "Hi"},), response_format="json"
+        )
         payload = prov._build_payload(request)
         assert payload["tool_choice"]["type"] == "tool"
         assert payload["tool_choice"]["name"] == "_response"
 
     def test_response_schema_json_uses_named_tool(self):
         prov = _provider()
-        request = ModelRequest(messages=(
-            {"role": "user", "content": "Hi"},
-        ), response_schema={"name": "memory", "type": "object"})
+        request = ModelRequest(
+            messages=({"role": "user", "content": "Hi"},),
+            response_schema={"name": "memory", "type": "object"},
+        )
         payload = prov._build_payload(request)
         assert payload["tool_choice"]["type"] == "tool"
         assert payload["tool_choice"]["name"] == "memory"
@@ -254,7 +277,12 @@ class TestParseResponse:
             "id": "msg_2",
             "model": "claude-x",
             "content": [
-                {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "NYC"}},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "get_weather",
+                    "input": {"city": "NYC"},
+                },
             ],
             "stop_reason": "tool_use",
             "usage": {"input_tokens": 1, "output_tokens": 1},
@@ -269,7 +297,8 @@ class TestParseResponse:
     def test_cached_tokens_extracted(self):
         prov = _provider()
         data = {
-            "id": "m", "model": "c",
+            "id": "m",
+            "model": "c",
             "content": [{"type": "text", "text": "x"}],
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 5, "output_tokens": 1, "cache_read_input_tokens": 3},

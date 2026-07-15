@@ -49,6 +49,7 @@ _LOGGER = logging.getLogger("cogito.inbound")
 @dataclass
 class AcceptInboundResult:
     """入站事务返回值。"""
+
     message_id: str = ""
     turn_id: str = ""
     is_new: bool = True
@@ -69,7 +70,7 @@ class InboundService:
         asset_service: Any | None = None,
         vision_service: Any | None = None,
         max_assets_per_message: int = 4,
-        drift_preemption: Any = None,          # None ⇒ 不发射抢占(P0-05 默认关闭)
+        drift_preemption: Any = None,  # None ⇒ 不发射抢占(P0-05 默认关闭)
     ) -> None:
         self._conn = conn
         # 入站新建 Turn 后的唤醒回调（用于即时唤醒后台 worker，消除轮询睡眠）
@@ -107,7 +108,8 @@ class InboundService:
 
             if principal is None:
                 principal = uow.principal.find_by_platform(
-                    envelope.channel_type, envelope.platform_sender_id,
+                    envelope.channel_type,
+                    envelope.platform_sender_id,
                 )
 
             if principal is None:
@@ -124,7 +126,8 @@ class InboundService:
 
             if endpoint is None:
                 endpoint = uow.endpoint.find_by_platform(
-                    envelope.channel_instance_id, envelope.platform_sender_id,
+                    envelope.channel_instance_id,
+                    envelope.platform_sender_id,
                 )
 
             if endpoint is None:
@@ -147,13 +150,20 @@ class InboundService:
 
             if conversation is None:
                 conversation = uow.conversation.find_by_platform(
-                    endpoint.endpoint_id, envelope.platform_conversation_id,
+                    endpoint.endpoint_id,
+                    envelope.platform_conversation_id,
                 )
 
             if conversation is None:
                 # QQ-ONEBOT-E2E-01: 支持群聊/私聊类型区分
-                conv_type_str = envelope.metadata.get("conversation_type", "private") if envelope.metadata else "private"
-                conversation_type = ConversationType.group if conv_type_str == "group" else ConversationType.private
+                conv_type_str = (
+                    envelope.metadata.get("conversation_type", "private")
+                    if envelope.metadata
+                    else "private"
+                )
+                conversation_type = (
+                    ConversationType.group if conv_type_str == "group" else ConversationType.private
+                )
                 conversation = Conversation(
                     conversation_endpoint_id=endpoint.endpoint_id,
                     platform_conversation_id=envelope.platform_conversation_id,
@@ -167,7 +177,8 @@ class InboundService:
             # ── 5. 解析/创建 Session ──
             context_key = conversation.conversation_id  # isolated → partition = conversation
             session = uow.session.find_active(
-                conversation.conversation_id, context_key,
+                conversation.conversation_id,
+                context_key,
             )
             if session is None:
                 session = Session(
@@ -206,7 +217,8 @@ class InboundService:
                     else:
                         try:
                             asset = self._asset_service.materialize_part(
-                                part, principal_id=principal.principal_id,
+                                part,
+                                principal_id=principal.principal_id,
                             )
                             if asset is not None:
                                 asset_count += 1
@@ -232,7 +244,9 @@ class InboundService:
                 trust_label=envelope.trust_label,
                 reply_route=envelope.reply_route.to_dict() if envelope.reply_route else None,
                 capability_snapshot=envelope.capability_snapshot or None,
-                created_at=datetime.fromisoformat(envelope.received_at) if envelope.received_at else None,
+                created_at=datetime.fromisoformat(envelope.received_at)
+                if envelope.received_at
+                else None,
             )
             uow.message.insert(message)
             for part in content_parts:
@@ -255,39 +269,48 @@ class InboundService:
 
             # ── 9. 写入 Event Outbox ──
             now = datetime.now(UTC)
-            uow.outbox.insert(DomainEvent(
-                event_id="",
-                event_type="InboundMessageAccepted",
-                aggregate_type="message",
-                aggregate_id=message.message_id,
-                aggregate_version=1,
-                payload={"message_id": message.message_id, "conversation_id": conversation.conversation_id},
-                occurred_at=now,
-                correlation_id=envelope.message_id,
-                causation_id=envelope.message_id,
-                origin=envelope.channel_type or "channel",
-            ))
-            uow.outbox.insert(DomainEvent(
-                event_id="",
-                event_type="TurnQueued",
-                aggregate_type="turn",
-                aggregate_id=turn.turn_id,
-                aggregate_version=2,
-                payload={"turn_id": turn.turn_id, "message_id": message.message_id},
-                occurred_at=now,
-                correlation_id=envelope.message_id,
-                causation_id=envelope.message_id,
-                origin=envelope.channel_type or "channel",
-            ))
+            uow.outbox.insert(
+                DomainEvent(
+                    event_id="",
+                    event_type="InboundMessageAccepted",
+                    aggregate_type="message",
+                    aggregate_id=message.message_id,
+                    aggregate_version=1,
+                    payload={
+                        "message_id": message.message_id,
+                        "conversation_id": conversation.conversation_id,
+                    },
+                    occurred_at=now,
+                    correlation_id=envelope.message_id,
+                    causation_id=envelope.message_id,
+                    origin=envelope.channel_type or "channel",
+                )
+            )
+            uow.outbox.insert(
+                DomainEvent(
+                    event_id="",
+                    event_type="TurnQueued",
+                    aggregate_type="turn",
+                    aggregate_id=turn.turn_id,
+                    aggregate_version=2,
+                    payload={"turn_id": turn.turn_id, "message_id": message.message_id},
+                    occurred_at=now,
+                    correlation_id=envelope.message_id,
+                    causation_id=envelope.message_id,
+                    origin=envelope.channel_type or "channel",
+                )
+            )
 
             # ── 10. 记录 Inbox ──
-            uow.inbox.insert(InboxRecord(
-                channel_instance_id=envelope.channel_instance_id,
-                platform_event_id=platform_event_id,
-                status="processed",
-                message_id=message.message_id,
-                received_at=datetime.now(UTC).isoformat(),
-            ))
+            uow.inbox.insert(
+                InboxRecord(
+                    channel_instance_id=envelope.channel_instance_id,
+                    platform_event_id=platform_event_id,
+                    status="processed",
+                    message_id=message.message_id,
+                    received_at=datetime.now(UTC).isoformat(),
+                )
+            )
 
             uow.commit()
         _bench_timing.checkpoint("inbound:commit_done", extra={"turn_id": turn.turn_id})
@@ -318,13 +341,12 @@ class InboundService:
         if result.is_new and self._drift_preemption is not None:
             try:
                 from cogito.service.drift_preemption import request_preemption
+
                 request_preemption(
-                    self._conn,
-                    self._drift_preemption.default_principal_id,
-                    "inbound_turn")
+                    self._conn, self._drift_preemption.default_principal_id, "inbound_turn"
+                )
             except Exception:
-                _LOGGER.warning("drift preemption signal emit failed",
-                                exc_info=True)
+                _LOGGER.warning("drift preemption signal emit failed", exc_info=True)
 
         return result
 

@@ -7,6 +7,7 @@
   run        前台运行 Agent worker（轮询 Turn / Outbox / Delivery / Task）
   serve      前台运行 interaction-web 服务器（Query/Command API + 静态前端 + 聊天 WebSocket）
 """
+
 from __future__ import annotations
 
 import argparse
@@ -91,6 +92,7 @@ def _cmd_mcp_serve(args: argparse.Namespace) -> int:
     """Run the local read-only MCP server over stdio."""
     config = Config.load(_config_path(args))
     from cogito.service.read_only_mcp_server import run_read_only_mcp_server
+
     run_read_only_mcp_server(config)
     return 0
 
@@ -99,7 +101,8 @@ def _cmd_mcp_auth(args: argparse.Namespace) -> int:
     """Inspect or reset OAuth token state without printing credentials."""
     config = Config.load(_config_path(args))
     selected = [
-        entry for entry in config.capability.mcp_servers
+        entry
+        for entry in config.capability.mcp_servers
         if not args.server or entry.name == args.server
     ]
     if args.server and not selected:
@@ -113,10 +116,7 @@ def _cmd_mcp_auth(args: argparse.Namespace) -> int:
             print(f"{entry.name}: invalid_secret_root")
             continue
         root = Path(entry.secret_root).expanduser().resolve()
-        path = Path(
-            entry.oauth_token_file
-            or root / f"{entry.name}.json"
-        ).expanduser().resolve()
+        path = Path(entry.oauth_token_file or root / f"{entry.name}.json").expanduser().resolve()
         try:
             path.relative_to(root)
         except ValueError:
@@ -166,10 +166,7 @@ def _cmd_tools(args: argparse.Namespace) -> int:
                 )
             for name, error in sorted(session.mcp_errors.items()):
                 print(f"[mcp:{name}] {error}", file=sys.stderr)
-            print(
-                f"Total: {len(records)}; contract issues: "
-                f"{inventory['contract_issue_count']}"
-            )
+            print(f"Total: {len(records)}; contract issues: {inventory['contract_issue_count']}")
             return 0 if not session.mcp_errors else 1
         finally:
             await session.close()
@@ -180,7 +177,8 @@ def _cmd_tools(args: argparse.Namespace) -> int:
 def _cmd_mcp_inspect(args: argparse.Namespace) -> int:
     config = Config.load(_config_path(args))
     entries = [
-        entry for entry in config.capability.mcp_servers
+        entry
+        for entry in config.capability.mcp_servers
         if not getattr(args, "server", "") or entry.name == args.server
     ]
     if getattr(args, "server", "") and not entries:
@@ -212,6 +210,7 @@ def _cmd_mcp_inspect(args: argparse.Namespace) -> int:
                 )
                 if args.json:
                     from cogito.capability.inspection import tool_inventory
+
                     print(json.dumps(tool_inventory(tools), ensure_ascii=False, indent=2))
                     return 0 if not session.mcp_errors else 1
                 print("NAME\tCAPABILITY_ID\tRISK\tTOOLSETS")
@@ -311,10 +310,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
         except (RuntimeError, ValueError) as e:
             print(f"[ERROR] Startup error: {e}", file=sys.stderr)
             return 3
-        asyncio.run(app.run_worker(
-            worker_id=args.worker_id,
-            poll_interval=args.poll_interval,
-        ))
+        asyncio.run(
+            app.run_worker(
+                worker_id=args.worker_id,
+                poll_interval=args.poll_interval,
+            )
+        )
     except KeyboardInterrupt:
         print("\n[ok] Worker stopped (Ctrl+C).")
     finally:
@@ -403,16 +404,21 @@ async def _serve_async(config: Config, args: argparse.Namespace) -> int:
     print("[ok] Web channel enabled — chat via WebSocket at /api/chat/ws")
 
     server = uvicorn.Server(
-        uvicorn.Config(app, host=config.interaction.bind_host,
-                       port=config.interaction.port, log_level="info")
+        uvicorn.Config(
+            app, host=config.interaction.bind_host, port=config.interaction.port, log_level="info"
+        )
     )
     server_task = asyncio.create_task(server.serve(), name="uvicorn-server")
     tasks.append(server_task)
 
     try:
         done, pending = await asyncio.wait(
-            tasks, return_when=asyncio.FIRST_COMPLETED,
+            tasks,
+            return_when=asyncio.FIRST_COMPLETED,
         )
+        # Stop accepting work and drain the worker before cancelling any pending
+        # task.  Cancelling a to_thread await does not stop its underlying thread.
+        await rt.shutdown()
         for t in pending:
             if not t.done():
                 t.cancel()
@@ -427,7 +433,7 @@ async def _serve_async(config: Config, args: argparse.Namespace) -> int:
     finally:
         server.should_exit = True
         if rt is not None:
-            rt.close()
+            await rt.shutdown()
     return 0
 
 
@@ -453,7 +459,9 @@ def main() -> None:
     profiles_parser.add_argument("--json", action="store_true")
     config_init = config_sub.add_parser("init", help="从内置 Profile 创建配置")
     config_init.add_argument(
-        "--profile", choices=["minimal", "developer", "personal"], default="personal",
+        "--profile",
+        choices=["minimal", "developer", "personal"],
+        default="personal",
     )
     config_init.add_argument("--output", default="config.toml")
     config_init.add_argument("--force", action="store_true")
@@ -488,29 +496,37 @@ def main() -> None:
 
     run_parser = sub.add_parser("run", help="前台运行 Agent worker", parents=[pre])
     run_parser.add_argument(
-        "--worker-id", default="worker1",
+        "--worker-id",
+        default="worker1",
         help="Worker ID (默认: worker1)",
     )
     run_parser.add_argument(
-        "--poll-interval", type=float, default=1.0,
+        "--poll-interval",
+        type=float,
+        default=1.0,
         help="轮询间隔秒 (默认: 1.0)",
     )
     run_parser.add_argument(
-        "--debug", action="store_true",
+        "--debug",
+        action="store_true",
         help="开启 debug 日志",
     )
 
     serve_parser = sub.add_parser("serve", help=INTERACTION_SERVER_HELP, parents=[pre])
     serve_parser.add_argument(
-        "--port", type=int, default=None,
+        "--port",
+        type=int,
+        default=None,
         help="覆盖 [interaction] port",
     )
     serve_parser.add_argument(
-        "--host", default=None,
+        "--host",
+        default=None,
         help="覆盖 [interaction] bind_host",
     )
     serve_parser.add_argument(
-        "--no-worker", action="store_true",
+        "--no-worker",
+        action="store_true",
         help="不启动后台 worker（仅 API + 前端）",
     )
 

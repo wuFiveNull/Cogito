@@ -6,6 +6,7 @@ instead of going through `python -m cogito`.  Exercises:
 - RuntimeApplication builds without traceback
 - config load + schema validation round-trips
 """
+
 from __future__ import annotations
 
 import sys
@@ -44,11 +45,13 @@ class TestPublicApiImport:
     def test_top_level_import(self) -> None:
         """Top-level cogito import must not error on channel adapters (RB-08)."""
         import cogito
+
         assert hasattr(cogito, "__version__")
 
     def test_main_cli_module_exists(self) -> None:
         """轻薄 CLI 启动器应可被 `python -m cogito` 调用。"""
         import importlib
+
         spec = importlib.util.find_spec("cogito.__main__")
         assert spec is not None, "cogito.__main__ 轻薄启动器应存在"
 
@@ -66,12 +69,14 @@ class TestPublicApiImport:
 class TestPublicConfigApi:
     def test_load_example_config(self) -> None:
         from cogito.config import Config
+
         cfg = Config.load(EXAMPLE_CONFIG)
         assert cfg.schema_version
         assert Path(cfg.workspace_path).name == ".workspace"
 
     def test_unknown_section_rejected(self) -> None:
         from cogito.config import Config, ConfigError
+
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "bad.toml"
             p.write_text("[storage]\ndb_path='x'\n[magic_section]\nfoo=1\n")
@@ -84,9 +89,11 @@ class TestPublicConfigApi:
 
     def test_secret_not_in_formatted_error(self) -> None:
         from cogito.config import Config, ConfigError
+
         with tempfile.TemporaryDirectory() as tmp:
             bad = Path(tmp) / "config.toml"
-            bad.write_text(textwrap.dedent("""\
+            bad.write_text(
+                textwrap.dedent("""\
                 workspace_path = ".workspace"
                 [storage]
                 db_path = "data/cogito.db"
@@ -111,7 +118,8 @@ class TestPublicConfigApi:
                 provider = "openai_compat"
                 api_key = "sk-this-is-a-test-secret-123"
                 enable_thinking = true
-            """))
+            """)
+            )
             try:
                 Config.load(bad)
             except ConfigError as e:
@@ -124,6 +132,7 @@ class TestPublicConfigApi:
         """RB-A03 — public API builds without traceback on fresh workspace."""
         from cogito.config import Config
         from cogito.application import RuntimeApplication
+
         with tempfile.TemporaryDirectory() as tmp:
             cwd = Path(tmp)
             cfg_path = cwd / "config.toml"

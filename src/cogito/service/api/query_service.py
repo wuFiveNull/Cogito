@@ -15,18 +15,22 @@ import sqlite3
 from typing import Any
 
 from cogito.config import Config
+from cogito.contracts.clock import epoch_ms
 from cogito.service.retrieval_service import RetrievalService
 from cogito.store.capability_repo import CapabilityRepository
 from cogito.store.config_version_repo import ConfigVersionRepository
 from cogito.store.connector_repo import ConnectorRepository
 from cogito.store.digest_repo import DigestRepository
 from cogito.store.model_call_repo import ModelCallRepository
-from cogito.store.proactive_repo import ProactiveCandidateRepository, ProactiveDecisionRepository, ProactivePolicyRepository
+from cogito.store.proactive_repo import (
+    ProactiveCandidateRepository,
+    ProactiveDecisionRepository,
+    ProactivePolicyRepository,
+)
 from cogito.store.receipt_repo import SideEffectReceiptRepository
 from cogito.store.repositories import TurnRepository
 from cogito.store.schedule_repo import ScheduleRepository
 from cogito.store.task_repo import TaskAttemptRepository, TaskRepository
-from cogito.contracts.clock import epoch_ms
 from cogito.store.tool_call_repo import ToolCallRepository
 
 
@@ -93,6 +97,7 @@ class QueryService:
         summary = self._model_call_repo.usage_summary()  # 全量基线
         # 时间段统计
         from datetime import UTC, datetime, timedelta
+
         since = epoch_ms(datetime.now(UTC) - timedelta(hours=hours))
         windowed = self._model_call_repo.usage_summary(since_ms=since)
         # 最近失败数
@@ -109,7 +114,9 @@ class QueryService:
 
     # ── turns ──────────────────────────────────────────────────
 
-    def list_turns(self, status: str | None = None, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    def list_turns(
+        self, status: str | None = None, limit: int = 100, offset: int = 0
+    ) -> dict[str, Any]:
         rows = self._turn_repo.list_(status=status, limit=limit, offset=offset)
         total = self._turn_repo.count(status=status)
         return {
@@ -128,7 +135,9 @@ class QueryService:
 
     # ── tasks ──────────────────────────────────────────────────
 
-    def list_tasks(self, status: str | None = None, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    def list_tasks(
+        self, status: str | None = None, limit: int = 100, offset: int = 0
+    ) -> dict[str, Any]:
         rows = self._task_repo.list_filtered(status=status, limit=limit, offset=offset)
         total = self._task_repo.count(status=status)
         return {
@@ -158,16 +167,14 @@ class QueryService:
         Legacy/system tasks without a structured ``principal_id`` are deliberately
         invisible to the read-only MCP facade.
         """
-        predicate = (
-            "json_valid(payload_ref)=1 "
-            "AND json_extract(payload_ref, '$.principal_id')=?"
-        )
+        predicate = "json_valid(payload_ref)=1 AND json_extract(payload_ref, '$.principal_id')=?"
         params: list[Any] = [principal_id]
         if status is not None:
             predicate += " AND status=?"
             params.append(status)
         total_row = self._conn.execute(
-            f"SELECT COUNT(*) FROM tasks WHERE {predicate}", params,
+            f"SELECT COUNT(*) FROM tasks WHERE {predicate}",
+            params,
         ).fetchone()
         rows = self._conn.execute(
             f"SELECT task_id FROM tasks WHERE {predicate} "
@@ -182,7 +189,9 @@ class QueryService:
         return {"items": items, "total": int(total_row[0]) if total_row else 0}
 
     def get_task_for_principal(
-        self, task_id: str, principal_id: str,
+        self,
+        task_id: str,
+        principal_id: str,
     ) -> dict[str, Any] | None:
         row = self._conn.execute(
             "SELECT 1 FROM tasks WHERE task_id=? AND json_valid(payload_ref)=1 "
@@ -221,7 +230,9 @@ class QueryService:
         # else "all": 不过滤 status
         if q:
             scored = self._retrieval.retrieve(
-                principal_id=principal_id, query=q, limit=limit,
+                principal_id=principal_id,
+                query=q,
+                limit=limit,
             )
             items = [sm.to_dict() for sm in scored]
         else:
@@ -260,7 +271,8 @@ class QueryService:
         like = f"%{escaped}%"
         params = (principal_id, like, like, like)
         total_row = self._conn.execute(
-            f"SELECT COUNT(*) FROM memory_items WHERE {where}", params,
+            f"SELECT COUNT(*) FROM memory_items WHERE {where}",
+            params,
         ).fetchone()
         rows = self._conn.execute(
             f"SELECT * FROM memory_items WHERE {where} "
@@ -306,7 +318,9 @@ class QueryService:
         return {"items": [dict(r) for r in rows]}
 
     def get_conversation_messages(
-        self, conversation_id: str, limit: int = 200,
+        self,
+        conversation_id: str,
+        limit: int = 200,
     ) -> dict[str, Any]:
         """按会话取消息（含文本），用于聊天历史回放。
 
@@ -325,8 +339,7 @@ class QueryService:
         resolved = internal_id["conversation_id"] if internal_id else None
         if resolved is None:
             row = self._conn.execute(
-                "SELECT conversation_id FROM conversations "
-                "WHERE platform_conversation_id=?",
+                "SELECT conversation_id FROM conversations WHERE platform_conversation_id=?",
                 (conversation_id,),
             ).fetchone()
             resolved = row["conversation_id"] if row else None
@@ -353,16 +366,19 @@ class QueryService:
     # ── deliveries ─────────────────────────────────────────────
 
     def list_deliveries(
-        self, status: str | None = None, limit: int = 100, offset: int = 0,
+        self,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
     ) -> dict[str, Any]:
         if status:
             rows = self._conn.execute(
-                "SELECT * FROM deliveries WHERE status=? "
-                "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                "SELECT * FROM deliveries WHERE status=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 (status, limit, offset),
             ).fetchall()
             total = self._conn.execute(
-                "SELECT COUNT(*) FROM deliveries WHERE status=?", (status,),
+                "SELECT COUNT(*) FROM deliveries WHERE status=?",
+                (status,),
             ).fetchone()[0]
         else:
             rows = self._conn.execute(
@@ -386,7 +402,8 @@ class QueryService:
             return None
         # 关联的 run_attempts
         attempts = [
-            dict(r) for r in self._conn.execute(
+            dict(r)
+            for r in self._conn.execute(
                 "SELECT * FROM run_attempts WHERE attempt_id IN "
                 "(SELECT attempt_id FROM model_calls WHERE trace_id=?) "
                 "ORDER BY started_at ASC",
@@ -535,9 +552,13 @@ class QueryService:
                 a_start_ms = self._parse_ts_ms(ad.get("started_at"))
                 a_end_ms = self._parse_ts_ms(ad.get("finished_at"))
                 ad["duration_ms"] = (
-                    (a_end_ms - a_start_ms) if a_start_ms is not None and a_end_ms is not None else None
+                    (a_end_ms - a_start_ms)
+                    if a_start_ms is not None and a_end_ms is not None
+                    else None
                 )
-                model_calls = [mc.to_dict() for mc in self._model_call_repo.find_by_attempt(a.attempt_id)]
+                model_calls = [
+                    mc.to_dict() for mc in self._model_call_repo.find_by_attempt(a.attempt_id)
+                ]
                 ad["model_calls"] = model_calls
                 total_model_calls += len(model_calls)
                 for mc in model_calls:
@@ -551,7 +572,9 @@ class QueryService:
             # 整条 turn 的耗时（从创建到最后一次模型调用完成）
             td["duration_ms"] = (
                 (turn_end_ms - turn_start_ms)
-                if turn_start_ms is not None and turn_end_ms is not None and turn_end_ms >= turn_start_ms
+                if turn_start_ms is not None
+                and turn_end_ms is not None
+                and turn_end_ms >= turn_start_ms
                 else None
             )
             turns_out.append(td)
@@ -581,6 +604,7 @@ class QueryService:
                 return int(value)
             # ISO 格式
             from datetime import datetime
+
             try:
                 s = value.replace("Z", "+00:00")
                 dt = datetime.fromisoformat(s)
@@ -614,8 +638,10 @@ class QueryService:
 
         # ── 会话（过滤已软删除） ──
         sessions = [
-            dict(r) for r in self._conn.execute(
-                "SELECT * FROM sessions WHERE conversation_id=? AND deleted_at IS NULL ORDER BY created_at ASC",
+            dict(r)
+            for r in self._conn.execute(
+                "SELECT * FROM sessions WHERE conversation_id=? "
+                "AND deleted_at IS NULL ORDER BY created_at ASC",
                 (real_id,),
             ).fetchall()
         ]
@@ -658,7 +684,9 @@ class QueryService:
             for a in attempts:
                 ad = dict(a)
                 # model calls
-                model_calls = [mc.to_dict() for mc in self._model_call_repo.find_by_attempt(a["attempt_id"])]
+                model_calls = [
+                    mc.to_dict() for mc in self._model_call_repo.find_by_attempt(a["attempt_id"])
+                ]
                 ad["model_calls"] = model_calls
                 ad["model_call_count"] = len(model_calls)
                 ad["error_calls"] = sum(1 for mc in model_calls if mc.get("status") == "error")
@@ -750,7 +778,11 @@ class QueryService:
                     for mc in a.get("model_calls", []):
                         if mc.get("status") == "error":
                             err_calls.append(mc.get("error_category") or "unknown")
-                msg_diag["detail"] = f"Turn 执行失败，模型调用错误: {err_calls}" if err_calls else "Turn 执行失败（详见 attempt）"
+                msg_diag["detail"] = (
+                    f"Turn 执行失败，模型调用错误: {err_calls}"
+                    if err_calls
+                    else "Turn 执行失败（详见 attempt）"
+                )
                 issues.append(msg_diag)
                 continue
 
@@ -773,10 +805,17 @@ class QueryService:
                     issues.append(msg_diag)
                     continue
 
-                failed_deliveries = [d for d in turn.get("deliveries", []) if d["status"] in ("failed", "cancelled", "interrupted")]
+                failed_deliveries = [
+                    d
+                    for d in turn.get("deliveries", [])
+                    if d["status"] in ("failed", "cancelled", "interrupted")
+                ]
                 if failed_deliveries:
                     msg_diag["issue"] = "DELIVERY_FAILED"
-                    msg_diag["detail"] = f"Delivery 失败: {failed_deliveries[0].get('last_error') or failed_deliveries[0]['status']}"
+                    failure = failed_deliveries[0]
+                    msg_diag["detail"] = (
+                        f"Delivery 失败: {failure.get('last_error') or failure['status']}"
+                    )
                     issues.append(msg_diag)
                     continue
 
@@ -827,6 +866,7 @@ class QueryService:
     @staticmethod
     def _now_ms() -> int:
         from datetime import UTC, datetime
+
         return int(datetime.now(UTC).timestamp() * 1000)
 
     # ── dashboard summary / attention / health ──────────────────
@@ -834,17 +874,25 @@ class QueryService:
     def dashboard_summary(self) -> dict[str, Any]:
         """聚合当前一屏所需数据：status + usage + backlog + health + proactive 摘要。"""
         from datetime import UTC, datetime
+
         status = self.status()
         usage_self = self.usage(hours=24)
         cfg = self._config
         now = datetime.now(UTC).isoformat()
 
         # backlog 计数
-        pending_approvals = self._conn.execute("SELECT COUNT(*) FROM approvals WHERE status='pending'").fetchone()[0]
-        candidate_memory = self._conn.execute("SELECT COUNT(*) FROM memory_items WHERE status='candidate' AND deleted_at IS NULL").fetchone()[0]
-        failed_tasks = self._conn.execute("SELECT COUNT(*) FROM tasks WHERE status='failed'").fetchone()[0]
-        unknown_deliveries = self._conn.execute("SELECT COUNT(*) FROM deliveries WHERE status='unknown'").fetchone()[0]
-        paused_connectors = self._conn.execute("SELECT COUNT(*) FROM connectors WHERE status='paused'").fetchone()[0]
+        pending_approvals = self._conn.execute(
+            "SELECT COUNT(*) FROM approvals WHERE status='pending'"
+        ).fetchone()[0]
+        failed_tasks = self._conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE status='failed'"
+        ).fetchone()[0]
+        unknown_deliveries = self._conn.execute(
+            "SELECT COUNT(*) FROM deliveries WHERE status='unknown'"
+        ).fetchone()[0]
+        paused_connectors = self._conn.execute(
+            "SELECT COUNT(*) FROM connectors WHERE status='paused'"
+        ).fetchone()[0]
 
         # readiness 判定
         readiness_reasons: list[str] = []
@@ -876,14 +924,17 @@ class QueryService:
                 "errors": usage_self.get("recent_errors", 0),
             },
             "proactive": {
-                "mode": "dry_run" if cfg.capability.proactive.dry_run else ("live" if cfg.capability.proactive.enabled else "disabled"),
+                "mode": "dry_run"
+                if cfg.capability.proactive.dry_run
+                else ("live" if cfg.capability.proactive.enabled else "disabled"),
                 "candidates_queued": self._candidate_repo.count_by_principal("owner", "queued"),
                 "decisions_24h": self._conn.execute(
                     "SELECT COUNT(*) FROM proactive_decisions_v2 WHERE decided_at >= ?",
                     (self._now_ms() - 86400000,),
                 ).fetchone()[0],
                 "daily_budget_used": self._conn.execute(
-                    "SELECT COUNT(*) FROM proactive_decisions_v2 WHERE dry_run=0 AND decided_at >= ?",
+                    "SELECT COUNT(*) FROM proactive_decisions_v2 "
+                    "WHERE dry_run=0 AND decided_at >= ?",
                     (self._now_ms() - 86400000,),
                 ).fetchone()[0],
                 "daily_budget_limit": cfg.capability.proactive.max_pushes_per_day,
@@ -902,37 +953,104 @@ class QueryService:
     def attention_items(self) -> list[dict[str, Any]]:
         """生成待处理事项列表。"""
         items: list[dict[str, Any]] = []
-        rows = self._conn.execute("SELECT COUNT(*) FROM approvals WHERE status='pending'").fetchone()[0]
+        rows = self._conn.execute(
+            "SELECT COUNT(*) FROM approvals WHERE status='pending'"
+        ).fetchone()[0]
         if rows:
-            items.append({"kind": "approval", "severity": "warn", "label": "待审批", "count": rows, "target_route": "/commands"})
+            items.append(
+                {
+                    "kind": "approval",
+                    "severity": "warn",
+                    "label": "待审批",
+                    "count": rows,
+                    "target_route": "/commands",
+                }
+            )
         rows = self._conn.execute("SELECT COUNT(*) FROM tasks WHERE status='failed'").fetchone()[0]
         if rows:
-            items.append({"kind": "failed_task", "severity": "danger", "label": "失败任务", "count": rows, "target_route": "/tasks"})
-        rows = self._conn.execute("SELECT COUNT(*) FROM deliveries WHERE status='unknown'").fetchone()[0]
+            items.append(
+                {
+                    "kind": "failed_task",
+                    "severity": "danger",
+                    "label": "失败任务",
+                    "count": rows,
+                    "target_route": "/tasks",
+                }
+            )
+        rows = self._conn.execute(
+            "SELECT COUNT(*) FROM deliveries WHERE status='unknown'"
+        ).fetchone()[0]
         if rows:
-            items.append({"kind": "unknown_delivery", "severity": "warn", "label": "未知投递", "count": rows, "target_route": "/deliveries"})
-        rows = self._conn.execute("SELECT COUNT(*) FROM memory_items WHERE status='candidate' AND deleted_at IS NULL").fetchone()[0]
+            items.append(
+                {
+                    "kind": "unknown_delivery",
+                    "severity": "warn",
+                    "label": "未知投递",
+                    "count": rows,
+                    "target_route": "/deliveries",
+                }
+            )
+        rows = self._conn.execute(
+            "SELECT COUNT(*) FROM memory_items WHERE status='candidate' AND deleted_at IS NULL"
+        ).fetchone()[0]
         if rows:
-            items.append({"kind": "memory_candidate", "severity": "info", "label": "待确认记忆", "count": rows, "target_route": "/memory"})
-        rows = self._conn.execute("SELECT COUNT(*) FROM connectors WHERE status='paused'").fetchone()[0]
+            items.append(
+                {
+                    "kind": "memory_candidate",
+                    "severity": "info",
+                    "label": "待确认记忆",
+                    "count": rows,
+                    "target_route": "/memory",
+                }
+            )
+        rows = self._conn.execute(
+            "SELECT COUNT(*) FROM connectors WHERE status='paused'"
+        ).fetchone()[0]
         if rows:
-            items.append({"kind": "connector_paused", "severity": "warn", "label": "连接器已暂停", "count": rows, "target_route": "/connectors"})
+            items.append(
+                {
+                    "kind": "connector_paused",
+                    "severity": "warn",
+                    "label": "连接器已暂停",
+                    "count": rows,
+                    "target_route": "/connectors",
+                }
+            )
         # Proactive dry-run 待复核
         rows = self._conn.execute(
             "SELECT COUNT(*) FROM proactive_decisions_v2 WHERE dry_run=1 AND decided_at >= ?",
             (self._now_ms() - 86400000,),
         ).fetchone()[0]
         if rows:
-            items.append({"kind": "dry_run_review", "severity": "info", "label": "dry-run 待复核", "count": rows, "target_route": "/proactive"})
+            items.append(
+                {
+                    "kind": "dry_run_review",
+                    "severity": "info",
+                    "label": "dry-run 待复核",
+                    "count": rows,
+                    "target_route": "/proactive",
+                }
+            )
         # Dead letter 事件
-        rows = self._conn.execute("SELECT COUNT(*) FROM outbox_events WHERE status='dead_letter'").fetchone()[0]
+        rows = self._conn.execute(
+            "SELECT COUNT(*) FROM outbox_events WHERE status='dead_letter'"
+        ).fetchone()[0]
         if rows:
-            items.append({"kind": "dead_letter", "severity": "danger", "label": "Dead Letter 事件", "count": rows, "target_route": "/connectors"})
+            items.append(
+                {
+                    "kind": "dead_letter",
+                    "severity": "danger",
+                    "label": "Dead Letter 事件",
+                    "count": rows,
+                    "target_route": "/connectors",
+                }
+            )
         return items
 
     def health_components(self) -> dict[str, Any]:
         """组件级健康检查：liveness + readiness 分级。"""
         from datetime import UTC, datetime
+
         now = datetime.now(UTC).isoformat()
         components: list[dict[str, Any]] = []
 
@@ -946,21 +1064,31 @@ class QueryService:
                 "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()"
             ).fetchone()[0]
             size_mb = db_size / (1024 * 1024)
-            components.append({"name": "SQLite", "status": "ok", "detail": f"连接正常 · {size_mb:.1f} MB"})
+            components.append(
+                {"name": "SQLite", "status": "ok", "detail": f"连接正常 · {size_mb:.1f} MB"}
+            )
         except Exception as e:
             components.append({"name": "SQLite", "status": "danger", "detail": str(e)})
 
         # ── Worker ──
-        components.append({"name": "Worker", "status": "ok", "detail": f"并发 {self._config.worker.concurrency}"})
+        components.append(
+            {"name": "Worker", "status": "ok", "detail": f"并发 {self._config.worker.concurrency}"}
+        )
 
         # ── Scheduler ──
         due_count = self._conn.execute(
-            "SELECT COUNT(*) FROM schedules WHERE enabled=1 AND next_fire_at IS NOT NULL AND next_fire_at <= ?",
+            "SELECT COUNT(*) FROM schedules WHERE enabled=1 "
+            "AND next_fire_at IS NOT NULL AND next_fire_at <= ?",
             (self._now_ms(),),
         ).fetchone()[0]
         sched_status = "ok" if due_count == 0 else "warn"
-        components.append({"name": "Scheduler", "status": sched_status,
-                           "detail": f"{'无' if due_count == 0 else due_count + ' 个'}待触发调度"})
+        components.append(
+            {
+                "name": "Scheduler",
+                "status": sched_status,
+                "detail": f"{'无' if due_count == 0 else due_count + ' 个'}待触发调度",
+            }
+        )
 
         # ── Gateway ──
         components.append({"name": "Gateway", "status": "warn", "detail": "LangBot 状态未知"})
@@ -968,8 +1096,13 @@ class QueryService:
         # ── Provider ──
         model = self._config.model.main.model or "(stub)"
         configured = self._config.model.main.is_configured()
-        components.append({"name": "Provider", "status": "ok" if configured else "warn",
-                           "detail": f"{model} {'已配置' if configured else '未配置'}"})
+        components.append(
+            {
+                "name": "Provider",
+                "status": "ok" if configured else "warn",
+                "detail": f"{model} {'已配置' if configured else '未配置'}",
+            }
+        )
 
         # ── Connector Freshness ──
         stale = self._conn.execute(
@@ -979,24 +1112,33 @@ class QueryService:
         ).fetchone()[0]
         total_conn = self._conn.execute("SELECT COUNT(*) FROM connectors").fetchone()[0]
         conn_status = "ok" if stale == 0 else "warn"
-        components.append({"name": "Connector", "status": conn_status,
-                           "detail": f"{total_conn} 个 · {stale} 个超 24h 未成功"})
+        components.append(
+            {
+                "name": "Connector",
+                "status": conn_status,
+                "detail": f"{total_conn} 个 · {stale} 个超 24h 未成功",
+            }
+        )
 
         # ── Delivery Backlog ──
         pending_del = self._conn.execute(
             "SELECT COUNT(*) FROM deliveries WHERE status IN ('pending','sending','scheduled')"
         ).fetchone()[0]
         del_status = "ok" if pending_del < 10 else ("warn" if pending_del < 50 else "danger")
-        components.append({"name": "Delivery", "status": del_status,
-                           "detail": f"{pending_del} 个待处理投递"})
+        components.append(
+            {"name": "Delivery", "status": del_status, "detail": f"{pending_del} 个待处理投递"}
+        )
 
         # ── Outbox Backlog ──
         outbox_pending = self._conn.execute(
             "SELECT COUNT(*) FROM outbox_events WHERE status='pending'"
         ).fetchone()[0]
-        outbox_status = "ok" if outbox_pending < 20 else ("warn" if outbox_pending < 100 else "danger")
-        components.append({"name": "Outbox", "status": outbox_status,
-                           "detail": f"{outbox_pending} 个待处理事件"})
+        outbox_status = (
+            "ok" if outbox_pending < 20 else ("warn" if outbox_pending < 100 else "danger")
+        )
+        components.append(
+            {"name": "Outbox", "status": outbox_status, "detail": f"{outbox_pending} 个待处理事件"}
+        )
 
         # Overall readiness 判定
         overall = "healthy"
@@ -1016,13 +1158,14 @@ class QueryService:
 
     def proactive_status(self) -> dict[str, Any]:
         """主动系统当前状态。"""
-        from datetime import UTC, datetime as _dt
+        from datetime import UTC
+        from datetime import datetime as _dt
+
         cfg = self._config
         now_ms = int(_dt.now(UTC).timestamp() * 1000)
         # 直接读 policy，避免 repo.get_current() 的 NOT NULL 约束问题
         row = self._conn.execute(
-            "SELECT * FROM proactive_policies WHERE principal_id=? "
-            "ORDER BY version DESC LIMIT 1",
+            "SELECT * FROM proactive_policies WHERE principal_id=? ORDER BY version DESC LIMIT 1",
             ("owner",),
         ).fetchone()
         if row is None:
@@ -1032,11 +1175,13 @@ class QueryService:
             version = row["version"]
             qh_json = row["quiet_hours_json"]
             import json
+
             bud = json.loads(row["budgets_json"] or "{}") if row["budgets_json"] else {}
             hourly = bud.get("max_pushes_per_hour", 3)
             daily = bud.get("max_pushes_per_day", 10)
         # quiet_hours 解析
         import json
+
         qh = json.loads(qh_json) if qh_json else {"enabled": True, "start": "23:00", "end": "08:00"}
         quiet_active = False
         if qh.get("enabled"):
@@ -1047,19 +1192,16 @@ class QueryService:
             except (ValueError, KeyError):
                 quiet_active = False
         energy_rows = self._conn.execute(
-            "SELECT energy_value FROM proactive_ticks "
-            "ORDER BY created_at DESC LIMIT 1"
+            "SELECT energy_value FROM proactive_ticks ORDER BY created_at DESC LIMIT 1"
         ).fetchone()
         energy_value = float(energy_rows[0]) if energy_rows else 0.0
         candidates_queued = self._candidate_repo.count_by_principal("owner", "queued")
         decisions_24h = self._conn.execute(
-            "SELECT COUNT(*) FROM proactive_decisions_v2 "
-            "WHERE decided_at >= ?",
+            "SELECT COUNT(*) FROM proactive_decisions_v2 WHERE decided_at >= ?",
             (now_ms - 86400000,),
         ).fetchone()[0]
         daily_used = self._conn.execute(
-            "SELECT COUNT(*) FROM proactive_decisions_v2 "
-            "WHERE dry_run=0 AND decided_at >= ?",
+            "SELECT COUNT(*) FROM proactive_decisions_v2 WHERE dry_run=0 AND decided_at >= ?",
             (now_ms - 86400000,),
         ).fetchone()[0]
         return {
@@ -1143,47 +1285,55 @@ class QueryService:
 
     def list_proactive_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT * FROM proactive_candidates "
-            "ORDER BY created_at DESC LIMIT ?",
+            "SELECT * FROM proactive_candidates ORDER BY created_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
-        return [{
-            **dict(r),
-            "source_type": r["origin"] or "connector",
-            "source_ref": r["source_payload_ref"] or "",
-            "relevance_score": float(r["relevance"] or 0),
-            "freshness_score": 1.0,
-            "novelty_score": float(r["novelty"] or 0),
-        } for r in rows]
+        return [
+            {
+                **dict(r),
+                "source_type": r["origin"] or "connector",
+                "source_ref": r["source_payload_ref"] or "",
+                "relevance_score": float(r["relevance"] or 0),
+                "freshness_score": 1.0,
+                "novelty_score": float(r["novelty"] or 0),
+            }
+            for r in rows
+        ]
 
     def list_proactive_decisions(self, limit: int = 50) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT * FROM proactive_decisions_v2 "
-            "ORDER BY decided_at DESC LIMIT ?",
+            "SELECT * FROM proactive_decisions_v2 ORDER BY decided_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
-        return [{
-            **dict(r),
-            "rule_trace": r["rule_results_json"] or "{}",
-        } for r in rows]
+        return [
+            {
+                **dict(r),
+                "rule_trace": r["rule_results_json"] or "{}",
+            }
+            for r in rows
+        ]
 
     def list_scheduled_requests(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT * FROM scheduled_delivery_requests "
-            "ORDER BY scheduled_at ASC LIMIT 100"
+            "SELECT * FROM scheduled_delivery_requests ORDER BY scheduled_at ASC LIMIT 100"
         ).fetchall()
         return [dict(r) for r in rows]
 
     def list_digests(self) -> list[dict[str, Any]]:
         rows = self._digest_repo.find_all("owner", limit=30)
-        return [d.to_dict() if hasattr(d, "to_dict") else {
-            "digest_id": d.digest_id,
-            "principal_id": d.principal_id,
-            "topic": getattr(d, "topic", "general"),
-            "digest_date": d.digest_date,
-            "item_count": d.item_count,
-            "status": d.status,
-        } for d in rows]
+        return [
+            d.to_dict()
+            if hasattr(d, "to_dict")
+            else {
+                "digest_id": d.digest_id,
+                "principal_id": d.principal_id,
+                "topic": getattr(d, "topic", "general"),
+                "digest_date": d.digest_date,
+                "item_count": d.item_count,
+                "status": d.status,
+            }
+            for d in rows
+        ]
 
     def proactive_feedback(self) -> dict[str, Any]:
         """PLAN-17 R6 DR-P1-06: 真值驱动 feedback 统计 (不再硬编码 0)。
@@ -1215,7 +1365,8 @@ class QueryService:
         try:
             # 表名以实际 schema 为准 (proactive_signals / feedback_signals)
             for row in self._conn.execute(
-                "SELECT payload_json FROM proactive_signals WHERE category IN ('feedback','proactive_feedback')"
+                "SELECT payload_json FROM proactive_signals "
+                "WHERE category IN ('feedback','proactive_feedback')"
             ).fetchall():
                 try:
                     p = __import__("json").loads(row[0] or "{}")
@@ -1278,8 +1429,7 @@ class QueryService:
             ).fetchone()[0],
         }
 
-    def list_drift_runs(self, principal_id: str = "owner",
-                        limit: int = 50) -> list[dict[str, Any]]:
+    def list_drift_runs(self, principal_id: str = "owner", limit: int = 50) -> list[dict[str, Any]]:
         rows = self._conn.execute(
             "SELECT drift_run_id, skill_name, skill_version, status, "
             "preemption_reason, steps_taken, budget_used_json, "
@@ -1290,8 +1440,10 @@ class QueryService:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def list_drift_skill_states(self, principal_id: str = "owner",
-                                ) -> list[dict[str, Any]]:
+    def list_drift_skill_states(
+        self,
+        principal_id: str = "owner",
+    ) -> list[dict[str, Any]]:
         rows = self._conn.execute(
             "SELECT skill_name, skill_version, last_status, last_run_at, "
             "run_count, checkpoint_ref "
@@ -1333,12 +1485,14 @@ class QueryService:
             "SELECT COUNT(*) FROM proactive_decisions_v2 WHERE action='unauthorized_tool_rejected'"
         ).fetchone()[0]
         duplicate_side_effect = self._conn.execute(
-            "SELECT COUNT(*) FROM drift_results WHERE result_kind IN ('duplicate_side_effect_suspect',)"
+            "SELECT COUNT(*) FROM drift_results "
+            "WHERE result_kind IN ('duplicate_side_effect_suspect',)"
         ).fetchone()[0]
         # admission_rate: 真实计算需要 admission/deny audit 表 (PLAN-17 R1 建议);
         # 暂时由完成率代替并明确标注 None 含义。
         return {
-            "admission_rate": None,  # Pending admission audit table (drift_admission_decisions); do not fabricate
+            # Pending drift_admission_decisions audit table; do not fabricate.
+            "admission_rate": None,
             "total_runs": total,
             "completion_rate": (completed / total) if total else 0.0,
             "no_value_rate": (no_value / total) if total else 0.0,
@@ -1346,7 +1500,8 @@ class QueryService:
             "paused_recovery_rate": (resumed / paused_total) if paused_total else 1.0,
             "duplicate_side_effect_count": duplicate_side_effect,
             "unauthorized_tool_execution_count": unauthorized,
-            "model_cost_per_useful_result": None,  # Pending model-call metering; 0.0 would conceal absence
+            # Pending model-call metering; 0.0 would conceal absence.
+            "model_cost_per_useful_result": None,
         }
 
     # ── outbox / events / dead letter ───────────────────────────
@@ -1367,7 +1522,8 @@ class QueryService:
 
     def list_dead_letter(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT * FROM outbox_events WHERE status='dead_letter' ORDER BY created_at DESC LIMIT 100"
+            "SELECT * FROM outbox_events WHERE status='dead_letter' "
+            "ORDER BY created_at DESC LIMIT 100"
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -1391,7 +1547,8 @@ class QueryService:
             a_dict = dict(a)
             # receipts for this attempt
             receipts = self._conn.execute(
-                "SELECT * FROM delivery_receipts WHERE delivery_attempt_id=? ORDER BY operation_seq ASC",
+                "SELECT * FROM delivery_receipts WHERE delivery_attempt_id=? "
+                "ORDER BY operation_seq ASC",
                 (a["attempt_id"],),
             ).fetchall()
             a_dict["receipts"] = [dict(r) for r in receipts]
@@ -1401,7 +1558,8 @@ class QueryService:
             elif a_dict["status"] == "failed":
                 # 从关联 model_calls 找 error_category
                 err = self._conn.execute(
-                    "SELECT error_category FROM model_calls WHERE attempt_id=? AND status='error' LIMIT 1",
+                    "SELECT error_category FROM model_calls "
+                    "WHERE attempt_id=? AND status='error' LIMIT 1",
                     (a["attempt_id"],),
                 ).fetchone()
                 a_dict["failure_reason"] = err["error_category"] if err else "unknown"
@@ -1425,6 +1583,7 @@ class QueryService:
     def get_proactive_context(self) -> dict[str, Any]:
         """读取当前 PROACTIVE_CONTEXT.md 内容 + 当前 policy 版本。"""
         from pathlib import Path
+
         workspace = Path(self._config.workspace_path)
         context_file = workspace / "PROACTIVE_CONTEXT.md"
         content = ""
@@ -1452,6 +1611,7 @@ class QueryService:
         """计算当前文件与新内容的 diff。"""
         import difflib
         from pathlib import Path
+
         workspace = Path(self._config.workspace_path)
         context_file = workspace / "PROACTIVE_CONTEXT.md"
         current = ""
@@ -1459,15 +1619,24 @@ class QueryService:
             current = context_file.read_text(encoding="utf-8")
         current_lines = current.splitlines(keepends=True)
         new_lines = new_content.splitlines(keepends=True)
-        diff = list(difflib.unified_diff(
-            current_lines, new_lines,
-            fromfile="current", tofile="proposed", lineterm="",
-        ))
+        diff = list(
+            difflib.unified_diff(
+                current_lines,
+                new_lines,
+                fromfile="current",
+                tofile="proposed",
+                lineterm="",
+            )
+        )
         return {
             "has_changes": current != new_content,
             "diff_lines": diff,
-            "added_lines": sum(1 for l in diff if l.startswith("+") and not l.startswith("+++")),
-            "removed_lines": sum(1 for l in diff if l.startswith("-") and not l.startswith("---")),
+            "added_lines": sum(
+                1 for line in diff if line.startswith("+") and not line.startswith("+++")
+            ),
+            "removed_lines": sum(
+                1 for line in diff if line.startswith("-") and not line.startswith("---")
+            ),
         }
 
     # ── connector detail ─────────────────────────────────────────
@@ -1504,15 +1673,13 @@ class QueryService:
         result["ingestion_stats"] = {r["status"]: r["n"] for r in stats}
         # items
         items = self._conn.execute(
-            "SELECT * FROM connector_items WHERE connector_id=? "
-            "ORDER BY created_at DESC LIMIT 100",
+            "SELECT * FROM connector_items WHERE connector_id=? ORDER BY created_at DESC LIMIT 100",
             (connector_id,),
         ).fetchall()
         result["items"] = [dict(r) for r in items]
         # outbox events
         events = self._conn.execute(
-            "SELECT * FROM outbox_events WHERE aggregate_id=? "
-            "ORDER BY created_at DESC LIMIT 50",
+            "SELECT * FROM outbox_events WHERE aggregate_id=? ORDER BY created_at DESC LIMIT 50",
             (connector_id,),
         ).fetchall()
         result["events"] = [dict(r) for r in events]
@@ -1520,7 +1687,9 @@ class QueryService:
 
     # ── audit ────────────────────────────────────────────────────
 
-    def list_audit(self, entity_id: str | None = None, action: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    def list_audit(
+        self, entity_id: str | None = None, action: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
         q = "SELECT * FROM audit_records WHERE 1=1"
         params: list[Any] = []
         if entity_id:
@@ -1537,7 +1706,9 @@ class QueryService:
     # ── capabilities / tool-calls / receipts / skills ────────────
 
     def list_capabilities(self) -> list[dict[str, Any]]:
-        rows = self._conn.execute("SELECT * FROM capabilities ORDER BY discovered_at DESC LIMIT 200").fetchall()
+        rows = self._conn.execute(
+            "SELECT * FROM capabilities ORDER BY discovered_at DESC LIMIT 200"
+        ).fetchall()
         return [dict(r) for r in rows]
 
     def list_skills(self) -> list[dict[str, Any]]:
@@ -1550,34 +1721,44 @@ class QueryService:
 
     def get_capability(self, capability_id: str) -> dict[str, Any] | None:
         row = self._conn.execute(
-            "SELECT * FROM capabilities WHERE capability_id=?", (capability_id,),
+            "SELECT * FROM capabilities WHERE capability_id=?",
+            (capability_id,),
         ).fetchone()
         return dict(row) if row else None
 
     def get_skill(self, name: str) -> dict[str, Any] | None:
         try:
             row = self._conn.execute(
-                "SELECT * FROM skills WHERE name=?", (name,),
+                "SELECT * FROM skills WHERE name=?",
+                (name,),
             ).fetchone()
             return dict(row) if row else None
         except Exception:
             return None
 
     def list_schedules(self, limit: int = 100) -> dict[str, Any]:
-        items = [schedule.to_dict() for schedule in self._schedule_repo.find_all(
-            max(1, min(limit, 100)),
-        )]
+        items = [
+            schedule.to_dict()
+            for schedule in self._schedule_repo.find_all(
+                max(1, min(limit, 100)),
+            )
+        ]
         return {"items": items, "total": len(items), "limit": min(limit, 100)}
 
     def list_schedules_for_principal(
-        self, principal_id: str, *, limit: int, offset: int,
+        self,
+        principal_id: str,
+        *,
+        limit: int,
+        offset: int,
     ) -> dict[str, Any]:
         where = (
             "task_type='agent.prompt' AND json_valid(task_payload)=1 "
             "AND json_extract(task_payload, '$.principal_id')=?"
         )
         total_row = self._conn.execute(
-            f"SELECT COUNT(*) FROM schedules WHERE {where}", (principal_id,),
+            f"SELECT COUNT(*) FROM schedules WHERE {where}",
+            (principal_id,),
         ).fetchone()
         rows = self._conn.execute(
             f"SELECT schedule_id FROM schedules WHERE {where} "
@@ -1587,14 +1768,16 @@ class QueryService:
         repo = self._schedule_repo
         items = [repo.get(str(row["schedule_id"])) for row in rows]
         return {
-            "items": [
-                _public_schedule(item.to_dict()) for item in items if item is not None
-            ],
+            "items": [_public_schedule(item.to_dict()) for item in items if item is not None],
             "total": int(total_row[0]) if total_row else 0,
         }
 
     def search_knowledge(
-        self, query: str, *, principal_id: str = "owner", limit: int = 20,
+        self,
+        query: str,
+        *,
+        principal_id: str = "owner",
+        limit: int = 20,
     ) -> dict[str, Any]:
         """Safe lexical search over inline knowledge segments."""
         escaped = query.replace("%", "\\%").replace("_", "\\_")
@@ -1630,12 +1813,12 @@ class QueryService:
         )
         params = (principal_id, f"%{escaped}%")
         total_row = self._conn.execute(
-            "SELECT COUNT(*)" + joins + where, params,
+            "SELECT COUNT(*)" + joins + where,
+            params,
         ).fetchone()
         rows = self._conn.execute(
             "SELECT s.segment_id,s.document_id,s.heading_path,s.text_ref_or_inline,"
-            "r.trust_label" + joins + where
-            + " ORDER BY s.document_id,s.ordinal LIMIT ? OFFSET ?",
+            "r.trust_label" + joins + where + " ORDER BY s.document_id,s.ordinal LIMIT ? OFFSET ?",
             (*params, max(1, min(limit, 100)), max(0, offset)),
         ).fetchall()
         return {
@@ -1645,13 +1828,15 @@ class QueryService:
 
     def list_tool_calls(self, limit: int = 50) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT * FROM tool_calls ORDER BY started_at DESC LIMIT ?", (limit,),
+            "SELECT * FROM tool_calls ORDER BY started_at DESC LIMIT ?",
+            (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
 
     def list_receipts(self, limit: int = 50) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT * FROM side_effect_receipts ORDER BY created_at DESC LIMIT ?", (limit,),
+            "SELECT * FROM side_effect_receipts ORDER BY created_at DESC LIMIT ?",
+            (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -1663,6 +1848,7 @@ class QueryService:
     def storage_summary(self) -> dict[str, Any]:
         """SQLite + Payload 存储统计。"""
         from pathlib import Path
+
         db_path = self._config.resolve_db_path()
         payload_dir = self._config.resolve_payload_dir()
         db_size = Path(db_path).stat().st_size / (1024 * 1024) if Path(db_path).exists() else 0.0
@@ -1690,88 +1876,108 @@ class QueryService:
             "payload_size_mb": round(payload_size, 2),
             "object_count": objects,
             "orphan_count": orphans,
-            "backup_count": self._conn.execute("SELECT COUNT(*) FROM scheduled_delivery_request").fetchone()[0] if False else 0,
+            "backup_count": self._conn.execute(
+                "SELECT COUNT(*) FROM scheduled_delivery_request"
+            ).fetchone()[0]
+            if False
+            else 0,
             "latest_backup_at": None,
             "latest_restore_drill_at": None,
         }
 
     def list_backups(self) -> list[dict[str, Any]]:
         """备份记录（来自 backups 表）。"""
-        rows = self._conn.execute("SELECT * FROM backups ORDER BY created_at DESC LIMIT 100").fetchall()
+        rows = self._conn.execute(
+            "SELECT * FROM backups ORDER BY created_at DESC LIMIT 100"
+        ).fetchall()
         return [dict(r) for r in rows]
 
     def list_config_versions(self) -> list[dict[str, Any]]:
         latest = self._config_version_repo.latest()
         if latest is None:
             from datetime import UTC, datetime
-            return [{
-                "version_id": "current",
-                "config_version": self._config.config_version,
-                "content_hash": self._config.content_hash or "—",
-                "active": True,
-                "created_at": datetime.now(UTC).isoformat(),
-                "source_layers": ["config.toml"],
-            }]
-        return [{
-            "version_id": latest.version_id,
-            "config_version": str(latest.applied_at),
-            "content_hash": latest.content_hash,
-            "active": True,
-            "created_at": latest.applied_at,
-            "source_layers": latest.source_layers,
-        }]
 
+            return [
+                {
+                    "version_id": "current",
+                    "config_version": self._config.config_version,
+                    "content_hash": self._config.content_hash or "—",
+                    "active": True,
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "source_layers": ["config.toml"],
+                }
+            ]
+        return [
+            {
+                "version_id": latest.version_id,
+                "config_version": str(latest.applied_at),
+                "content_hash": latest.content_hash,
+                "active": True,
+                "created_at": latest.applied_at,
+                "source_layers": latest.source_layers,
+            }
+        ]
 
     # ── Knowledge 查询（PLAN-14 R-14）──────────────────────────
 
-    def list_knowledge_resources(self, *, principal_id: str = "owner",
-                                  limit: int = 50, status_filter: str = "") -> list[dict]:
+    def list_knowledge_resources(
+        self, *, principal_id: str = "owner", limit: int = 50, status_filter: str = ""
+    ) -> list[dict]:
         """列出知识资源摘要。"""
         from cogito.service.explain import ExplainService
+
         return ExplainService(self._conn).list_knowledge_resources(
-            principal_id=principal_id, limit=limit, status_filter=status_filter,
+            principal_id=principal_id,
+            limit=limit,
+            status_filter=status_filter,
         )
 
     def get_knowledge_resource(self, resource_id: str) -> dict | None:
         """获取单资源详情 + 段统计。"""
         from cogito.service.explain import ExplainService
+
         return ExplainService(self._conn).get_knowledge_resource(resource_id)
 
     def explain_knowledge_retrieval(self, resource_id: str) -> dict | None:
         """解释资源是否可检索、检索路径覆盖。"""
         from cogito.service.explain import ExplainService
+
         return ExplainService(self._conn).explain_knowledge_retrieval(resource_id)
 
     def explain_memory_weight(self, memory_id: str) -> dict | None:
         """解释记忆权重分项（PLAN-13 Enable 后暴露）。"""
         from cogito.service.explain import ExplainService
+
         return ExplainService(self._conn).explain_memory_weight(memory_id)
 
     def list_memory_sources(self, memory_id: str) -> list[dict]:
         """列出记忆来源集合。"""
         from cogito.service.explain import ExplainService
+
         return ExplainService(self._conn).list_memory_sources(memory_id)
 
     def get_memory_detail(self, memory_id: str) -> dict | None:
         """获取记忆详情安全摘要。"""
         from cogito.service.explain import ExplainService
+
         return ExplainService(self._conn).get_memory_detail(memory_id)
 
     # ── PLAN-16 M7 OPS-04: Memory/Knowledge 专项指标 ───────────
 
     def cognition_metrics(self) -> dict[str, Any]:
         """Memory/Knowledge 专项运行指标（PLAN-16 M7 OPS-04 完整）。"""
-        from cogito.service.cognition_metrics_service import CognitionMetricsService
         # PLAN-16 完整：通过 metrics_access registry 读取真实注入的计数器
         from cogito.infrastructure.metrics_access import get_cognition_metrics
-        return CognitionMetricsService(
-            self._conn, metrics=get_cognition_metrics()).snapshot()
+        from cogito.service.cognition_metrics_service import CognitionMetricsService
+
+        return CognitionMetricsService(self._conn, metrics=get_cognition_metrics()).snapshot()
 
     # ── Context Snapshot 查询（PLAN-16 M7 OPS-03）──────────────
 
     def get_context_snapshot(self, snapshot_id: str) -> dict | None:
         """返回某次 Turn 构建的上下文快照（含 items / 来源 / 分数 / 排除统计）。"""
         from cogito.store.context_snapshot_repo import ContextSnapshotRepository
+
         record = ContextSnapshotRepository(self._conn).get(snapshot_id)
         if record is None:
             return None
@@ -1844,15 +2050,24 @@ class QueryService:
 
 def _public_task(value: dict[str, Any]) -> dict[str, Any]:
     keys = (
-        "task_id", "task_type", "status", "priority", "scheduled_at",
-        "origin", "created_at",
+        "task_id",
+        "task_type",
+        "status",
+        "priority",
+        "scheduled_at",
+        "origin",
+        "created_at",
     )
     return {key: value.get(key) for key in keys}
 
 
 def _public_task_attempt(value: dict[str, Any]) -> dict[str, Any]:
     keys = (
-        "task_attempt_id", "task_id", "attempt_no", "status", "started_at",
+        "task_attempt_id",
+        "task_id",
+        "attempt_no",
+        "status",
+        "started_at",
         "finished_at",
     )
     return {key: value.get(key) for key in keys}
@@ -1860,8 +2075,15 @@ def _public_task_attempt(value: dict[str, Any]) -> dict[str, Any]:
 
 def _public_schedule(value: dict[str, Any]) -> dict[str, Any]:
     keys = (
-        "schedule_id", "schedule_type", "expression", "timezone", "enabled",
-        "next_fire_at", "last_fire_at", "version", "created_at",
+        "schedule_id",
+        "schedule_type",
+        "expression",
+        "timezone",
+        "enabled",
+        "next_fire_at",
+        "last_fire_at",
+        "version",
+        "created_at",
     )
     return {key: value.get(key) for key in keys}
 

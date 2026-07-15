@@ -1,4 +1,5 @@
 """P13-15 PoC 对比框架单元测试。"""
+
 from __future__ import annotations
 
 import sys
@@ -30,6 +31,7 @@ class TestDataset:
     def test_no_real_pii(self):
         """无明显真实 PII（电话号码、邮箱等）。"""
         import re
+
         docs = generate_dataset()
         for d in docs:
             # 无邮箱
@@ -69,16 +71,22 @@ class TestMetrics:
 
     def test_traceability_all(self):
         class B:
-            def segment_provenance(self, sid): return f"p-{sid}"
+            def segment_provenance(self, sid):
+                return f"p-{sid}"
+
         assert source_traceability_rate(B(), ["s1", "s2"]) == 1.0
 
     def test_traceability_none(self):
         class B:
-            def segment_provenance(self, sid): return None
+            def segment_provenance(self, sid):
+                return None
+
         assert source_traceability_rate(B(), ["s1"]) == 0.0
 
     def test_latency_returns_p50_p95(self):
-        def fn(q, k): return [("a", 1.0)]
+        def fn(q, k):
+            return [("a", 1.0)]
+
         result = retrieval_latency(fn, "q", repeats=5)
         assert "p50" in result and "p95" in result
         assert result["p50"] >= 0
@@ -87,6 +95,7 @@ class TestMetrics:
 class TestCogitoBackend:
     def test_ingest_retrieve_invalidate(self):
         from scripts.poc_memu.cogito_backend import CogitoBackend
+
         backend = CogitoBackend()
         try:
             segs = backend.ingest("test_doc", "# Hello\n\nWorld content.")
@@ -110,6 +119,7 @@ class TestCogitoBackend:
     def test_idempotent_ingest(self):
         """同 doc_id 重复 ingest 不产生重复段落地。"""
         from scripts.poc_memu.cogito_backend import CogitoBackend
+
         backend = CogitoBackend()
         try:
             segs1 = backend.ingest("idem_doc", "# Title\n\nContent A.")

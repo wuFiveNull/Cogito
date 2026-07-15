@@ -22,7 +22,8 @@ class ScheduleRepository:
 
     def get(self, schedule_id: str) -> Schedule | None:
         row = self._conn.execute(
-            "SELECT * FROM schedules WHERE schedule_id=?", (schedule_id,),
+            "SELECT * FROM schedules WHERE schedule_id=?",
+            (schedule_id,),
         ).fetchone()
         return self._row_to_schedule(row) if row else None
 
@@ -65,6 +66,7 @@ class ScheduleRepository:
     def _compute_interval(expression: str) -> int | None:
         """从 expression 估算触发间隔（秒）。"""
         from cogito.domain.schedule import parse_duration
+
         delta = parse_duration(expression.strip())
         if delta is not None:
             return int(delta.total_seconds())
@@ -83,7 +85,8 @@ class ScheduleRepository:
 
     def find_all(self, limit: int = 100) -> list[Schedule]:
         rows = self._conn.execute(
-            "SELECT * FROM schedules ORDER BY created_at ASC LIMIT ?", (limit,),
+            "SELECT * FROM schedules ORDER BY created_at ASC LIMIT ?",
+            (limit,),
         ).fetchall()
         return [self._row_to_schedule(r) for r in rows]
 
@@ -133,12 +136,14 @@ class ScheduleRepository:
         )
 
     def update_enabled_expected(
-        self, schedule_id: str, enabled: bool, expected_version: int,
+        self,
+        schedule_id: str,
+        enabled: bool,
+        expected_version: int,
     ) -> bool:
         """Update enabled atomically under the caller's observed version."""
         cursor = self._conn.execute(
-            "UPDATE schedules SET enabled=?, version=version+1 "
-            "WHERE schedule_id=? AND version=?",
+            "UPDATE schedules SET enabled=?, version=version+1 WHERE schedule_id=? AND version=?",
             (1 if enabled else 0, schedule_id, expected_version),
         )
         return cursor.rowcount > 0
@@ -150,8 +155,7 @@ class ScheduledFireRepository:
 
     def find(self, schedule_id: str, scheduled_fire_at: datetime) -> ScheduledFire | None:
         row = self._conn.execute(
-            "SELECT * FROM scheduled_fires "
-            "WHERE schedule_id=? AND scheduled_fire_at=?",
+            "SELECT * FROM scheduled_fires WHERE schedule_id=? AND scheduled_fire_at=?",
             (schedule_id, epoch_ms(scheduled_fire_at)),
         ).fetchone()
         return self._row_to_fire(row) if row else None
@@ -172,7 +176,10 @@ class ScheduledFireRepository:
         )
 
     def update_status(
-        self, fire_id: str, status: FireStatus, task_id: str | None = None,
+        self,
+        fire_id: str,
+        status: FireStatus,
+        task_id: str | None = None,
     ) -> None:
         if task_id is not None:
             self._conn.execute(

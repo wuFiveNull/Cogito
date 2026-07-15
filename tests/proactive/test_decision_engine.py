@@ -12,6 +12,7 @@
 - alert 快速通道
 - 正常 send_now 通过
 """
+
 from __future__ import annotations
 
 import pytest
@@ -23,8 +24,11 @@ from cogito.store.proactive_repo import ProactiveCandidate, ProactivePolicy
 
 def _policy(**over) -> ProactivePolicy:
     base = dict(
-        policy_id="p1", principal_id="owner", version=1,
-        allow_topics=(), deny_topics=("spam",),
+        policy_id="p1",
+        principal_id="owner",
+        version=1,
+        allow_topics=(),
+        deny_topics=("spam",),
         quiet_hours={"enabled": False},
         cooldown_minutes_same_topic=360,
         max_pushes_per_hour=3,
@@ -39,11 +43,19 @@ def _policy(**over) -> ProactivePolicy:
 
 def _candidate(**over) -> ProactiveCandidate:
     base = dict(
-        candidate_id="c1", principal_id="owner",
-        stream_type="content", topic="ai-models",
-        summary="test", novelty=0.7, relevance=0.8, urgency=0.6,
-        confidence=0.8, policy_version=1, idempotency_key="k1",
-        created_at=0, status="queued",
+        candidate_id="c1",
+        principal_id="owner",
+        stream_type="content",
+        topic="ai-models",
+        summary="test",
+        novelty=0.7,
+        relevance=0.8,
+        urgency=0.6,
+        confidence=0.8,
+        policy_version=1,
+        idempotency_key="k1",
+        created_at=0,
+        status="queued",
     )
     base.update(over)
     return ProactiveCandidate(**base)
@@ -80,6 +92,7 @@ def test_relevance_too_low_digest():
 
 def test_quiet_hours_defers_to_send_later():
     from datetime import datetime, UTC
+
     p = _policy(quiet_hours={"enabled": True, "start": "00:00", "end": "23:59"})
     c = _candidate()
     # 任意 now 都在 quiet hours
@@ -89,6 +102,7 @@ def test_quiet_hours_defers_to_send_later():
 
 def test_cooldown_defers_to_send_later():
     import time
+
     p = _policy(quiet_hours={"enabled": False}, cooldown_minutes_same_topic=360)
     c = _candidate(topic="ai")
     recent_sent_ms = int(time.time() * 1000) - 60 * 1000
@@ -146,6 +160,7 @@ def test_alert_respects_quiet_hours_by_default():
     p = _policy(quiet_hours={"enabled": True, "start": "00:00", "end": "23:59"})
     c = _candidate(stream_type="alert")
     from datetime import datetime, UTC
+
     action, _ = decide(c, p, now=datetime(2026, 7, 7, 12, 0, tzinfo=UTC))
     assert action == "send_later"
 
@@ -154,6 +169,7 @@ def test_critical_alert_explicitly_bypasses_quiet_hours():
     p = _policy(quiet_hours={"enabled": True, "start": "00:00", "end": "23:59"})
     c = _candidate(stream_type="alert", critical_override=True)
     from datetime import datetime, UTC
+
     action, trace = decide(c, p, now=datetime(2026, 7, 7, 12, 0, tzinfo=UTC))
     assert action == "send_now"
     assert any(item.rule == "critical_override" for item in trace)
@@ -164,12 +180,14 @@ def test_critical_alert_explicitly_bypasses_quiet_hours():
 
 def test_energy_now_max():
     from datetime import datetime, UTC, timedelta
+
     now = datetime.now(UTC)
     assert compute_energy(now) == pytest.approx(1.0, abs=1e-6)
 
 
 def test_energy_1h_half():
     from datetime import datetime, UTC, timedelta
+
     now = datetime(2026, 7, 7, 13, 0, tzinfo=UTC)
     lut = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
     e = compute_energy(lut, now=now)
@@ -193,6 +211,7 @@ def test_energy_band():
 def test_quiet_hours_overnight_quiet():
     """跨午夜 quiet hours (23:00-08:00)：00:30 静默。"""
     from datetime import datetime, UTC
+
     p = _policy(quiet_hours={"enabled": True, "start": "23:00", "end": "08:00", "timezone": "UTC"})
     c = _candidate()
     action, _ = decide(c, p, now=datetime(2026, 7, 8, 0, 30, tzinfo=UTC))
@@ -202,6 +221,7 @@ def test_quiet_hours_overnight_quiet():
 def test_quiet_hours_overnight_not_quiet():
     """跨午夜 quiet hours：12:00 不静默。"""
     from datetime import datetime, UTC
+
     p = _policy(quiet_hours={"enabled": True, "start": "23:00", "end": "08:00", "timezone": "UTC"})
     c = _candidate(novelty=0.7, relevance=0.85, urgency=0.8)
     action, _ = decide(c, p, now=datetime(2026, 7, 8, 12, 0, tzinfo=UTC))

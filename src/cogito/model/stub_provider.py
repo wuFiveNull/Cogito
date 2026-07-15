@@ -76,9 +76,7 @@ class StubModelProvider(ModelProvider):
         if scenario.error:
             raise ModelProviderError(scenario.error)
 
-        parts = (
-            ContentPart(part_type="text", text=scenario.response_text),
-        )
+        parts = (ContentPart(part_type="text", text=scenario.response_text),)
 
         # 工具调用
         tool_calls = ()

@@ -16,6 +16,7 @@ require approval / external wait
 → validate old receipts/config/snapshot
 → resume from deterministic checkpoint
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -26,12 +27,13 @@ from typing import Any
 
 class RecoveryDecision(StrEnum):
     """恢复决策 —— 恢复决策器输出的权威结论。"""
-    resume = "resume"              # 从 checkpoint 续跑
-    retry = "retry"                # 新建 Attempt 重试
-    reconcile = "reconcile"        # unknown 副作用必须先对账
+
+    resume = "resume"  # 从 checkpoint 续跑
+    retry = "retry"  # 新建 Attempt 重试
+    reconcile = "reconcile"  # unknown 副作用必须先对账
     waiting_user = "waiting_user"  # 等审批/用户响应
     manual_review = "manual_review"  # 需人工介入
-    fail = "fail"                  # 不可恢复，标记失败
+    fail = "fail"  # 不可恢复，标记失败
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,7 @@ class Checkpoint:
     仅序列化纯数据值，不序列化 Provider SDK、数据库连接、Coroutine 或
     Python 栈（执行器/连接由 attempt_id 运行时解析）。
     """
+
     checkpoint_id: str = ""
     turn_id: str = ""
     attempt_id: str = ""
@@ -94,6 +97,7 @@ class Checkpoint:
 @dataclass(frozen=True)
 class RecoveryEvidence:
     """恢复决策的证据记录 —— 每次恢复追踪：父 Attempt、原因、决策证据。"""
+
     decision: RecoveryDecision
     parent_attempt_id: str
     reason_code: str
@@ -115,8 +119,9 @@ class RecoveryAdvisor:
     7. 配置不兼容 → manual_review
     """
 
-    def __init__(self, config_version: str = "1.0",
-                 capability_snapshot_version: str = "1.0") -> None:
+    def __init__(
+        self, config_version: str = "1.0", capability_snapshot_version: str = "1.0"
+    ) -> None:
         self._config_version = config_version
         self._capability_snapshot_version = capability_snapshot_version
 
@@ -142,10 +147,7 @@ class RecoveryAdvisor:
 
         # 2. side_effect_unknown 必须先 reconcile
         if checkpoint:
-            unknown_tools = [
-                tc for tc in checkpoint.tool_calls
-                if tc.get("status") == "unknown"
-            ]
+            unknown_tools = [tc for tc in checkpoint.tool_calls if tc.get("status") == "unknown"]
             if unknown_tools:
                 return RecoveryEvidence(
                     decision=RecoveryDecision.reconcile,
@@ -175,7 +177,7 @@ class RecoveryAdvisor:
 
         # 4+5. Lease 状态判断
         lease_expires = getattr(attempt, "lease_expires_at", None)
-        is_expired = (lease_expires is not None and now >= lease_expires)
+        is_expired = lease_expires is not None and now >= lease_expires
 
         if is_expired or getattr(attempt, "status", "") in ("failed", "cancelled", "abandoned"):
             if checkpoint and checkpoint.checkpoint_id:
@@ -215,8 +217,7 @@ class RecoveryAdvisor:
     def _check_compatibility(self, checkpoint: Checkpoint) -> _CompatResult:
         """验证取消状态、Receipt、配置兼容、Provider/Tool 能力和预算。"""
         # 配置版本兼容
-        if (checkpoint.config_version
-                and checkpoint.config_version != self._config_version):
+        if checkpoint.config_version and checkpoint.config_version != self._config_version:
             return _CompatResult(
                 ok=False,
                 reason_code="config_version_mismatch",
@@ -224,12 +225,16 @@ class RecoveryAdvisor:
                     f"checkpoint config_version={checkpoint.config_version!r} "
                     f"!= runtime={self._config_version!r}"
                 ),
-                evidence={"checkpoint_config": checkpoint.config_version,
-                          "runtime_config": self._config_version},
+                evidence={
+                    "checkpoint_config": checkpoint.config_version,
+                    "runtime_config": self._config_version,
+                },
             )
         # 能力快照兼容
-        if (checkpoint.capability_snapshot_version
-                and checkpoint.capability_snapshot_version != self._capability_snapshot_version):
+        if (
+            checkpoint.capability_snapshot_version
+            and checkpoint.capability_snapshot_version != self._capability_snapshot_version
+        ):
             return _CompatResult(
                 ok=False,
                 reason_code="capability_snapshot_mismatch",
@@ -237,8 +242,10 @@ class RecoveryAdvisor:
                     f"checkpoint capability_version={checkpoint.capability_snapshot_version!r} "
                     f"!= runtime={self._capability_snapshot_version!r}"
                 ),
-                evidence={"checkpoint_capability": checkpoint.capability_snapshot_version,
-                          "runtime_capability": self._capability_snapshot_version},
+                evidence={
+                    "checkpoint_capability": checkpoint.capability_snapshot_version,
+                    "runtime_capability": self._capability_snapshot_version,
+                },
             )
         return _CompatResult(ok=True, reason_code="", reason_detail="", evidence={})
 

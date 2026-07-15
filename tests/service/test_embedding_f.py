@@ -39,8 +39,10 @@ class TestEmbeddingConfig:
 
     def test_configured(self):
         cfg = EmbeddingConfig(
-            enabled=True, model="text-embedding-3-small",
-            api_key="sk-test", base_url="https://api.example.com/v1",
+            enabled=True,
+            model="text-embedding-3-small",
+            api_key="sk-test",
+            base_url="https://api.example.com/v1",
         )
         assert cfg.is_configured() is True
 

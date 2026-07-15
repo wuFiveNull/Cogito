@@ -4,6 +4,7 @@ The host imports and resolves the declared entry point, emits a single ready
 record, and then waits for a stop command.  Runtime RPC can be layered on this
 framed control channel without granting plugins access to Core internals.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -41,11 +42,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         _resolve_entry_point(args.entry_point)
     except Exception as exc:
-        print(json.dumps({
-            "status": "error",
-            "plugin_id": args.plugin_id,
-            "error_code": type(exc).__name__,
-        }), flush=True)
+        print(
+            json.dumps(
+                {
+                    "status": "error",
+                    "plugin_id": args.plugin_id,
+                    "error_code": type(exc).__name__,
+                }
+            ),
+            flush=True,
+        )
         return 2
 
     print(json.dumps({"status": "ready", "plugin_id": args.plugin_id}), flush=True)

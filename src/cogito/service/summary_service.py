@@ -64,6 +64,7 @@ async def summarize_item(
         _LOGGER.warning("summarize_item model call failed: %s", e)
         return text[:max_chars]
 
+
 # 摘要模型输出格式
 SUMMARY_OUTPUT_SCHEMA = {
     "type": "object",
@@ -125,13 +126,15 @@ class SummaryService:
                 content = existing_summary.get("content", {})
                 covers_to = existing_summary.get("covers_to_seq", "?")
                 content_str = json.dumps(content, ensure_ascii=False, indent=2)
-                messages.append({
-                    "role": "system",
-                    "content": (
-                        f"Existing session summary (covers up to sequence {covers_to}):\n"
-                        f"{content_str}"
-                    ),
-                })
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            f"Existing session summary (covers up to sequence {covers_to}):\n"
+                            f"{content_str}"
+                        ),
+                    }
+                )
 
             rows = conn.execute(
                 "SELECT m.role, cp.inline_data, m.receive_sequence "
@@ -155,10 +158,14 @@ class SummaryService:
                     seq_texts[seq] += "\n" + (r["inline_data"] or "")
 
             for seq in sorted(seq_texts):
-                messages.append({
-                    "role": seq_roles[seq] if seq_roles[seq] in {"user", "assistant"} else "user",
-                    "content": seq_texts[seq],
-                })
+                messages.append(
+                    {
+                        "role": seq_roles[seq]
+                        if seq_roles[seq] in {"user", "assistant"}
+                        else "user",
+                        "content": seq_texts[seq],
+                    }
+                )
 
             return messages
         finally:
@@ -206,21 +213,29 @@ class SummaryService:
             if not self._model_router:
                 # 无模型时生成基本摘要
                 content = self._build_fallback_summary(
-                    conn, session_id, from_sequence, to_sequence,
+                    conn,
+                    session_id,
+                    from_sequence,
+                    to_sequence,
                 )
             else:
                 messages = self.build_messages_for_summary(
-                    session_id, from_sequence, to_sequence,
+                    session_id,
+                    from_sequence,
+                    to_sequence,
                     existing_summary=parent_content,
                 )
                 if not messages:
                     return None
 
                 # 添加系统提示
-                messages.insert(0, {
-                    "role": "system",
-                    "content": SUMMARY_SYSTEM_PROMPT,
-                })
+                messages.insert(
+                    0,
+                    {
+                        "role": "system",
+                        "content": SUMMARY_SYSTEM_PROMPT,
+                    },
+                )
 
                 # 调用模型
                 try:
@@ -228,13 +243,17 @@ class SummaryService:
 
                     request = ModelRequest(messages=messages, response_format="json")
                     response = self._model_router.generate(
-                        request, model_role=self._model_role,
+                        request,
+                        model_role=self._model_role,
                     )
                     content = self._parse_model_output(response.text)
                 except Exception as e:
                     _LOGGER.warning("Summary model call failed: %s", e)
                     content = self._build_fallback_summary(
-                        conn, session_id, from_sequence, to_sequence,
+                        conn,
+                        session_id,
+                        from_sequence,
+                        to_sequence,
                     )
 
             if not content:
@@ -258,11 +277,16 @@ class SummaryService:
                     "  WHERE session_id=?), "
                     " ?, '', ?, 'active', ?, ?, ?)",
                     (
-                        summary_id, session_id, from_sequence, to_sequence,
+                        summary_id,
+                        session_id,
+                        from_sequence,
+                        to_sequence,
                         session_id,
                         json.dumps(content, ensure_ascii=False),
                         self._prompt_version,
-                        parent_summary_id, input_hash, now,
+                        parent_summary_id,
+                        input_hash,
+                        now,
                     ),
                 )
 
@@ -332,6 +356,7 @@ class SummaryService:
             return None
         # 尝试提取 JSON
         import re
+
         json_match = re.search(r"\{.*\}", text, re.DOTALL)
         if json_match:
             try:
@@ -344,7 +369,8 @@ class SummaryService:
 
     @staticmethod
     def get_active_summary(
-        conn: sqlite3.Connection, session_id: str,
+        conn: sqlite3.Connection,
+        session_id: str,
     ) -> dict | None:
         """获取 session 的最新 active 摘要。"""
         row = conn.execute(

@@ -6,6 +6,7 @@ These tests verify the most critical crash-recovery invariants:
   - confirmed Memory survives a restart reconcile (no resurrection of deleted);
   - an unknown side_effect is NOT auto-retried blindly.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -29,6 +30,7 @@ def db() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     # Use the migration runner so schema matches production exactly.
     from cogito.store.migration import migrate
+
     migrate(conn)
     return conn
 
@@ -44,7 +46,10 @@ def test_confirmed_memory_not_resurrected_after_delete(db: sqlite3.Connection) -
 
     svc = SqliteMemoryService(conn=db)
     item = svc.remember(
-        kind="fact", subject="s", predicate="p", value="v",
+        kind="fact",
+        subject="s",
+        predicate="p",
+        value="v",
         principal_id="owner",
     )
     assert item.status == MemoryStatus.confirmed

@@ -43,8 +43,7 @@ class CheckpointRepository:
         self._conn.execute(
             "INSERT INTO turn_checkpoints (checkpoint_id, turn_id, data, created_at) "
             "VALUES (?, ?, ?, ?)",
-            (ck_id, turn_id, json.dumps(data, ensure_ascii=False),
-             datetime.now(UTC).isoformat()),
+            (ck_id, turn_id, json.dumps(data, ensure_ascii=False), datetime.now(UTC).isoformat()),
         )
         return ck_id
 
@@ -66,8 +65,7 @@ class CheckpointRepository:
     def load_latest(self, turn_id: str) -> dict[str, Any] | None:
         """加载最新 checkpoint（按 created_at 降序）。"""
         row = self._conn.execute(
-            "SELECT data FROM turn_checkpoints "
-            "WHERE turn_id=? ORDER BY created_at DESC LIMIT 1",
+            "SELECT data FROM turn_checkpoints WHERE turn_id=? ORDER BY created_at DESC LIMIT 1",
             (turn_id,),
         ).fetchone()
         if row is None:

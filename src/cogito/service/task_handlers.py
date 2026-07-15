@@ -34,6 +34,7 @@ _LOGGER = logging.getLogger(__name__)
 @dataclass
 class MemoryExtractionPayload:
     """memory.extract Task 的固定载荷结构。"""
+
     conversation_id: str = ""
     session_id: str = ""
     principal_id: str = ""
@@ -55,6 +56,7 @@ class MemoryExtractionPayload:
 @dataclass
 class SummaryPayload:
     """summary.generate Task 的固定载荷结构。"""
+
     conversation_id: str = ""
     session_id: str = ""
     principal_id: str = ""
@@ -73,8 +75,14 @@ class SummaryPayload:
             return cls()
 
 
-def make_idempotency_key(task_type: str, conversation_id: str, session_id: str,
-                         from_seq: int, to_seq: int, prompt_version: str) -> str:
+def make_idempotency_key(
+    task_type: str,
+    conversation_id: str,
+    session_id: str,
+    from_seq: int,
+    to_seq: int,
+    prompt_version: str,
+) -> str:
     """构建幂等键。"""
     return f"{task_type}:{conversation_id}:{session_id}:{from_seq}:{to_seq}:{prompt_version}"
 
@@ -89,6 +97,7 @@ class TaskHandlerContext:
     Handler 通过此上下文访问所有需要的依赖，
     不直接持有长期数据库连接或模型 Provider 实例。
     """
+
     connection_factory: Callable[[], sqlite3.Connection] | None = None
     model_router: Any = None  # ModelRouter
     vision_service_factory: Callable[[], Any] | None = None
@@ -116,6 +125,8 @@ class TaskHandlerContext:
     capability_registry: Any = None
     tool_executor: Any = None
     parent_toolsets: set[str] = field(default_factory=set)
+    # Cooperative cancellation for synchronous handlers running in a worker thread.
+    shutdown_requested: Callable[[], bool] | None = None
 
     def declare_memory_dependencies(self, memory_ids: list[str]) -> None:
         """声明本 Task 使用并强化的记忆（PLAN-16 M3 MEM-01）。
@@ -184,11 +195,14 @@ def _build_registry(ctx: TaskHandlerContext) -> TaskHandlerRegistry:
 
 
 async def _handle_agent_delegate(
-    task: Task, ctx: TaskHandlerContext,
+    task: Task,
+    ctx: TaskHandlerContext,
 ) -> str | TaskHandlerWait:
     if (
-        ctx.connection_factory is None or ctx.model_router is None
-        or ctx.capability_registry is None or ctx.tool_executor is None
+        ctx.connection_factory is None
+        or ctx.model_router is None
+        or ctx.capability_registry is None
+        or ctx.tool_executor is None
     ):
         raise RuntimeError("agent.delegate runtime is not configured")
     try:
@@ -203,7 +217,8 @@ async def _handle_agent_delegate(
     conn = ctx.connection_factory()
     try:
         link = conn.execute(
-            "SELECT * FROM child_task_links WHERE task_id=?", (task.task_id,),
+            "SELECT * FROM child_task_links WHERE task_id=?",
+            (task.task_id,),
         ).fetchone()
         if link is None:
             raise ValueError("child task link not found")
@@ -214,8 +229,13 @@ async def _handle_agent_delegate(
             conn.execute(
                 "INSERT INTO turns(turn_id,session_id,input_message_id,status,priority,version,"
                 "active_attempt_id,created_at) VALUES (?,?,?,'running',40,1,?,?)",
-                (turn_id, payload.get("session_id", ""), payload.get("input_message_id", ""),
-                 attempt_id, now),
+                (
+                    turn_id,
+                    payload.get("session_id", ""),
+                    payload.get("input_message_id", ""),
+                    attempt_id,
+                    now,
+                ),
             )
             attempt_no = 1
             conn.execute(
@@ -224,10 +244,12 @@ async def _handle_agent_delegate(
                 (turn_id, task.task_id),
             )
         else:
-            attempt_no = int(conn.execute(
-                "SELECT COALESCE(MAX(attempt_no),0)+1 FROM run_attempts WHERE turn_id=?",
-                (turn_id,),
-            ).fetchone()[0])
+            attempt_no = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(attempt_no),0)+1 FROM run_attempts WHERE turn_id=?",
+                    (turn_id,),
+                ).fetchone()[0]
+            )
             conn.execute(
                 "UPDATE turns SET status='running',active_attempt_id=?,version=version+1 "
                 "WHERE turn_id=? AND status IN ('queued','waiting_user','failed')",
@@ -269,15 +291,19 @@ async def _handle_agent_delegate(
         )
         snapshot = ContextSnapshot(
             snapshot_id=f"delegation:{payload['delegation_id']}:{payload['client_id']}",
-            turn_id=turn_id, attempt_id=attempt_id,
+            turn_id=turn_id,
+            attempt_id=attempt_id,
             input_message_id=str(payload.get("input_message_id", "")),
             session_id=str(payload.get("session_id", "")),
             conversation_id=str(payload.get("conversation_id", "")),
             principal_id=str(payload.get("principal_id", "")),
             items=(
                 ContextItem(
-                    item_type="system_policy", item_id=f"{turn_id}:system", source="system",
-                    role="system", trust_label="system",
+                    item_type="system_policy",
+                    item_id=f"{turn_id}:system",
+                    source="system",
+                    role="system",
+                    trust_label="system",
                     content=(
                         "You are a bounded child Agent. Return a concise structured result to the "
                         "parent only. Never address the end user or send messages. Your assigned "
@@ -286,12 +312,16 @@ async def _handle_agent_delegate(
                     ),
                 ),
                 ContextItem(
-                    item_type="message", item_id=f"{turn_id}:prompt",
-                    source=str(payload.get("session_id", "")), role="user",
-                    trust_label="user", content=str(payload["prompt"]),
+                    item_type="message",
+                    item_id=f"{turn_id}:prompt",
+                    source=str(payload.get("session_id", "")),
+                    role="user",
+                    trust_label="user",
+                    content=str(payload["prompt"]),
                 ),
             ),
         )
+
         def child_cancelled() -> bool:
             row = conn.execute(
                 "SELECT status FROM agent_delegations WHERE delegation_id=?",
@@ -318,7 +348,8 @@ async def _handle_agent_delegate(
             conn.commit()
             return TaskHandlerWait("waiting_user", result.approval_id)
         status = (
-            "completed" if result.is_success
+            "completed"
+            if result.is_success
             else ("cancelled" if result.result_type == LoopResultType.cancelled else "failed")
         )
         conn.execute(
@@ -332,7 +363,8 @@ async def _handle_agent_delegate(
         result_payload = {
             "client_id": payload.get("client_id", ""),
             "role": payload.get("role", "general"),
-            "result_summary": result.text[:2_000], "result": result.text,
+            "result_summary": result.text[:2_000],
+            "result": result.text,
             "toolsets": payload.get("toolsets", []),
             "budget": payload.get("budget", {}),
             "usage": {
@@ -364,9 +396,15 @@ async def _handle_agent_delegate(
         conn.execute(
             "UPDATE child_task_links SET status=?,result_summary=?,result_ref=?,usage_json=?,"
             "error=?,completed_at=?,version=version+1 WHERE task_id=?",
-            (status, result.text[:2_000], result_ref,
-             json.dumps(result_payload["usage"]), result.error_message,
-             datetime.now(UTC).isoformat(), task.task_id),
+            (
+                status,
+                result.text[:2_000],
+                result_ref,
+                json.dumps(result_payload["usage"]),
+                result.error_message,
+                datetime.now(UTC).isoformat(),
+                task.task_id,
+            ),
         )
         conn.commit()
         if not result.is_success:
@@ -436,7 +474,9 @@ async def _handle_tool_reconcile(task: Task, ctx: TaskHandlerContext) -> str:
             repository.update_reconcile(receipt_id, "not_executed", summary)
         else:
             repository.update_reconcile(
-                receipt_id, "manual_required", summary or "Reconciler was inconclusive",
+                receipt_id,
+                "manual_required",
+                summary or "Reconciler was inconclusive",
             )
         conn.commit()
         return f"receipt {receipt_id} reconcile outcome: {status}"
@@ -454,10 +494,15 @@ async def _handle_agent_prompt(task: Task, ctx: TaskHandlerContext) -> str:
         raise ValueError("agent.prompt requires a prompt")
     if ctx.model_router is None:
         raise RuntimeError("model router unavailable")
-    response = await ctx.model_router.generate(ModelRequest(messages=(
-        {"role": "system", "content": "You are a bounded background Cogito agent."},
-        {"role": "user", "content": prompt},
-    )), model_role=str(payload.get("model_role", "main")))
+    response = await ctx.model_router.generate(
+        ModelRequest(
+            messages=(
+                {"role": "system", "content": "You are a bounded background Cogito agent."},
+                {"role": "user", "content": prompt},
+            )
+        ),
+        model_role=str(payload.get("model_role", "main")),
+    )
     return response.text
 
 
@@ -465,6 +510,7 @@ def _knowledge_service(ctx: TaskHandlerContext, conn: sqlite3.Connection):
     if ctx.knowledge_service_factory:
         return ctx.knowledge_service_factory(conn)
     from cogito.service.knowledge.service import KnowledgeService
+
     return KnowledgeService(conn, payload_store_factory=ctx.payload_store_factory)
 
 
@@ -474,6 +520,7 @@ def _refresh_knowledge_views_task(ctx: TaskHandlerContext, conn: sqlite3.Connect
         return
     try:
         from cogito.service.knowledge_views import KnowledgeViewsGenerator
+
         KnowledgeViewsGenerator(conn, workspace_path=ctx.workspace_path).generate_all()
     except Exception as e:
         _LOGGER.warning("Knowledge view refresh failed (task %s): %s", ctx._task_id, e)
@@ -510,8 +557,12 @@ def _count_pending_segments(conn: sqlite3.Connection, svc: Any) -> int:
     """计算仍有待嵌入的段数（PLAN-16 embed 排水循环）。"""
     try:
         from cogito.store.knowledge_repo import list_unembedded_segments
-        return len(list_unembedded_segments(
-            conn, model=getattr(getattr(svc, "_embedder", None), "model_id", "") or None))
+
+        return len(
+            list_unembedded_segments(
+                conn, model=getattr(getattr(svc, "_embedder", None), "model_id", "") or None
+            )
+        )
     except Exception:
         return 0
 
@@ -531,8 +582,8 @@ def _handle_knowledge_ingest(task: Task, ctx: TaskHandlerContext) -> str:
         _refresh_knowledge_views_task(ctx, conn)
         # PLAN-16 M4 KNOW-05: ingest 后提交独立的 embedding Task，使 segment 进入嵌入路径
         from cogito.service.knowledge.sync import enqueue_knowledge_embed
-        enqueue_knowledge_embed(conn, origin="knowledge_ingest",
-                                embed_model=_embed_model_from(ctx))
+
+        enqueue_knowledge_embed(conn, origin="knowledge_ingest", embed_model=_embed_model_from(ctx))
         # PLAN-16 M2 TX-05: KnowledgeService 不再内部 commit，handler 统一提交。
         conn.commit()
         # OPS-04 完整：记录 knowledge ingest 指标
@@ -560,9 +611,10 @@ async def _handle_knowledge_embed(task: Task, ctx: TaskHandlerContext) -> str:
         remaining = _count_pending_segments(conn, svc)
         if remaining > 0:
             from cogito.service.knowledge.sync import enqueue_knowledge_embed
+
             enqueue_knowledge_embed(
-                conn, origin="knowledge_embed_drain",
-                embed_model=_embed_model_from(ctx))
+                conn, origin="knowledge_embed_drain", embed_model=_embed_model_from(ctx)
+            )
         conn.commit()
         return f"knowledge embedded: {count} (remaining_pending={remaining})"
     except Exception:
@@ -598,6 +650,7 @@ def _handle_knowledge_rebuild_index(task: Task, ctx: TaskHandlerContext) -> str:
     conn = ctx.connection_factory()
     try:
         from cogito.service.knowledge.embedding import rebuild_index
+
         result = rebuild_index(conn, fts=True, embeddings=False)
         conn.commit()
         _refresh_knowledge_views_task(ctx, conn)
@@ -613,6 +666,7 @@ def _handle_knowledge_sync_source(task: Task, ctx: TaskHandlerContext) -> str:
     conn = ctx.connection_factory()
     try:
         from cogito.service.knowledge.sync import enqueue_knowledge_embed, sync_resource
+
         resource_id = sync_resource(
             conn,
             stable_source_id=str(data.get("stable_source_id", "")),
@@ -626,8 +680,9 @@ def _handle_knowledge_sync_source(task: Task, ctx: TaskHandlerContext) -> str:
         )
         _refresh_knowledge_views_task(ctx, conn)
         # 完整：sync 后明确 enqueue 带版本幂等键的 embed Task（PLAN-16 KNOW-05/07）
-        enqueue_knowledge_embed(conn, origin="knowledge_sync_source",
-                                embed_model=str(data.get("embed_model", "")))
+        enqueue_knowledge_embed(
+            conn, origin="knowledge_sync_source", embed_model=str(data.get("embed_model", ""))
+        )
         # PLAN-16 M2 TX-05: KnowledgeService/sync 不再内部 commit，handler 统一提交。
         conn.commit()
         # OPS-04 完整：记录 knowledge ingest 指标（sync_source 走独立摄取路径）
@@ -643,6 +698,7 @@ def _handle_drift_run(task: Task, ctx: TaskHandlerContext) -> str:
     委托 drift_runner.handle_drift_run (注册为 TaskHandler 以复用 TaskWorker/Lease)。
     """
     from cogito.service.drift_runner import handle_drift_run
+
     conn = ctx.connection_factory() if ctx.connection_factory else None
     if conn is None:
         return "drift.run skipped: no connection"
@@ -706,6 +762,16 @@ def _handle_mcp_connector_poll(task: Task, ctx: TaskHandlerContext) -> str:
     return handle_mcp_connector_poll(task, ctx)
 
 
+def _proactive_web_target(principal_id: str) -> dict[str, str]:
+    """Build a complete, stable Web TargetSnapshot for proactive inboxes."""
+    return {
+        "channel": "web",
+        "adapter_id": "web",
+        "conversation_id": f"proactive:{principal_id}",
+        "principal_id": principal_id,
+    }
+
+
 async def _handle_proactive_delivery_ready(task: Task, ctx: TaskHandlerContext) -> str:
     """proactive.delivery.ready: scheduled_delivery_request 到期 → Delivery。
 
@@ -722,7 +788,10 @@ async def _handle_proactive_delivery_ready(task: Task, ctx: TaskHandlerContext) 
 
     try:
         result = await _deliver_scheduled_request_async(
-            conn, request_id, ctx.delivery_service,
+            conn,
+            request_id,
+            ctx.delivery_service,
+            proactive_config=ctx.proactive_config,
         )
         try:
             conn.close()
@@ -738,33 +807,56 @@ async def _handle_proactive_delivery_ready(task: Task, ctx: TaskHandlerContext) 
         raise
 
 
-async def _deliver_scheduled_request_async(conn, request_id, delivery_service) -> str:
+async def _deliver_scheduled_request_async(
+    conn,
+    request_id,
+    delivery_service,
+    *,
+    proactive_config=None,
+) -> str:
     from cogito.service.proactive_delivery_service import (
         mark_request_converted,
         prepare_delivery_from_request,
     )
+
     info = prepare_delivery_from_request(conn, request_id)
     if info is None:
         return "delivery.ready: request expired/cancelled/not-yet-due"
 
     content_ref = info["content_ref"]
-    if delivery_service is None:
+    from cogito.store.proactive_repo import ProactivePolicyRepository
+
+    principal_id = info.get("principal_id") or "owner"
+    policy = ProactivePolicyRepository(conn).get_current(principal_id)
+    dry_run = bool(proactive_config is None or proactive_config.dry_run or policy.dry_run)
+    if dry_run or delivery_service is None:
         # dry_run 模式：记录但不真实投递
         _LOGGER.info(
             "[dry_run] would send scheduled request %s: %s",
-            request_id, (content_ref or "")[:80],
+            request_id,
+            (content_ref or "")[:80],
         )
         mark_request_converted(conn, request_id, "dry-run-noop")
         return "converted (dry_run)"
 
     from cogito.service.delivery_service import DeliveryRequest
 
+    target = dict(info["suggested_target"] or {})
+    if target.get("channel") == "web":
+        # Requests created before complete proactive targets were introduced may
+        # only contain {channel, principal_id}.  Fill the stable Web routing keys
+        # at delivery time so already-persisted requests remain deliverable.
+        for key, value in _proactive_web_target(principal_id).items():
+            target.setdefault(key, value)
+
     # 在主 loop 上 await，避免跨 loop
-    delivery_id = await delivery_service.enqueue(DeliveryRequest(
-        target=info["suggested_target"],
-        content_ref=content_ref or "",
-        idempotency_key=f"proactive-scheduled:{request_id}",
-    ))
+    delivery_id = await delivery_service.enqueue(
+        DeliveryRequest(
+            target=target,
+            content_ref=content_ref or "",
+            idempotency_key=f"proactive-scheduled:{request_id}",
+        )
+    )
     mark_request_converted(conn, request_id, delivery_id)
     return f"converted -> {delivery_id}"
 
@@ -785,7 +877,12 @@ async def _handle_proactive_digest_publish(task: Task, ctx: TaskHandlerContext) 
         return "digest.publish skipped: no connection"
     try:
         result = await _publish_digest_async(
-            conn, principal_id, digest_date, topic, ctx.delivery_service,
+            conn,
+            principal_id,
+            digest_date,
+            topic,
+            ctx.delivery_service,
+            proactive_config=ctx.proactive_config,
         )
         try:
             conn.close()
@@ -801,18 +898,36 @@ async def _handle_proactive_digest_publish(task: Task, ctx: TaskHandlerContext) 
         raise
 
 
-async def _publish_digest_async(conn, principal_id, digest_date, topic, delivery_service) -> str:
+async def _publish_digest_async(
+    conn,
+    principal_id,
+    digest_date,
+    topic,
+    delivery_service,
+    *,
+    proactive_config=None,
+) -> str:
     from cogito.service.proactive_digest_service import assemble_and_render, mark_digest_sent
+
     rendered = assemble_and_render(
-        conn, principal_id=principal_id, digest_date=digest_date, topic=topic,
+        conn,
+        principal_id=principal_id,
+        digest_date=digest_date,
+        topic=topic,
     )
     if rendered is None:
         return "digest.publish: nothing to send"
     digest_id, text = rendered
-    if delivery_service is None:
+    from cogito.store.proactive_repo import ProactivePolicyRepository
+
+    policy = ProactivePolicyRepository(conn).get_current(principal_id)
+    dry_run = bool(proactive_config is None or proactive_config.dry_run or policy.dry_run)
+    if dry_run or delivery_service is None:
         _LOGGER.info(
             "[dry_run] would send digest %s (topic=%s, chars=%d)",
-            digest_id, topic, len(text),
+            digest_id,
+            topic,
+            len(text),
         )
         mark_digest_sent(conn, digest_id)
         return f"sent (dry_run): {digest_id}"
@@ -820,11 +935,13 @@ async def _publish_digest_async(conn, principal_id, digest_date, topic, delivery
     from cogito.service.delivery_service import DeliveryRequest
 
     # 在主 loop 上 await，避免跨 loop 复用 httpx 连接池
-    delivery_id = await delivery_service.enqueue(DeliveryRequest(
-        target={"channel": "web", "principal_id": principal_id},
-        content_ref=text,
-        idempotency_key=f"proactive-digest:{digest_id}",
-    ))
+    delivery_id = await delivery_service.enqueue(
+        DeliveryRequest(
+            target=_proactive_web_target(principal_id),
+            content_ref=text,
+            idempotency_key=f"proactive-digest:{digest_id}",
+        )
+    )
     mark_digest_sent(conn, digest_id)
     return f"sent -> {delivery_id}"
 
@@ -843,8 +960,10 @@ def _handle_memory_extract(task: Task, ctx: TaskHandlerContext) -> str:
     payload = MemoryExtractionPayload.from_payload_ref(task.payload_ref or "{}")
     _LOGGER.info(
         "Task memory.extract: %s session=%s range=[%d..%d]",
-        task.task_id, payload.session_id,
-        payload.from_sequence, payload.to_sequence,
+        task.task_id,
+        payload.session_id,
+        payload.from_sequence,
+        payload.to_sequence,
     )
 
     if not ctx.connection_factory:
@@ -875,17 +994,25 @@ def _handle_memory_extract(task: Task, ctx: TaskHandlerContext) -> str:
         ).fetchall()
         grouped: dict[str, dict[str, Any]] = {}
         for row in rows:
-            value = grouped.setdefault(row["message_id"], {
-                "role": row["role"], "sequence": row["receive_sequence"],
-                "principal": row["sender_principal_id"] or "",
-                "trust": row["trust_label"] or "unverified", "parts": [],
-            })
+            value = grouped.setdefault(
+                row["message_id"],
+                {
+                    "role": row["role"],
+                    "sequence": row["receive_sequence"],
+                    "principal": row["sender_principal_id"] or "",
+                    "trust": row["trust_label"] or "unverified",
+                    "parts": [],
+                },
+            )
             if row["inline_data"]:
                 value["parts"].append(row["inline_data"])
         messages = [
             ExtractMessage(
-                message_id=mid, role=value["role"], content="\n".join(value["parts"]),
-                receive_sequence=value["sequence"], sender_principal_id=value["principal"],
+                message_id=mid,
+                role=value["role"],
+                content="\n".join(value["parts"]),
+                receive_sequence=value["sequence"],
+                sender_principal_id=value["principal"],
                 trust_label=value["trust"],
             )
             for mid, value in grouped.items()
@@ -894,12 +1021,15 @@ def _handle_memory_extract(task: Task, ctx: TaskHandlerContext) -> str:
 
         service = (
             ctx.memory_service_factory(conn)
-            if ctx.memory_service_factory else
-            SqliteMemoryService(conn, MemoryRepository(conn))
+            if ctx.memory_service_factory
+            else SqliteMemoryService(conn, MemoryRepository(conn))
         )
         extractor = MemoryExtractor(
-            conn, service, ctx.model_router,
-            model_role=payload.model_role, strict=True,
+            conn,
+            service,
+            ctx.model_router,
+            model_role=payload.model_role,
+            strict=True,
         )
         # 异步模型调用：隔离到独立 loop（在线程池内 asyncio.run），
         # 避免与主 loop 的 httpx 连接池冲突（解决 cross-loop 错误），
@@ -909,9 +1039,11 @@ def _handle_memory_extract(task: Task, ctx: TaskHandlerContext) -> str:
 
         async def _extract():
             return await extractor.extract_from_messages(
-                messages, principal_id=payload.principal_id,
+                messages,
+                principal_id=payload.principal_id,
                 session_id=payload.session_id,
-                from_sequence=payload.from_sequence, to_sequence=payload.to_sequence,
+                from_sequence=payload.from_sequence,
+                to_sequence=payload.to_sequence,
             )
 
         try:
@@ -933,20 +1065,27 @@ def _handle_memory_extract(task: Task, ctx: TaskHandlerContext) -> str:
         latest = wm_repo.get(PROC_MEMORY_EXTRACT, payload.conversation_id, payload.session_id)
         if latest is None:
             wm_repo.upsert(
-                PROC_MEMORY_EXTRACT, payload.conversation_id, payload.session_id,
+                PROC_MEMORY_EXTRACT,
+                payload.conversation_id,
+                payload.session_id,
                 input_version=payload.input_version,
             )
             latest = wm_repo.get(PROC_MEMORY_EXTRACT, payload.conversation_id, payload.session_id)
         if latest and latest.processed_upto_sequence < payload.to_sequence:
             ok = wm_repo.advance(
-                PROC_MEMORY_EXTRACT, payload.conversation_id, payload.session_id,
-                to_sequence=payload.to_sequence, input_version=payload.input_version,
+                PROC_MEMORY_EXTRACT,
+                payload.conversation_id,
+                payload.session_id,
+                to_sequence=payload.to_sequence,
+                input_version=payload.input_version,
                 expected_from_sequence=latest.processed_upto_sequence,
                 expected_version=latest.version,
             )
             if not ok:
                 current = wm_repo.get(
-                    PROC_MEMORY_EXTRACT, payload.conversation_id, payload.session_id,
+                    PROC_MEMORY_EXTRACT,
+                    payload.conversation_id,
+                    payload.session_id,
                 )
                 if current is None or current.processed_upto_sequence < payload.to_sequence:
                     raise RuntimeError("memory.extract watermark CAS failed")
@@ -1001,15 +1140,18 @@ def _handle_memory_recompute_weight(task: Task, ctx: TaskHandlerContext) -> str:
         # 失败则整体回滚，避免权重推进但事件丢失。
         from cogito.domain.events import DomainEvent
         from cogito.store.repositories import OutboxRepository
-        OutboxRepository(conn).insert(DomainEvent(
-            event_type="MemoryWeightRecomputed",
-            aggregate_type="memory_weight",
-            aggregate_id=f"recompute-{ctx._task_id}",
-            aggregate_version=1,
-            payload={"recomputed_count": count, "task_id": ctx._task_id},
-            payload_ref=__import__("json").dumps({"recomputed_count": count}),
-            origin="memory_recompute_weight_handler",
-        ))
+
+        OutboxRepository(conn).insert(
+            DomainEvent(
+                event_type="MemoryWeightRecomputed",
+                aggregate_type="memory_weight",
+                aggregate_id=f"recompute-{ctx._task_id}",
+                aggregate_version=1,
+                payload={"recomputed_count": count, "task_id": ctx._task_id},
+                payload_ref=__import__("json").dumps({"recomputed_count": count}),
+                origin="memory_recompute_weight_handler",
+            )
+        )
         conn.commit()
         return f"memory weights recomputed: {count}"
     except Exception:
@@ -1058,6 +1200,7 @@ def _handle_memory_consolidate(task: Task, ctx: TaskHandlerContext) -> str:
     conn = ctx.connection_factory()
     try:
         from cogito.store.memory_repo import MemoryRepository
+
         result_data = MemoryRepository(conn).consolidate()
 
         try:
@@ -1096,8 +1239,10 @@ def _handle_summary_generate(task: Task, ctx: TaskHandlerContext) -> str:
 
     _LOGGER.info(
         "Task summary.generate: %s session=%s range=[%d..%d]",
-        task.task_id, payload.session_id,
-        payload.from_sequence, payload.to_sequence,
+        task.task_id,
+        payload.session_id,
+        payload.from_sequence,
+        payload.to_sequence,
     )
 
     # 获取父摘要 ID（如有）
@@ -1198,6 +1343,7 @@ async def _evaluate_candidates_async(conn, ctx) -> str:
     if config is None:
         # 默认 dry-run + 默认 policy
         from cogito.config import ProactiveConfig
+
         config = ProactiveConfig()
 
     # 取 policy
@@ -1220,7 +1366,8 @@ async def _evaluate_candidates_async(conn, ctx) -> str:
 
     # 取 evaluating candidates
     candidates = ProactiveCandidateRepository(conn).find_evaluating(
-        principal_id=config.default_principal_id, limit=10,
+        principal_id=config.default_principal_id,
+        limit=10,
     )
     if not candidates:
         return "evaluate: no candidates"
@@ -1232,21 +1379,29 @@ async def _evaluate_candidates_async(conn, ctx) -> str:
 
     for c in candidates:
         action, trace = decide(
-            c, policy,
+            c,
+            policy,
             energy_value=energy_value,
             existing_hourly_sent=ProactiveDecisionRepository(conn).count_hourly_sent(
-                config.default_principal_id, now // (3600 * 1000),
+                config.default_principal_id,
+                now // (3600 * 1000),
             ),
             existing_daily_sent=ProactiveDecisionRepository(conn).count_daily_sent(
-                config.default_principal_id, now // (86400 * 1000),
+                config.default_principal_id,
+                now // (86400 * 1000),
             ),
             existing_alert_hourly_sent=ProactiveDecisionRepository(conn).count_alert_hourly_sent(
-                config.default_principal_id, now // (3600 * 1000),
+                config.default_principal_id,
+                now // (3600 * 1000),
             ),
         )
         # 持久化 decision（显式 dry_run + 审计字段）
         persist_decision(
-            conn, c, policy, action, trace,
+            conn,
+            c,
+            policy,
+            action,
+            trace,
             dry_run=dry_run,
             energy_value=energy_value,
             last_user_at=last_user_at,
@@ -1259,72 +1414,89 @@ async def _evaluate_candidates_async(conn, ctx) -> str:
                 pass  # dry_run: 仅记录，不创建真实 Delivery
             else:
                 from cogito.service.delivery_service import DeliveryRequest
+
                 # 在主 loop 上 await，避免跨 loop 复用 httpx 连接池
-                await ctx.delivery_service.enqueue(DeliveryRequest(
-                    target={"channel": "web", "principal_id": c.principal_id},
-                    content_ref=c.summary,
-                    idempotency_key=f"proactive-now:{c.candidate_id}",
-                ))
+                await ctx.delivery_service.enqueue(
+                    DeliveryRequest(
+                        target=_proactive_web_target(c.principal_id),
+                        content_ref=c.summary,
+                        idempotency_key=f"proactive-now:{c.candidate_id}",
+                    )
+                )
             ProactiveCandidateRepository(conn).update_status(
-                c.candidate_id, "decided", consumed_at=now,
+                c.candidate_id,
+                "decided",
+                consumed_at=now,
             )
             actions["send_now"] += 1
 
         elif action == "send_later":
-            enqueue_send_later(
-                conn,
-                candidate_id=c.candidate_id,
-                content_ref=c.summary,
-                suggested_target={"channel": "web", "principal_id": c.principal_id},
-                reason=f"decide={action}",
-                delay_minutes=policy.digest_max_delay_minutes,
-                policy_version=policy.version,
-            )
+            if not dry_run:
+                enqueue_send_later(
+                    conn,
+                    candidate_id=c.candidate_id,
+                    content_ref=c.summary,
+                    suggested_target=_proactive_web_target(c.principal_id),
+                    reason=f"decide={action}",
+                    delay_minutes=policy.digest_max_delay_minutes,
+                    policy_version=policy.version,
+                )
             ProactiveCandidateRepository(conn).update_status(
-                c.candidate_id, "decided", consumed_at=now,
+                c.candidate_id,
+                "decided",
+                consumed_at=now,
             )
             actions["send_later"] += 1
 
         elif action == "digest":
-            enqueue_digest_publish(
-                conn,
-                principal_id=c.principal_id,
-                digest_date=time.strftime("%Y-%m-%d", time.gmtime(now / 1000)),
-                topic=c.topic,
-                delay_minutes=policy.digest_max_delay_minutes,
-            )
+            if not dry_run:
+                enqueue_digest_publish(
+                    conn,
+                    principal_id=c.principal_id,
+                    digest_date=time.strftime("%Y-%m-%d", time.gmtime(now / 1000)),
+                    topic=c.topic,
+                    delay_minutes=policy.digest_max_delay_minutes,
+                )
             ProactiveCandidateRepository(conn).update_status(
-                c.candidate_id, "consumed", consumed_at=now,
+                c.candidate_id,
+                "consumed",
+                consumed_at=now,
             )
             actions["digest"] += 1
 
         else:
             # silent / discard / ask_permission / create_task
             ProactiveCandidateRepository(conn).update_status(
-                c.candidate_id, "consumed", consumed_at=now,
+                c.candidate_id,
+                "consumed",
+                consumed_at=now,
             )
             actions["other"] += 1
 
     # 每次 handler 有界处理 10 条；若仍有 evaluating 候选，创建下一段 drain
     # Task，避免一次 AIHOT 拉取超过 Outbox/handler batch 后永久滞留。
     remaining = ProactiveCandidateRepository(conn).count_by_principal(
-        config.default_principal_id, status="evaluating",
+        config.default_principal_id,
+        status="evaluating",
     )
     if remaining > 0:
         from cogito.domain.task import Task, TaskStatus
         from cogito.store.task_repo import TaskRepository
+
         drain_key = f"proactive-evaluate-drain:{getattr(ctx, '_task_id', 'manual')}"
         task_repo = TaskRepository(conn)
         if not task_repo.exists_by_idempotency(drain_key):
-            task_repo.insert(Task(
-                task_id=f"task-pe-drain-{uuid.uuid4().hex[:16]}",
-                task_type="proactive.evaluate",
-                payload_ref="",
-                status=TaskStatus.queued,
-                priority=15,
-                idempotency_key=drain_key,
-                origin="proactive-evaluate-drain",
-            ))
+            task_repo.insert(
+                Task(
+                    task_id=f"task-pe-drain-{uuid.uuid4().hex[:16]}",
+                    task_type="proactive.evaluate",
+                    payload_ref="",
+                    status=TaskStatus.queued,
+                    priority=15,
+                    idempotency_key=drain_key,
+                    origin="proactive-evaluate-drain",
+                )
+            )
     conn.commit()
     return f"evaluate: {actions}"
 
@@ -1334,6 +1506,7 @@ def epoch_ms_from_datetime(dt) -> int | None:
     if dt is None:
         return None
     from cogito.contracts.clock import epoch_ms
+
     try:
         return epoch_ms(dt)
     except Exception:

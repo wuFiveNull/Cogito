@@ -132,14 +132,10 @@ class ScheduledFire:
 # ── 调度表达式解析 ──
 
 # Duration 格式: (Nd)?(Nh)?(Nm)?(Ns)?
-_DURATION_RE = re.compile(
-    r"^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$"
-)
+_DURATION_RE = re.compile(r"^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$")
 
 # "every" 短语
-_EVERY_DURATION_RE = re.compile(
-    r"^every\s+(\d+)\s*([smh])$"
-)
+_EVERY_DURATION_RE = re.compile(r"^every\s+(\d+)\s*([smh])$")
 _EVERY_WEEKLY_RE = re.compile(
     r"^every\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
     r"mon|tue|wed|thu|fri|sat|sun)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$",
@@ -152,13 +148,20 @@ _EVERY_DAILY_RE = re.compile(
 _EVERY_DAY_RE = re.compile(r"^every\s+1d$")
 
 _WEEKDAY_MAP = {
-    "monday": 0, "mon": 0,
-    "tuesday": 1, "tue": 1,
-    "wednesday": 2, "wed": 2,
-    "thursday": 3, "thu": 3,
-    "friday": 4, "fri": 4,
-    "saturday": 5, "sat": 5,
-    "sunday": 6, "sun": 6,
+    "monday": 0,
+    "mon": 0,
+    "tuesday": 1,
+    "tue": 1,
+    "wednesday": 2,
+    "wed": 2,
+    "thursday": 3,
+    "thu": 3,
+    "friday": 4,
+    "fri": 4,
+    "saturday": 5,
+    "sat": 5,
+    "sunday": 6,
+    "sun": 6,
 }
 
 
@@ -199,15 +202,17 @@ def _next_weekday(after: datetime, weekday: int, hour: int, minute: int) -> date
     days_ahead = weekday - after.weekday()
     if days_ahead < 0 or (days_ahead == 0 and (after.hour, after.minute) >= (hour, minute)):
         days_ahead += 7
-    target = after.replace(hour=hour, minute=minute, second=0, microsecond=0) + timedelta(days=days_ahead)
+    target = after.replace(hour=hour, minute=minute, second=0, microsecond=0) + timedelta(
+        days=days_ahead
+    )
     return target
 
 
 # ── DST 确定策略 ──
 # spring-forward (gap): 跳到 gap 之后
 # fall-back (overlap): fold=0 选择较早（UTC 较晚）的那个
-DST_POLICY = "post"       # gap → 跳到 gap 之后
-FOLD_POLICY = "earlier"   # overlap → fold=0
+DST_POLICY = "post"  # gap → 跳到 gap 之后
+FOLD_POLICY = "earlier"  # overlap → fold=0
 
 
 def _localize_with_dst(
@@ -285,7 +290,9 @@ def next_fire_at(
     m = _EVERY_DURATION_RE.match(expr)
     if m:
         value, unit = int(m.group(1)), m.group(2)
-        delta = timedelta(**{"hours" if unit == "h" else "minutes" if unit == "m" else "seconds": value})
+        delta = timedelta(
+            **{"hours" if unit == "h" else "minutes" if unit == "m" else "seconds": value}
+        )
         return after + delta
 
     # "every monday 9am"

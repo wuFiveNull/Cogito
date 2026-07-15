@@ -84,7 +84,8 @@ class CognitionMetrics:
     def record_knowledge_retrieval_degraded(self, reason: str = "no_embedder") -> None:
         with self._lock:
             self._knowledge_retrieval_degraded[reason] = (
-                self._knowledge_retrieval_degraded.get(reason, 0) + 1)
+                self._knowledge_retrieval_degraded.get(reason, 0) + 1
+            )
 
     # ── context candidate / token / exclusion ────────────────────
 

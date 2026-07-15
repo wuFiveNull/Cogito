@@ -105,9 +105,7 @@ class CapabilityRegistry:
 
         空 supported_modes 表示该工具在所有模式均可见。
         """
-        return [
-            t for t in self.all_tools() if not t.supported_modes or mode in t.supported_modes
-        ]
+        return [t for t in self.all_tools() if not t.supported_modes or mode in t.supported_modes]
 
     # ── Schema 输出 ──
 
@@ -230,9 +228,7 @@ class CapabilityRegistry:
                 if cid.startswith(prefix) or tool.name.startswith(prefix)
             ]
             for n in removed:
-                self._stale_capabilities.update(
-                    {self._tools[n].capability_id, self._tools[n].name}
-                )
+                self._stale_capabilities.update({self._tools[n].capability_id, self._tools[n].name})
                 del self._tools[n]
         return removed
 
@@ -241,10 +237,7 @@ class CapabilityRegistry:
         with self._lock:
             if name in self._stale_capabilities:
                 return True
-            return any(
-                tool_name.endswith(f":{name}")
-                for tool_name in self._stale_capabilities
-            )
+            return any(tool_name.endswith(f":{name}") for tool_name in self._stale_capabilities)
 
     # ── Capability Snapshot (Plan 03 M1) ─────────────────────────
 

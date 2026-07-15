@@ -81,9 +81,7 @@ class TestTaskDispatcher:
         ok = dispatcher.complete(claimed.task, claimed.attempt, "worker1")
         assert ok is True
 
-        row = db.execute(
-            "SELECT status FROM tasks WHERE task_id='t1'"
-        ).fetchone()
+        row = db.execute("SELECT status FROM tasks WHERE task_id='t1'").fetchone()
         assert row["status"] == "completed"
 
     def test_complete_fails_wrong_worker(self, db, dispatcher):
@@ -102,9 +100,7 @@ class TestTaskDispatcher:
         ok = dispatcher.fail(claimed.task, claimed.attempt, "worker1")
         assert ok is True
 
-        row = db.execute(
-            "SELECT status FROM tasks WHERE task_id='t1'"
-        ).fetchone()
+        row = db.execute("SELECT status FROM tasks WHERE task_id='t1'").fetchone()
         assert row["status"] == "failed"
 
     def test_heartbeat(self, db, dispatcher):

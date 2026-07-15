@@ -237,13 +237,15 @@ class WebChannelAdapter:
         except Exception:
             return
         for row in rows:
-            q.put_nowait({
-                "kind": "delete",
-                "conversation_id": conversation_id,
-                "platform_message_id": row["platform_message_id"],
-                "reason": "recovered",
-                "delivery_id": "",
-            })
+            q.put_nowait(
+                {
+                    "kind": "delete",
+                    "conversation_id": conversation_id,
+                    "platform_message_id": row["platform_message_id"],
+                    "reason": "recovered",
+                    "delivery_id": "",
+                }
+            )
 
     def unsubscribe(self, conversation_id: str) -> None:
         """取消订阅（WebSocket 断开时调用）。"""

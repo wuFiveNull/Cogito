@@ -94,13 +94,15 @@ class FakeRssServer:
     def add_entry(self, title: str, description: str = "", link: str = "") -> str:
         """追加单条，返回 guid。"""
         guid = link or f"urn:uuid:{uuid.uuid4().hex}"
-        self._entries.append({
-            "title": title,
-            "link": link or f"http://example.com/p/{uuid.uuid4().hex[:8]}",
-            "description": description,
-            "guid": guid,
-            "pub_date": None,
-        })
+        self._entries.append(
+            {
+                "title": title,
+                "link": link or f"http://example.com/p/{uuid.uuid4().hex[:8]}",
+                "description": description,
+                "guid": guid,
+                "pub_date": None,
+            }
+        )
         self._etag_counter += 1
         return guid
 
@@ -201,6 +203,7 @@ class FakeRssServer:
 
     def _render_feed(self) -> str:
         import email.utils
+
         items_xml = ""
         for e in self._entries:
             pub = e.get("pub_date") or email.utils.formatdate(usegmt=True)
@@ -220,10 +223,7 @@ class FakeRssServer:
 
 def _xml_escape(text: str) -> str:
     return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
     )
 
 

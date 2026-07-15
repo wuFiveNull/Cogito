@@ -2,6 +2,7 @@
 
 PLAN-13 P13-04：强化/展示/反馈使用幂等追加事件表。
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -14,6 +15,7 @@ from typing import Any
 @dataclass
 class MemorySignal:
     """单条强化/展示/反馈信号。"""
+
     signal_id: str
     memory_id: str
     signal_type: str
@@ -27,10 +29,16 @@ class MemorySignal:
     metadata_json: str = "{}"
 
 
-SIGNAL_TYPES = frozenset({
-    "exposed", "referenced", "user_affirmed",
-    "task_succeeded", "user_corrected", "negative_feedback",
-})
+SIGNAL_TYPES = frozenset(
+    {
+        "exposed",
+        "referenced",
+        "user_affirmed",
+        "task_succeeded",
+        "user_corrected",
+        "negative_feedback",
+    }
+)
 
 
 class SignalRepository:
@@ -68,10 +76,16 @@ class SignalRepository:
                 "  algorithm_version, occurred_at, metadata_json"
                 ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    signal.signal_id, signal.memory_id, signal.signal_type,
-                    signal.signal_value, signal.actor_principal_id,
-                    signal.turn_id, signal.task_id, signal.idempotency_key,
-                    signal.algorithm_version, signal.occurred_at,
+                    signal.signal_id,
+                    signal.memory_id,
+                    signal.signal_type,
+                    signal.signal_value,
+                    signal.actor_principal_id,
+                    signal.turn_id,
+                    signal.task_id,
+                    signal.idempotency_key,
+                    signal.algorithm_version,
+                    signal.occurred_at,
                     signal.metadata_json,
                 ),
             )
@@ -85,8 +99,7 @@ class SignalRepository:
             return []
         try:
             rows = self._conn.execute(
-                "SELECT * FROM memory_signals "
-                "WHERE memory_id=? ORDER BY occurred_at ASC",
+                "SELECT * FROM memory_signals WHERE memory_id=? ORDER BY occurred_at ASC",
                 (memory_id,),
             ).fetchall()
             return [_row_to_signal(dict(r)) for r in rows]

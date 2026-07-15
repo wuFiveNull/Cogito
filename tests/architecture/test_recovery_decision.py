@@ -1,4 +1,5 @@
 """RecoveryDecision + RecoveryAdvisor + Checkpoint — Plan 02 M2."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -29,8 +30,11 @@ def _attempt(
     **kw: Any,
 ) -> RunAttempt:
     return RunAttempt(
-        attempt_id="a1", turn_id="t1", status=status,
-        lease_expires_at=lease_expires_at, **kw,
+        attempt_id="a1",
+        turn_id="t1",
+        status=status,
+        lease_expires_at=lease_expires_at,
+        **kw,
     )
 
 
@@ -56,7 +60,9 @@ def test_cancelled_turn_fails() -> None:
 
 def test_unknown_side_effect_reconciles() -> None:
     ck = Checkpoint(
-        checkpoint_id="ck1", turn_id="t1", attempt_id="a1",
+        checkpoint_id="ck1",
+        turn_id="t1",
+        attempt_id="a1",
         tool_calls=[
             {"id": "tc1", "status": "succeeded", "receipt_ref": "r1"},
             {"id": "tc2", "status": "unknown", "receipt_ref": None},
@@ -149,7 +155,9 @@ def test_parent_attempt_recorded() -> None:
 
 def test_checkpoint_roundtrip() -> None:
     ck = Checkpoint(
-        checkpoint_id="ck1", turn_id="t1", attempt_id="a1",
+        checkpoint_id="ck1",
+        turn_id="t1",
+        attempt_id="a1",
         current_step="tool_call",
         completed_step_ids=["context", "model_call"],
         tool_calls=[{"id": "tc1", "status": "succeeded", "receipt_ref": "r1"}],
@@ -177,5 +185,10 @@ def test_checkpoint_forbids_mutable_fields() -> None:
 
 def test_recovery_decision_values() -> None:
     assert {d.value for d in RecoveryDecision} == {
-        "resume", "retry", "reconcile", "waiting_user", "manual_review", "fail",
+        "resume",
+        "retry",
+        "reconcile",
+        "waiting_user",
+        "manual_review",
+        "fail",
     }

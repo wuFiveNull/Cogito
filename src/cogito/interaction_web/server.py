@@ -65,7 +65,7 @@ def create_app(
             raise RuntimeError("Bridge requires a RuntimeApplication-owned connection")
 
         async def _bridge_inbound_handler(dto):
-            if runtime and hasattr(runtime, 'inbound'):
+            if runtime and hasattr(runtime, "inbound"):
                 # 复用 InboundService 的 accept 路径（直接构造 ChannelEnvelope，
                 # 不再经 models.Inbound 中转，避免 interaction_web → inbound 依赖）
                 reply_route = ReplyRoute(
@@ -81,8 +81,10 @@ def create_app(
                     platform_conversation_id=dto.conversation_ref,
                     platform_message_id=dto.event_id,
                     content_parts=[
-                        {"content_type": p.type if p.type != "at" else "text",
-                         "inline_data": p.data}
+                        {
+                            "content_type": p.type if p.type != "at" else "text",
+                            "inline_data": p.data,
+                        }
                         for p in dto.content_parts
                     ],
                     reply_route=reply_route,
@@ -90,21 +92,21 @@ def create_app(
                 result = runtime.inbound.accept(envelope)
                 return result.message_id if result else f"dto-{dto.event_id}"
             return f"dto-{dto.event_id}"
+
         bridge = BridgeServer(
             conn=runtime.conn,
             inbound_handler=_bridge_inbound_handler,
             # In a merged deployment this is the local platform executor. In a
             # split deployment the same router is mounted by the Gateway
             # process and Core uses HttpGatewayClient to call it.
-            delivery_handler=(
-                getattr(runtime, "local_gateway_client", None) if runtime else None
-            ),
+            delivery_handler=(getattr(runtime, "local_gateway_client", None) if runtime else None),
         )
         app.include_router(bridge.create_router())
         app.state.bridge_server = bridge  # type: ignore[attr-defined]
     except Exception as e:
         # Bridge 装配失败不应阻塞主 server 启动
         import logging
+
         logging.getLogger("interaction_web").warning("Bridge server not mounted: %s", e)
 
     # ── 静态前端托管 ───────────────────────────────────────────
@@ -120,6 +122,7 @@ def create_app(
             # API / assets 外的未知路径回退到 index.html (SPA 路由)
             if full_path.startswith("api/") or full_path.startswith("assets/"):
                 from fastapi import HTTPException
+
                 raise HTTPException(status_code=404)
             target = static_dir / full_path
             if target.is_file():

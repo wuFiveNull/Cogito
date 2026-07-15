@@ -6,6 +6,7 @@ verify Payload manifest → validate config/plugin compatibility → clear expir
 scan unknown Tool/Delivery → rebuild FTS/Embedding/cache → start recovery profile →
 human confirmation → enable real side effects
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -27,9 +28,9 @@ class RestoreService:
     def __init__(self, service: BackupService) -> None:
         self._service = service
 
-    def restore(self, backup_id: str, *,
-                target_profile: str = "default",
-                force: bool = False) -> RestoreResult:
+    def restore(
+        self, backup_id: str, *, target_profile: str = "default", force: bool = False
+    ) -> RestoreResult:
         """恢复到隔离 Profile（默认不覆盖现有 Profile）。"""
         if not self._service.verify(backup_id):
             return RestoreResult(status="failed")

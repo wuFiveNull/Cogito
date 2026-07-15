@@ -7,6 +7,7 @@
 
 禁止：盲目重试产生重复副作用。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from cogito.capability.models import SideEffectReceipt
 @dataclass(frozen=True)
 class ReconcileAction:
     """对账操作结果。"""
+
     receipt_id: str
     action_taken: str  # "queried" | "idempotent_replay" | "manual_approval" | "no_op"
     success: bool
@@ -34,16 +36,17 @@ class ReconcileService:
         self,
         receipt: SideEffectReceipt,
         *,
-        platform_query_fn: Any = None,      # callable: operation_id -> status
-        idempotent_replay_fn: Any = None,    # callable: request_hash -> result
+        platform_query_fn: Any = None,  # callable: operation_id -> status
+        idempotent_replay_fn: Any = None,  # callable: request_hash -> result
     ) -> ReconcileAction:
         """对账一个 unknown receipt（三选一）。"""
         # 1. 尝试用 external_operation_id 查询平台
         if receipt.external_operation_id and platform_query_fn:
             try:
                 status = platform_query_fn(receipt.external_operation_id)
-                self._update_receipt(receipt.receipt_id, "reconciled",
-                                     f"Queried platform: {status}")
+                self._update_receipt(
+                    receipt.receipt_id, "reconciled", f"Queried platform: {status}"
+                )
                 return ReconcileAction(
                     receipt_id=receipt.receipt_id,
                     action_taken="queried",
@@ -57,8 +60,9 @@ class ReconcileService:
         if receipt.request_hash and idempotent_replay_fn:
             try:
                 result = idempotent_replay_fn(receipt.request_hash)
-                self._update_receipt(receipt.receipt_id, "reconciled",
-                                     f"Idempotent replay: {result}")
+                self._update_receipt(
+                    receipt.receipt_id, "reconciled", f"Idempotent replay: {result}"
+                )
                 return ReconcileAction(
                     receipt_id=receipt.receipt_id,
                     action_taken="idempotent_replay",
@@ -70,8 +74,7 @@ class ReconcileService:
 
         # 3. 无法自动确认 → 创建人工处理 Approval
         approval_id = self._create_manual_approval(receipt)
-        self._update_receipt(receipt.receipt_id, "manual",
-                             f"Escalated to approval {approval_id}")
+        self._update_receipt(receipt.receipt_id, "manual", f"Escalated to approval {approval_id}")
         return ReconcileAction(
             receipt_id=receipt.receipt_id,
             action_taken="manual_approval",
@@ -79,12 +82,10 @@ class ReconcileService:
             detail=f"Manual approval created: {approval_id}",
         )
 
-    def _update_receipt(self, receipt_id: str, reconcile_status: str,
-                        summary: str) -> None:
+    def _update_receipt(self, receipt_id: str, reconcile_status: str, summary: str) -> None:
         try:
             self._conn.execute(
-                "UPDATE side_effect_receipts SET reconcile_status=?, summary=? "
-                "WHERE receipt_id=?",
+                "UPDATE side_effect_receipts SET reconcile_status=?, summary=? WHERE receipt_id=?",
                 (reconcile_status, summary, receipt_id),
             )
             self._conn.commit()

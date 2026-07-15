@@ -2,6 +2,7 @@
 
 PLAN-13 M4：register_resource + ingest（parse + segment）。
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -17,6 +18,7 @@ def db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     from cogito.store.migration import migrate
+
     migrate(conn)
     return conn
 

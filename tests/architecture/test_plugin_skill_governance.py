@@ -1,4 +1,5 @@
 """PR-C7+C8: Plugin Runtime + Skill lifecycle + Governance — Plan 03 M7/M8."""
+
 from __future__ import annotations
 
 from cogito.capability.plugin_runtime import (
@@ -9,6 +10,7 @@ from cogito.capability.plugin_runtime import (
 
 
 # ── Plugin lifecycle ────────────────────────────────────────────
+
 
 def test_plugin_install_enable() -> None:
     rt = SqlitePluginRuntime(conn=None)
@@ -41,6 +43,7 @@ def test_plugin_disable() -> None:
 
 
 # ── Circuit breaker (Plan 03 M8) ────────────────────────────────
+
 
 def test_circuit_breaker_triggers_after_3() -> None:
     cb = CircuitBreaker(max_failures=3, window_s=60)
@@ -75,6 +78,7 @@ def test_plugin_degraded_on_circuit_break() -> None:
 
 
 # ── Governance commands (enable/disable/inspect/reconcile) ───────
+
 
 def test_governance_enable_disable_commands() -> None:
     """控制命令 enable/disable plugin 完整。"""

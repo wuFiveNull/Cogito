@@ -5,6 +5,7 @@
   之外的单行 idempotency_key 业务幂等
 - proactive_principal 每个 principal 一行当前生效 policy (通过 version desc)
 """
+
 from __future__ import annotations
 
 import json
@@ -49,9 +50,14 @@ class ProactivePolicy:
     version: int = 1
     allow_topics: tuple[str, ...] = ()
     deny_topics: tuple[str, ...] = ()
-    quiet_hours: dict[str, Any] = field(default_factory=lambda: {
-        "enabled": True, "start": "23:00", "end": "08:00", "timezone": "Asia/Shanghai",
-    })
+    quiet_hours: dict[str, Any] = field(
+        default_factory=lambda: {
+            "enabled": True,
+            "start": "23:00",
+            "end": "08:00",
+            "timezone": "Asia/Shanghai",
+        }
+    )
     cooldown_minutes_same_topic: int = 360
     max_pushes_per_hour: int = 3
     max_pushes_per_day: int = 10
@@ -82,9 +88,9 @@ class ProactiveDecision:
     delivery_id: str | None = None
     digest_id: str | None = None
     # ── M1: 审计与能量闭环 ──
-    last_user_at: int | None = None          # epoch ms；决定时的真实用户活动时间快照
-    energy_model_version: str = "v1"         # 能量模型版本（便于跨版本回放对比）
-    config_version_id: str | None = None     # 决定时生效的配置版本（可追溯 Policy/预算/阈值）
+    last_user_at: int | None = None  # epoch ms；决定时的真实用户活动时间快照
+    energy_model_version: str = "v1"  # 能量模型版本（便于跨版本回放对比）
+    config_version_id: str | None = None  # 决定时生效的配置版本（可追溯 Policy/预算/阈值）
 
 
 # ── Repository ────────────────────────────────────────────────────────────────
@@ -103,13 +109,25 @@ class ProactiveCandidateRepository:
             " source_payload_ref, origin, expires_at_value, created_at, status,critical_override) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
-                c.candidate_id, c.principal_id, c.stream_type, c.topic,
-                c.summary, c.novelty, c.relevance, c.urgency, c.confidence,
-                c.recommended_action, c.policy_version, c.idempotency_key,
+                c.candidate_id,
+                c.principal_id,
+                c.stream_type,
+                c.topic,
+                c.summary,
+                c.novelty,
+                c.relevance,
+                c.urgency,
+                c.confidence,
+                c.recommended_action,
+                c.policy_version,
+                c.idempotency_key,
                 json.dumps(list(c.source_event_ids), ensure_ascii=False),
-                c.source_payload_ref, c.origin,
+                c.source_payload_ref,
+                c.origin,
                 c.created_at + c.candidate_ttl_hours * 3600 * 1000 if False else None,
-                c.created_at, c.status, 1 if c.critical_override else 0,
+                c.created_at,
+                c.status,
+                1 if c.critical_override else 0,
             ),
         )
 
@@ -145,13 +163,15 @@ class ProactiveCandidateRepository:
         try:
             rows = self._conn.execute(
                 "SELECT status, COUNT(*) FROM proactive_candidates "
-                "WHERE principal_id=? GROUP BY status", (principal_id,),
+                "WHERE principal_id=? GROUP BY status",
+                (principal_id,),
             ).fetchall()
             for r in rows:
                 out[f"candidate_status_{r[0]}"] = int(r[1])
             rows = self._conn.execute(
                 "SELECT origin, COUNT(*) FROM proactive_candidates "
-                "WHERE principal_id=? GROUP BY origin", (principal_id,),
+                "WHERE principal_id=? GROUP BY origin",
+                (principal_id,),
             ).fetchall()
             for r in rows:
                 out[f"candidate_origin_{r[0]}"] = int(r[1])
@@ -172,8 +192,7 @@ class ProactiveCandidateRepository:
 
     def update_status(self, candidate_id: str, status: str, consumed_at: int | None = None) -> None:
         self._conn.execute(
-            "UPDATE proactive_candidates SET status=?, consumed_at=? "
-            "WHERE candidate_id=?",
+            "UPDATE proactive_candidates SET status=?, consumed_at=? WHERE candidate_id=?",
             (status, consumed_at, candidate_id),
         )
 
@@ -210,7 +229,8 @@ def _row_to_candidate(row: Any) -> ProactiveCandidate:
         consumed_at=row["consumed_at"],
         status=row["status"],
         critical_override=bool(row["critical_override"])
-        if "critical_override" in row.keys() else False,
+        if "critical_override" in row.keys()
+        else False,
     )
 
 
@@ -221,8 +241,7 @@ class ProactivePolicyRepository:
     def get_current(self, principal_id: str = "owner") -> ProactivePolicy:
         """取当前生效 policy（最高 version）。不存在则返回默认。"""
         row = self._conn.execute(
-            "SELECT * FROM proactive_policies WHERE principal_id=? "
-            "ORDER BY version DESC LIMIT 1",
+            "SELECT * FROM proactive_policies WHERE principal_id=? ORDER BY version DESC LIMIT 1",
             (principal_id,),
         ).fetchone()
         if row is None:
@@ -236,8 +255,10 @@ class ProactivePolicyRepository:
             )
             self._conn.commit()
             return ProactivePolicy(
-                policy_id=pid, principal_id=principal_id,
-                version=1, dry_run=True,
+                policy_id=pid,
+                principal_id=principal_id,
+                version=1,
+                dry_run=True,
             )
         return _row_to_policy(row)
 
@@ -251,25 +272,31 @@ class ProactivePolicyRepository:
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
-                p.policy_id, p.principal_id, p.version,
+                p.policy_id,
+                p.principal_id,
+                p.version,
                 json.dumps(list(p.allow_topics), ensure_ascii=False),
                 json.dumps(list(p.deny_topics), ensure_ascii=False),
                 json.dumps(p.quiet_hours, ensure_ascii=False),
-                json.dumps({"same_topic_minutes": p.cooldown_minutes_same_topic},
-                           ensure_ascii=False),
-                json.dumps({
-                    "max_pushes_per_hour": p.max_pushes_per_hour,
-                    "max_pushes_per_day": p.max_pushes_per_day,
-                    "alert_max_per_hour": p.alert_max_per_hour,
-                    "minimum_relevance": p.minimum_relevance,
-                    "minimum_novelty": p.minimum_novelty,
-                    "digest_max_delay_minutes": p.digest_max_delay_minutes,
-                    "candidate_ttl_hours": p.candidate_ttl_hours,
-                }, ensure_ascii=False),
+                json.dumps(
+                    {"same_topic_minutes": p.cooldown_minutes_same_topic}, ensure_ascii=False
+                ),
+                json.dumps(
+                    {
+                        "max_pushes_per_hour": p.max_pushes_per_hour,
+                        "max_pushes_per_day": p.max_pushes_per_day,
+                        "alert_max_per_hour": p.alert_max_per_hour,
+                        "minimum_relevance": p.minimum_relevance,
+                        "minimum_novelty": p.minimum_novelty,
+                        "digest_max_delay_minutes": p.digest_max_delay_minutes,
+                        "candidate_ttl_hours": p.candidate_ttl_hours,
+                    },
+                    ensure_ascii=False,
+                ),
                 1 if p.dry_run else 0,
                 json.dumps(p.filters, ensure_ascii=False),
                 f"policy-v{p.version}",
-                epoch_ms(),
+                now_ms(),
             ),
         )
 
@@ -314,21 +341,28 @@ class ProactiveDecisionRepository:
             " energy_model_version, config_version_id) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
-                d.decision_id, d.candidate_id, d.principal_id, d.action,
+                d.decision_id,
+                d.candidate_id,
+                d.principal_id,
+                d.action,
                 json.dumps(d.rule_results, ensure_ascii=False),
                 json.dumps(d.model_score, ensure_ascii=False) if d.model_score else None,
-                d.policy_version, d.energy_value,
+                d.policy_version,
+                d.energy_value,
                 1 if d.dry_run else 0,
                 d.decided_at,
-                d.scheduled_for, d.delivery_id, d.digest_id,
-                d.last_user_at, d.energy_model_version, d.config_version_id,
+                d.scheduled_for,
+                d.delivery_id,
+                d.digest_id,
+                d.last_user_at,
+                d.energy_model_version,
+                d.config_version_id,
             ),
         )
 
     def get_by_candidate(self, candidate_id: str) -> ProactiveDecision | None:
         rows = self._conn.execute(
-            "SELECT * FROM proactive_decisions_v2 WHERE candidate_id=? "
-            "ORDER BY decided_at DESC",
+            "SELECT * FROM proactive_decisions_v2 WHERE candidate_id=? ORDER BY decided_at DESC",
             (candidate_id,),
         ).fetchall()
         if not rows:
@@ -349,7 +383,9 @@ class ProactiveDecisionRepository:
             delivery_id=r.get("delivery_id"),
             digest_id=r.get("digest_id"),
             last_user_at=r["last_user_at"] if "last_user_at" in r.keys() else None,
-            energy_model_version=r["energy_model_version"] if "energy_model_version" in r.keys() else "v1",
+            energy_model_version=(
+                r["energy_model_version"] if "energy_model_version" in r.keys() else "v1"
+            ),
             config_version_id=r["config_version_id"] if "config_version_id" in r.keys() else None,
         )
 

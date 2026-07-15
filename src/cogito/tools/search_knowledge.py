@@ -1,4 +1,5 @@
 """Search the durable knowledge base through the KnowledgeReader port."""
+
 from __future__ import annotations
 
 from cogito.capability.models import ToolContext, ToolDef

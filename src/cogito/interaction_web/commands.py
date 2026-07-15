@@ -3,6 +3,7 @@
 命令业务逻辑已下沉至 service/api/command_handlers.py；
 本模块仅做转发，保持路由 URL 不变。
 """
+
 from __future__ import annotations
 
 from cogito.service.api.command_handlers import router

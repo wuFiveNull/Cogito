@@ -5,6 +5,7 @@
 - Startup: 严格执行 最小配置→SQLite→Migration→Payload→Policy→Plugin→Recovery→Worker→API→Gateway→Web
 - Shutdown: 停止新工作→停 Scheduler/Lease→安全点 Checkpoint→Flush Outbox→释放 Lease→强停
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -15,6 +16,7 @@ from pathlib import Path
 @dataclass(frozen=True)
 class BackupManifest:
     """备份清单 (Plan 06 M7)。"""
+
     backup_id: str = ""
     created_at: str = ""
     sqlite_snapshot_uri: str = ""

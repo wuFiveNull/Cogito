@@ -1,4 +1,5 @@
 """PR-C6: SKILL.md parser + Skill Runtime — Plan 03 M6."""
+
 from __future__ import annotations
 
 from cogito.capability.skill_parser import (

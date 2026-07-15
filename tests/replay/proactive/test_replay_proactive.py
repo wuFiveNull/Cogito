@@ -8,6 +8,7 @@
 
 全部断言为确定性值（无随机、无真实模型调用）。
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -37,12 +38,17 @@ def _fresh_db():
 
 def _policy(**over) -> ProactivePolicy:
     base = dict(
-        policy_id="p1", principal_id="owner", version=1,
-        allow_topics=(), deny_topics=("spam",),
+        policy_id="p1",
+        principal_id="owner",
+        version=1,
+        allow_topics=(),
+        deny_topics=("spam",),
         quiet_hours={"enabled": False},
         cooldown_minutes_same_topic=360,
-        max_pushes_per_hour=3, max_pushes_per_day=10,
-        minimum_relevance=0.4, minimum_novelty=0.3,
+        max_pushes_per_hour=3,
+        max_pushes_per_day=10,
+        minimum_relevance=0.4,
+        minimum_novelty=0.3,
         dry_run=True,
     )
     base.update(over)
@@ -51,11 +57,19 @@ def _policy(**over) -> ProactivePolicy:
 
 def _candidate(**over) -> ProactiveCandidate:
     base = dict(
-        candidate_id="c", principal_id="owner",
-        stream_type="content", topic="ai",
-        summary="test", novelty=0.7, relevance=0.8, urgency=0.6,
-        confidence=0.8, policy_version=1, idempotency_key="k",
-        created_at=0, status="evaluating",
+        candidate_id="c",
+        principal_id="owner",
+        stream_type="content",
+        topic="ai",
+        summary="test",
+        novelty=0.7,
+        relevance=0.8,
+        urgency=0.6,
+        confidence=0.8,
+        policy_version=1,
+        idempotency_key="k",
+        created_at=0,
+        status="evaluating",
     )
     base.update(over)
     return ProactiveCandidate(**base)
@@ -65,8 +79,7 @@ class TestReplayAlert:
     def test_alert_fast_path_send_now(self):
         """alert 跳过 novelty/relevance/energy gate → send_now。"""
         p = _policy(quiet_hours={"enabled": False})
-        c = _candidate(stream_type="alert", topic="urgent", novelty=0.1,
-                      relevance=0.1, urgency=0.9)
+        c = _candidate(stream_type="alert", topic="urgent", novelty=0.1, relevance=0.1, urgency=0.9)
         action, trace = decide(c, p)
         assert action == "send_now"
         assert any(t.rule == "alert_fast_path" for t in trace)
@@ -104,6 +117,7 @@ class TestReplayContent:
         assert action in ("send_now", "digest", "silent")
         # 过期的情况：直接用 past expires_at
         import cogito.service.proactive_decision as pd
+
         orig = pd.now_ms
         # 无法直接篡改 now_ms；改为测试 past expiry 由 decide 内部处理
         # decide 内检查 expires_at < now_ms() → discard；这里仅断言机制存在
@@ -139,7 +153,9 @@ class TestReplayEnergy:
         p = _policy(quiet_hours={"enabled": False})
         c = _candidate(novelty=0.7, relevance=0.85, urgency=0.5)
         action, trace = decide(c, p, energy_value=0.9)
-        assert action == "digest"  # 0.5*0.5=0.25 < 0.65 + novelty 0.7 < relevance 0.85 ... 实际 urgency 0.25+relevance pass
+        assert (
+            action == "digest"
+        )  # 0.5*0.5=0.25 < 0.65 + novelty 0.7 < relevance 0.85 ... 实际 urgency 0.25+relevance pass
         # 注意：energy pass 后 urgency 仍低于阈值 → digest（在 alert 外）
 
     def test_energy_low_increases_urgency(self):

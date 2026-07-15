@@ -3,6 +3,7 @@
 提供事务边界管理，所有 Repository 共享同一连接。
 利用 SQLite 隐式事务，不嵌套 BEGIN。
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -61,11 +62,18 @@ class UnitOfWorkMemoryWriter:
         with self._uow() as uow:
             svc = uow.memory_service
             result = svc.remember(
-                kind=kind, subject=subject, predicate=predicate, value=value,
+                kind=kind,
+                subject=subject,
+                predicate=predicate,
+                value=value,
                 principal_id=principal_id,
-                scope_type=scope_type, scope_id=scope_id, scope=scope,
-                source_type=source_type, source_id=source_id,
-                explicitness=explicitness, confidence=confidence,
+                scope_type=scope_type,
+                scope_id=scope_id,
+                scope=scope,
+                source_type=source_type,
+                source_id=source_id,
+                explicitness=explicitness,
+                confidence=confidence,
                 importance=importance,
             )
             uow.commit()
@@ -80,7 +88,10 @@ class UnitOfWorkMemoryWriter:
             return result
 
     def forget_by_canonical_key(
-        self, principal_id: str, subject: str, predicate: str,
+        self,
+        principal_id: str,
+        subject: str,
+        predicate: str,
     ) -> bool:
         with self._uow() as uow:
             svc = uow.memory_service
@@ -115,6 +126,7 @@ def make_unit_of_work_memory_writer(
     SqliteMemoryService / UnitOfWork 的存在。
     """
     from cogito.store.connection import get_connection as _get_conn
+
     conn = _get_conn(db_path)
     return UnitOfWorkMemoryWriter(conn=conn)
 

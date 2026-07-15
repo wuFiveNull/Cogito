@@ -7,6 +7,7 @@
 - Dashboard 端点返回真实值（不再是 None 占位）
 - 反馈 → 分级 ACK 窗口
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -44,16 +45,14 @@ def _seed_run(conn, run_id, status="completed", principal_id="owner"):
     conn.execute(
         "INSERT INTO tasks (task_id, task_type, status, priority, idempotency_key, created_at) "
         "VALUES (?,?,?,?,?,?)",
-        (f"t-{run_id}", "drift.run", "running", 5, f"idem-{run_id}",
-         int(time.time()*1000)),
+        (f"t-{run_id}", "drift.run", "running", 5, f"idem-{run_id}", int(time.time() * 1000)),
     )
     conn.execute(
         "INSERT INTO drift_runs "
         "(drift_run_id, task_id, principal_id, skill_name, skill_version, "
         " status, admission_snapshot_json, created_at) "
         "VALUES (?,?,?,?,?,?,?,?)",
-        (run_id, f"t-{run_id}", principal_id, "s", "1.0", status,
-         "{}", int(time.time()*1000)),
+        (run_id, f"t-{run_id}", principal_id, "s", "1.0", status, "{}", int(time.time() * 1000)),
     )
     conn.commit()
 
@@ -64,7 +63,9 @@ def _draft() -> DriftCandidateDraft:
         summary="proactive policy view: v1 dry_run=True",
         evidence_refs=("dr-1",),
         trust_label="system_generated",
-        urgency=0.6, confidence=0.8, relevance=0.7,
+        urgency=0.6,
+        confidence=0.8,
+        relevance=0.7,
     )
 
 
@@ -95,8 +96,7 @@ class TestProjection:
     def test_principal_mismatch_rejected(self, memory_db):
         _seed_run(memory_db, "dr-3", status="completed", principal_id="owner")
         svc = DriftProjectionService(memory_db, dry_run=False)
-        assert svc.project(drift_run_id="dr-3", draft=_draft(),
-                           principal_id="other") is None
+        assert svc.project(drift_run_id="dr-3", draft=_draft(), principal_id="other") is None
 
     def test_same_run_at_most_one_candidate(self, memory_db):
         _seed_run(memory_db, "dr-4", status="completed")
@@ -113,7 +113,8 @@ class TestProjection:
         assert result is None
         # 未创建 Candidate
         cnt = memory_db.execute(
-            "SELECT COUNT(*) FROM proactive_candidates WHERE origin='dr-5'").fetchone()[0]
+            "SELECT COUNT(*) FROM proactive_candidates WHERE origin='dr-5'"
+        ).fetchone()[0]
         assert cnt == 0
 
     def test_candidate_traces_to_drift_run(self, memory_db):
@@ -139,8 +140,10 @@ class TestDriftDashboard:
         )
         memory_db.commit()
         from cogito.service.api.query_service import SqliteQueryService
+
         # 用 minimal config 构造
         from cogito.config import Config
+
         svc = SqliteQueryService(memory_db, Config())
         status = svc.drift_status(principal_id="owner")
         assert status["latest_preemption_reason"] == "preempted_by_turn"  # 真实值，不再是 None
@@ -149,6 +152,7 @@ class TestDriftDashboard:
     def test_no_runs_returns_none_reason(self, memory_db):
         from cogito.service.api.query_service import SqliteQueryService
         from cogito.config import Config
+
         svc = SqliteQueryService(memory_db, Config())
         status = svc.drift_status(principal_id="owner")
         assert status["latest_preemption_reason"] is None
@@ -158,6 +162,7 @@ class TestDriftDashboard:
         _seed_run(memory_db, "dr-8", status="completed")
         from cogito.service.api.query_service import SqliteQueryService
         from cogito.config import Config
+
         svc = SqliteQueryService(memory_db, Config())
         runs = svc.list_drift_runs(principal_id="owner", limit=10)
         assert len(runs) == 1
@@ -182,20 +187,34 @@ class TestFeedback:
             " urgency, confidence, recommended_action, policy_version, "
             " idempotency_key, source_event_ids_json, created_at, status) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("c-fb", "owner", "context", "t", 0.6, 0.7, 0.6, 0.8, "evaluate",
-             1, "k-fb", "[]", int(time.time()*1000), "evaluating"),
+            (
+                "c-fb",
+                "owner",
+                "context",
+                "t",
+                0.6,
+                0.7,
+                0.6,
+                0.8,
+                "evaluate",
+                1,
+                "k-fb",
+                "[]",
+                int(time.time() * 1000),
+                "evaluating",
+            ),
         )
         memory_db.execute(
             "INSERT INTO proactive_decisions_v2 "
             "(decision_id, candidate_id, principal_id, action, rule_results_json, "
             " policy_version, dry_run, decided_at) "
             "VALUES (?,?,?,?,?,?,?,?)",
-            ("dec-fb", "c-fb", "owner", "send_now", "{}", 1, 0,
-             int(time.time()*1000)),
+            ("dec-fb", "c-fb", "owner", "send_now", "{}", 1, 0, int(time.time() * 1000)),
         )
         memory_db.commit()
         result = record_feedback(
-            memory_db, event_type="accepted", candidate_id="c-fb", principal_id="owner")
+            memory_db, event_type="accepted", candidate_id="c-fb", principal_id="owner"
+        )
         assert result["recorded"] is True
         assert result["ack_window_seconds"] > 0
         assert result["action"] == "send_now"

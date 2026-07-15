@@ -13,6 +13,7 @@ QQ-ONEBOT-E2E-01 / PR 2:
 - 避免同 event loop 死锁：DeliveryWorker 通过 asyncio.to_thread 调用，
   Gateway 在工作线程内使用 run_coroutine_threadsafe 回到主 loop
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -58,7 +59,6 @@ class ChannelGateway(Gateway):
         self._channel_manager = channel_manager
         self._loop: asyncio.AbstractEventLoop | None = None
 
-
     def send(self, target_snapshot: str, content_ref: str) -> bool | None:
         """遗留 bool|None 接口 —— 委托 send_request() 后映射。"""
         result = self.send_request(target_snapshot, content_ref)
@@ -93,7 +93,8 @@ class ChannelGateway(Gateway):
             return ChannelSendResult(status="temporary", error_code="adapter_not_running")
 
         request = self._build_send_request(
-            target, content,
+            target,
+            content,
             delivery_id=target.get("delivery_id", ""),
             attempt_id=target.get("attempt_id", ""),
         )
@@ -108,7 +109,8 @@ class ChannelGateway(Gateway):
         if adapter is None:
             return ChannelSendResult(status="temporary", error_code="adapter_not_running")
         request = self._build_send_request(
-            target, _TextContent(text=text),
+            target,
+            _TextContent(text=text),
             delivery_id=target.get("delivery_id", ""),
             attempt_id=target.get("attempt_id", ""),
         )
@@ -135,7 +137,9 @@ class ChannelGateway(Gateway):
         request = ChannelEditRequest(
             delivery_id=target.get("delivery_id", ""),
             attempt_id=target.get("attempt_id", ""),
-            idempotency_key=target.get("idempotency_key", f"delivery_{target.get('delivery_id', '')}"),
+            idempotency_key=target.get(
+                "idempotency_key", f"delivery_{target.get('delivery_id', '')}"
+            ),
             channel_instance_id=adapter_id,
             target_endpoint_ref=target.get("target_endpoint_ref", ""),
             platform_conversation_id=str(conversation_id),
@@ -172,10 +176,14 @@ class ChannelGateway(Gateway):
         except Exception as e:
             _LOG.exception("ChannelGateway delete_request_sync failed: %s", e)
 
-    def _resolve_target(self, target_snapshot: str | dict) -> tuple[dict | None, str | None, str | None]:
+    def _resolve_target(
+        self, target_snapshot: str | dict
+    ) -> tuple[dict | None, str | None, str | None]:
         """解析 target_snapshot，返回 (target_dict, adapter_id, conversation_id)。"""
         try:
-            target = json.loads(target_snapshot) if isinstance(target_snapshot, str) else target_snapshot
+            target = (
+                json.loads(target_snapshot) if isinstance(target_snapshot, str) else target_snapshot
+            )
         except (json.JSONDecodeError, TypeError):
             return None, None, None
         if not isinstance(target, dict):
@@ -187,17 +195,26 @@ class ChannelGateway(Gateway):
         if not adapter_id and reply_route:
             adapter_id = reply_route.get("adapter_id") or reply_route.get("channel_instance_id")
         if not conversation_id and reply_route:
-            conversation_id = reply_route.get("conversation_id") or reply_route.get("platform_conversation_id")
+            conversation_id = reply_route.get("conversation_id") or reply_route.get(
+                "platform_conversation_id"
+            )
         return target, adapter_id, conversation_id
 
     def _build_send_request(
-        self, target: dict, content: _Content, *, delivery_id: str, attempt_id: str,
+        self,
+        target: dict,
+        content: _Content,
+        *,
+        delivery_id: str,
+        attempt_id: str,
     ) -> ChannelSendRequest:
         adapter_id = target.get("adapter_id")
         reply_route = target.get("reply_route", {})
         conversation_id = target.get("conversation_id") or target.get("target")
         if not conversation_id and reply_route:
-            conversation_id = reply_route.get("conversation_id") or reply_route.get("platform_conversation_id")
+            conversation_id = reply_route.get("conversation_id") or reply_route.get(
+                "platform_conversation_id"
+            )
         return ChannelSendRequest(
             delivery_id=delivery_id,
             attempt_id=attempt_id,
@@ -268,9 +285,11 @@ class ChannelGateway(Gateway):
             if not r["payload_ref"]:
                 continue
             meta = json.loads(r["metadata"] or "{}")
-            attachments.append(ChannelAttachment(
-                payload_ref=r["payload_ref"],
-                mime=str(meta.get("mime") or "image/png"),
-                name=str(meta.get("name") or meta.get("filename") or ""),
-            ))
+            attachments.append(
+                ChannelAttachment(
+                    payload_ref=r["payload_ref"],
+                    mime=str(meta.get("mime") or "image/png"),
+                    name=str(meta.get("name") or meta.get("filename") or ""),
+                )
+            )
         return _TextContent(text=text, attachments=tuple(attachments))

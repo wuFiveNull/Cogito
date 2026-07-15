@@ -59,8 +59,16 @@ def _add_message(
         "INSERT INTO messages (message_id, conversation_id, session_id, role, direction, "
         "sender_principal_id, receive_sequence, trust_label, created_at) "
         "VALUES (?, ?, ?, ?, 'inbound', ?, ?, ?, ?)",
-        (message_id, conversation_id, session_id, role, principal_id, sequence, trust_label,
-         epoch_ms(datetime.now(UTC))),
+        (
+            message_id,
+            conversation_id,
+            session_id,
+            role,
+            principal_id,
+            sequence,
+            trust_label,
+            epoch_ms(datetime.now(UTC)),
+        ),
     )
     conn.execute(
         "INSERT INTO content_parts (part_id, message_id, content_type, inline_data, trust_label) "
@@ -96,8 +104,16 @@ def _add_message_multi_part(
         "INSERT INTO messages (message_id, conversation_id, session_id, role, direction, "
         "sender_principal_id, receive_sequence, trust_label, created_at) "
         "VALUES (?, ?, ?, ?, 'inbound', ?, ?, ?, ?)",
-        (message_id, conversation_id, session_id, role, principal_id, sequence, trust_label,
-         epoch_ms(datetime.now(UTC))),
+        (
+            message_id,
+            conversation_id,
+            session_id,
+            role,
+            principal_id,
+            sequence,
+            trust_label,
+            epoch_ms(datetime.now(UTC)),
+        ),
     )
     for i, part in enumerate(parts):
         conn.execute(
@@ -111,7 +127,9 @@ def _add_message_multi_part(
 class TestContextBuilder:
     def test_build_creates_snapshot(self, db):
         _add_message(db, message_id="m1", session_id="s1", role="user", content="Hello", sequence=1)
-        _add_message(db, message_id="m2", session_id="s1", role="assistant", content="Hi there", sequence=2)
+        _add_message(
+            db, message_id="m2", session_id="s1", role="assistant", content="Hi there", sequence=2
+        )
 
         builder = ContextBuilder(db)
         snapshot = builder.build("t1", "s1", "m1")
@@ -123,7 +141,9 @@ class TestContextBuilder:
     def test_message_upper_bound_uses_sequence(self, db):
         """message_upper_bound 使用真实 max receive_sequence。"""
         _add_message(db, message_id="m1", session_id="s1", role="user", content="A", sequence=5)
-        _add_message(db, message_id="m2", session_id="s1", role="assistant", content="B", sequence=10)
+        _add_message(
+            db, message_id="m2", session_id="s1", role="assistant", content="B", sequence=10
+        )
 
         builder = ContextBuilder(db)
         snapshot = builder.build("t1", "s1", "m1")
@@ -140,9 +160,33 @@ class TestContextBuilder:
             snapshot.turn_id = "new"  # type: ignore[misc]
 
     def test_only_current_session(self, db):
-        _add_message(db, message_id="m1", session_id="s1", conversation_id="c1", role="user", content="Session 1", sequence=1)
-        _add_message(db, message_id="m2", session_id="s1", conversation_id="c1", role="user", content="Session 1 again", sequence=2)
-        _add_message(db, message_id="m3", session_id="s2", conversation_id="c2", role="user", content="Session 2", sequence=1)
+        _add_message(
+            db,
+            message_id="m1",
+            session_id="s1",
+            conversation_id="c1",
+            role="user",
+            content="Session 1",
+            sequence=1,
+        )
+        _add_message(
+            db,
+            message_id="m2",
+            session_id="s1",
+            conversation_id="c1",
+            role="user",
+            content="Session 1 again",
+            sequence=2,
+        )
+        _add_message(
+            db,
+            message_id="m3",
+            session_id="s2",
+            conversation_id="c2",
+            role="user",
+            content="Session 2",
+            sequence=1,
+        )
 
         builder = ContextBuilder(db)
         snapshot = builder.build("t1", "s1", "m1")
@@ -152,8 +196,12 @@ class TestContextBuilder:
             assert item.source == "s1" or item.source == "system"
 
     def test_input_message_always_included(self, db):
-        _add_message(db, message_id="m1", session_id="s1", role="user", content="Input msg", sequence=1)
-        _add_message(db, message_id="m2", session_id="s1", role="assistant", content="Reply", sequence=2)
+        _add_message(
+            db, message_id="m1", session_id="s1", role="user", content="Input msg", sequence=1
+        )
+        _add_message(
+            db, message_id="m2", session_id="s1", role="assistant", content="Reply", sequence=2
+        )
 
         builder = ContextBuilder(db)
         snapshot = builder.build("t1", "s1", "m2")  # m2 is the input
@@ -162,7 +210,15 @@ class TestContextBuilder:
         assert "m2" in item_ids
 
     def test_trust_label_preserved(self, db):
-        _add_message(db, message_id="m1", session_id="s1", role="user", content="Hello", sequence=1, trust_label="verified")
+        _add_message(
+            db,
+            message_id="m1",
+            session_id="s1",
+            role="user",
+            content="Hello",
+            sequence=1,
+            trust_label="verified",
+        )
 
         builder = ContextBuilder(db)
         snapshot = builder.build("t1", "s1", "m1")
@@ -174,8 +230,12 @@ class TestContextBuilder:
     def test_role_preserved_through_context(self, db):
         """role 正确保留，不会丢失。"""
         _add_message(db, message_id="m1", session_id="s1", role="user", content="Hello", sequence=1)
-        _add_message(db, message_id="m2", session_id="s1", role="assistant", content="Hi there", sequence=2)
-        _add_message(db, message_id="m3", session_id="s1", role="user", content="What's up?", sequence=3)
+        _add_message(
+            db, message_id="m2", session_id="s1", role="assistant", content="Hi there", sequence=2
+        )
+        _add_message(
+            db, message_id="m3", session_id="s1", role="user", content="What's up?", sequence=3
+        )
 
         builder = ContextBuilder(db)
         snapshot = builder.build("t1", "s1", "m3")
@@ -190,7 +250,9 @@ class TestContextBuilder:
     def test_assistant_does_not_become_user(self, db):
         """assistant 历史不会变成 user。"""
         _add_message(db, message_id="m1", session_id="s1", role="user", content="Hello", sequence=1)
-        _add_message(db, message_id="m2", session_id="s1", role="assistant", content="Reply", sequence=2)
+        _add_message(
+            db, message_id="m2", session_id="s1", role="assistant", content="Reply", sequence=2
+        )
 
         builder = ContextBuilder(db)
         snapshot = builder.build("t1", "s1", "m2")
@@ -211,8 +273,12 @@ class TestContextBuilder:
     def test_ordering_system_history_input(self, db):
         """验证正确顺序：system → 历史正序 → 当前输入最后。"""
         _add_message(db, message_id="m1", session_id="s1", role="user", content="First", sequence=1)
-        _add_message(db, message_id="m2", session_id="s1", role="assistant", content="Reply 1", sequence=2)
-        _add_message(db, message_id="m3", session_id="s1", role="user", content="Second", sequence=3)
+        _add_message(
+            db, message_id="m2", session_id="s1", role="assistant", content="Reply 1", sequence=2
+        )
+        _add_message(
+            db, message_id="m3", session_id="s1", role="user", content="Second", sequence=3
+        )
 
         builder = ContextBuilder(db)
         snapshot = builder.build("t1", "s1", "m3", system_policy="System policy text")
@@ -227,7 +293,9 @@ class TestContextBuilder:
     def test_current_input_is_last(self, db):
         """当前输入始终位于消息序列最后。"""
         _add_message(db, message_id="m1", session_id="s1", role="user", content="Q1", sequence=1)
-        _add_message(db, message_id="m2", session_id="s1", role="assistant", content="A1", sequence=2)
+        _add_message(
+            db, message_id="m2", session_id="s1", role="assistant", content="A1", sequence=2
+        )
         _add_message(db, message_id="m3", session_id="s1", role="user", content="Q2", sequence=3)
 
         builder = ContextBuilder(db)
@@ -259,7 +327,9 @@ class TestContextBuilder:
         """Token 超限裁剪产生 excluded_summary。"""
         for i in range(20):
             mid = f"m{i}"
-            _add_message(db, message_id=mid, session_id="s1", role="user", content="X" * 2000, sequence=i)
+            _add_message(
+                db, message_id=mid, session_id="s1", role="user", content="X" * 2000, sequence=i
+            )
 
         builder = ContextBuilder(db, max_input_tokens=1000)
         snapshot = builder.build("t1", "s1", "m0")
@@ -269,8 +339,12 @@ class TestContextBuilder:
 
     def test_system_policy_not_clipped(self, db):
         """System Policy 不被裁剪。"""
-        _add_message(db, message_id="m1", session_id="s1", role="user", content="X" * 5000, sequence=1)
-        _add_message(db, message_id="m2", session_id="s1", role="user", content="Y" * 5000, sequence=2)
+        _add_message(
+            db, message_id="m1", session_id="s1", role="user", content="X" * 5000, sequence=1
+        )
+        _add_message(
+            db, message_id="m2", session_id="s1", role="user", content="Y" * 5000, sequence=2
+        )
 
         builder = ContextBuilder(db, max_input_tokens=1000)
         snapshot = builder.build("t1", "s1", "m2", system_policy="Policy text" * 10)
@@ -281,7 +355,9 @@ class TestContextBuilder:
         """当前输入不被裁剪。"""
         # 大量历史消息压缩预算
         for i in range(50):
-            _add_message(db, message_id=f"m{i}", session_id="s1", role="user", content="X" * 1000, sequence=i)
+            _add_message(
+                db, message_id=f"m{i}", session_id="s1", role="user", content="X" * 1000, sequence=i
+            )
 
         builder = ContextBuilder(db, max_input_tokens=1000)
         snapshot = builder.build("t1", "s1", "m49")
@@ -336,9 +412,20 @@ def _add_memory(
         "  status, version, created_at"
         ") VALUES (?,?,?,?,?,?, ?,?,?, ?,?,?,?,?, 'confirmed', 1, ?)",
         (
-            memory_id, kind, subject, predicate, value, principal_id,
-            scope_type, scope_id, canonical_key,
-            "test", "test_src", explicitness, confidence, importance,
+            memory_id,
+            kind,
+            subject,
+            predicate,
+            value,
+            principal_id,
+            scope_type,
+            scope_id,
+            canonical_key,
+            "test",
+            "test_src",
+            explicitness,
+            confidence,
+            importance,
             epoch_ms(datetime.now(UTC)),
         ),
     )
@@ -360,8 +447,15 @@ class TestMemoryInjection:
 
     def test_empty_principal_skips_injection(self, db):
         """principal_id 为空时不注入记忆。"""
-        _add_message(db, message_id="m1", session_id="s1", role="user", content="Hi", sequence=1,
-                     principal_id="")
+        _add_message(
+            db,
+            message_id="m1",
+            session_id="s1",
+            role="user",
+            content="Hi",
+            sequence=1,
+            principal_id="",
+        )
         service = SqliteMemoryService(db)
         builder = ContextBuilder(db, memory_reader=service)
 
@@ -371,11 +465,24 @@ class TestMemoryInjection:
 
     def test_injects_global_memory_after_system(self, db):
         """全局记忆出现在 system policy 之后。"""
-        _add_message(db, message_id="m1", session_id="s1", role="user", content="Hi", sequence=1,
-                     principal_id="p1")
-        _add_memory(db, memory_id="mem1", principal_id="p1",
-                    subject="user", predicate="lang", value="Python",
-                    importance=0.8)
+        _add_message(
+            db,
+            message_id="m1",
+            session_id="s1",
+            role="user",
+            content="Hi",
+            sequence=1,
+            principal_id="p1",
+        )
+        _add_memory(
+            db,
+            memory_id="mem1",
+            principal_id="p1",
+            subject="user",
+            predicate="lang",
+            value="Python",
+            importance=0.8,
+        )
 
         service = SqliteMemoryService(db)
         builder = ContextBuilder(db, memory_reader=service)
@@ -390,11 +497,24 @@ class TestMemoryInjection:
 
     def test_memory_format_contains_tags(self, db):
         """记忆注入格式包含 <relevant_memories> 标签和来源标记。"""
-        _add_message(db, message_id="m1", session_id="s1", role="user", content="Hi", sequence=1,
-                     principal_id="p1")
-        _add_memory(db, memory_id="mem1", principal_id="p1",
-                    subject="user", predicate="lang", value="Python",
-                    explicitness="explicit_user_statement")
+        _add_message(
+            db,
+            message_id="m1",
+            session_id="s1",
+            role="user",
+            content="Hi",
+            sequence=1,
+            principal_id="p1",
+        )
+        _add_memory(
+            db,
+            memory_id="mem1",
+            principal_id="p1",
+            subject="user",
+            predicate="lang",
+            value="Python",
+            explicitness="explicit_user_statement",
+        )
 
         service = SqliteMemoryService(db)
         builder = ContextBuilder(db, memory_reader=service)
@@ -410,18 +530,41 @@ class TestMemoryInjection:
 
     def test_scope_priority_dedup(self, db):
         """同 canonical_key 时，session scope 优先于 global。"""
-        _add_message(db, message_id="m1", session_id="s1", role="user", content="Hi", sequence=1,
-                     principal_id="p1")
+        _add_message(
+            db,
+            message_id="m1",
+            session_id="s1",
+            role="user",
+            content="Hi",
+            sequence=1,
+            principal_id="p1",
+        )
         # session-scoped: 低优先级的值
-        _add_memory(db, memory_id="mem_s", principal_id="p1",
-                    subject="user", predicate="lang", value="SessionLang",
-                    scope_type="session", scope_id="s1",
-                    canonical_key="p1.user.lang", importance=0.5)
+        _add_memory(
+            db,
+            memory_id="mem_s",
+            principal_id="p1",
+            subject="user",
+            predicate="lang",
+            value="SessionLang",
+            scope_type="session",
+            scope_id="s1",
+            canonical_key="p1.user.lang",
+            importance=0.5,
+        )
         # global: 高优值
-        _add_memory(db, memory_id="mem_g", principal_id="p1",
-                    subject="user", predicate="lang", value="GlobalLang",
-                    scope_type="", scope_id="",
-                    canonical_key="p1.user.lang", importance=0.8)
+        _add_memory(
+            db,
+            memory_id="mem_g",
+            principal_id="p1",
+            subject="user",
+            predicate="lang",
+            value="GlobalLang",
+            scope_type="",
+            scope_id="",
+            canonical_key="p1.user.lang",
+            importance=0.8,
+        )
 
         service = SqliteMemoryService(db)
         builder = ContextBuilder(db, memory_reader=service)
@@ -438,11 +581,24 @@ class TestMemoryInjection:
 
     def test_different_principal_isolation(self, db):
         """不同 principal 不共享记忆。"""
-        _add_message(db, message_id="m1", session_id="s1", role="user", content="Hi", sequence=1,
-                     principal_id="p1")
+        _add_message(
+            db,
+            message_id="m1",
+            session_id="s1",
+            role="user",
+            content="Hi",
+            sequence=1,
+            principal_id="p1",
+        )
         # p2 的记忆
-        _add_memory(db, memory_id="mem_p2", principal_id="p2",
-                    subject="user", predicate="lang", value="Rust")
+        _add_memory(
+            db,
+            memory_id="mem_p2",
+            principal_id="p2",
+            subject="user",
+            predicate="lang",
+            value="Rust",
+        )
 
         service = SqliteMemoryService(db)
         builder = ContextBuilder(db, memory_reader=service)
@@ -453,14 +609,26 @@ class TestMemoryInjection:
 
     def test_token_budget_limits_memories(self, db):
         """记忆超出 token 预算时被裁剪。"""
-        _add_message(db, message_id="m1", session_id="s1", role="user", content="Hi", sequence=1,
-                     principal_id="p1")
+        _add_message(
+            db,
+            message_id="m1",
+            session_id="s1",
+            role="user",
+            content="Hi",
+            sequence=1,
+            principal_id="p1",
+        )
         # 插入大量记忆使 budget 超限
         for i in range(30):
-            _add_memory(db, memory_id=f"mem_{i}", principal_id="p1",
-                        subject="user", predicate=f"attr_{i}",
-                        value="A" * 200,  # ~50 tokens each
-                        importance=0.5 if i > 0 else 1.0)
+            _add_memory(
+                db,
+                memory_id=f"mem_{i}",
+                principal_id="p1",
+                subject="user",
+                predicate=f"attr_{i}",
+                value="A" * 200,  # ~50 tokens each
+                importance=0.5 if i > 0 else 1.0,
+            )
 
         service = SqliteMemoryService(db)
         builder = ContextBuilder(db, memory_reader=service)
@@ -474,12 +642,32 @@ class TestMemoryInjection:
 
     def test_memory_between_system_and_history(self, db):
         """记忆条目位于 system policy 和 历史消息 之间。"""
-        _add_message(db, message_id="m1", session_id="s1", role="user", content="Q1", sequence=1,
-                     principal_id="p1")
-        _add_message(db, message_id="m2", session_id="s1", role="assistant", content="A1", sequence=2,
-                     principal_id="p1")
-        _add_memory(db, memory_id="mem1", principal_id="p1",
-                    subject="user", predicate="lang", value="Python")
+        _add_message(
+            db,
+            message_id="m1",
+            session_id="s1",
+            role="user",
+            content="Q1",
+            sequence=1,
+            principal_id="p1",
+        )
+        _add_message(
+            db,
+            message_id="m2",
+            session_id="s1",
+            role="assistant",
+            content="A1",
+            sequence=2,
+            principal_id="p1",
+        )
+        _add_memory(
+            db,
+            memory_id="mem1",
+            principal_id="p1",
+            subject="user",
+            predicate="lang",
+            value="Python",
+        )
 
         service = SqliteMemoryService(db)
         builder = ContextBuilder(db, memory_reader=service)
@@ -494,12 +682,31 @@ class TestMemoryInjection:
 
     def test_memory_ids_recorded_in_snapshot(self, db):
         """注入的记忆 ID 记录在 snapshot.memory_ids 中。"""
-        _add_message(db, message_id="m1", session_id="s1", role="user", content="Hi", sequence=1,
-                     principal_id="p1")
-        _add_memory(db, memory_id="mem_a", principal_id="p1",
-                    subject="user", predicate="lang", value="Python")
-        _add_memory(db, memory_id="mem_b", principal_id="p1",
-                    subject="user", predicate="editor", value="VS Code")
+        _add_message(
+            db,
+            message_id="m1",
+            session_id="s1",
+            role="user",
+            content="Hi",
+            sequence=1,
+            principal_id="p1",
+        )
+        _add_memory(
+            db,
+            memory_id="mem_a",
+            principal_id="p1",
+            subject="user",
+            predicate="lang",
+            value="Python",
+        )
+        _add_memory(
+            db,
+            memory_id="mem_b",
+            principal_id="p1",
+            subject="user",
+            predicate="editor",
+            value="VS Code",
+        )
 
         service = SqliteMemoryService(db)
         builder = ContextBuilder(db, memory_reader=service)
@@ -518,7 +725,9 @@ def _add_summary(
 ) -> None:
     """插入一条 session_summary 用于测试。"""
     if content_json is None:
-        content_json = '{"summary": "User asked about Python.", "confirmed_facts": ["user likes Python"]}'
+        content_json = (
+            '{"summary": "User asked about Python.", "confirmed_facts": ["user likes Python"]}'
+        )
     from datetime import UTC, datetime
 
     conn.execute(
@@ -557,9 +766,14 @@ class TestContextCompression:
     def test_compression_replaces_old_messages(self, db):
         """高 token_ratio 下，旧消息被摘要替换。"""
         for i in range(1, 21):
-            _add_message(db, message_id=f"m{i}", session_id="s1", role="user",
-                         content="This is a long message that consumes many tokens. " * 30,
-                         sequence=i)
+            _add_message(
+                db,
+                message_id=f"m{i}",
+                session_id="s1",
+                role="user",
+                content="This is a long message that consumes many tokens. " * 30,
+                sequence=i,
+            )
         _add_summary(db, session_id="s1", covers_to_seq=15)
 
         builder = ContextBuilder(db, max_input_tokens=1200)
@@ -577,9 +791,14 @@ class TestContextCompression:
     def test_compression_keeps_recent_messages(self, db):
         """压缩后最新 KEEP_RECENT_COUNT 条消息仍保留。"""
         for i in range(1, 21):
-            _add_message(db, message_id=f"m{i}", session_id="s1", role="user",
-                         content="Long message for tokens. " * 20,
-                         sequence=i)
+            _add_message(
+                db,
+                message_id=f"m{i}",
+                session_id="s1",
+                role="user",
+                content="Long message for tokens. " * 20,
+                sequence=i,
+            )
         _add_summary(db, session_id="s1", covers_to_seq=15)
 
         builder = ContextBuilder(db, max_input_tokens=1200)
@@ -592,9 +811,14 @@ class TestContextCompression:
     def test_no_summary_falls_back_to_clipping(self, db):
         """摘要不存在时，回退到普通裁剪。"""
         for i in range(1, 20):
-            _add_message(db, message_id=f"m{i}", session_id="s1", role="user",
-                         content="Long message for tokens. " * 30,
-                         sequence=i)
+            _add_message(
+                db,
+                message_id=f"m{i}",
+                session_id="s1",
+                role="user",
+                content="Long message for tokens. " * 30,
+                sequence=i,
+            )
         # 不插入 summary
 
         builder = ContextBuilder(db, max_input_tokens=500)
@@ -610,11 +834,20 @@ class TestContextCompression:
     def test_summary_format(self, db):
         """摘要格式包含 Session Summary 标题。"""
         for i in range(1, 12):
-            _add_message(db, message_id=f"m{i}", session_id="s1", role="user",
-                         content="Long message that takes up tokens. " * 20,
-                         sequence=i)
-        _add_summary(db, session_id="s1", covers_to_seq=10,
-                     content_json='{"summary": "Discussed Python.", "confirmed_facts": ["uses Python"]}')
+            _add_message(
+                db,
+                message_id=f"m{i}",
+                session_id="s1",
+                role="user",
+                content="Long message that takes up tokens. " * 20,
+                sequence=i,
+            )
+        _add_summary(
+            db,
+            session_id="s1",
+            covers_to_seq=10,
+            content_json='{"summary": "Discussed Python.", "confirmed_facts": ["uses Python"]}',
+        )
 
         builder = ContextBuilder(db, max_input_tokens=1200)
         snapshot = builder.build("t1", "s1", "m12")
@@ -628,12 +861,24 @@ class TestContextCompression:
     def test_compression_between_memory_and_history(self, db):
         """装配顺序：system → memory → summary → 近期消息 → 当前输入。"""
         for i in range(1, 16):
-            _add_message(db, message_id=f"m{i}", session_id="s1", role="user",
-                         content="Long message for tokens. " * 20,
-                         sequence=i, principal_id="p1")
+            _add_message(
+                db,
+                message_id=f"m{i}",
+                session_id="s1",
+                role="user",
+                content="Long message for tokens. " * 20,
+                sequence=i,
+                principal_id="p1",
+            )
         _add_summary(db, session_id="s1", covers_to_seq=10)
-        _add_memory(db, memory_id="mem1", principal_id="p1",
-                    subject="user", predicate="lang", value="Python")
+        _add_memory(
+            db,
+            memory_id="mem1",
+            principal_id="p1",
+            subject="user",
+            predicate="lang",
+            value="Python",
+        )
 
         service = SqliteMemoryService(db)
         builder = ContextBuilder(db, memory_reader=service, max_input_tokens=1500)

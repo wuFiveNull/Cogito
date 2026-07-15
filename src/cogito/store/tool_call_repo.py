@@ -13,6 +13,7 @@ from typing import Literal
 @dataclass
 class ToolCallRecord:
     """tool_calls 表的值对象。"""
+
     tool_call_id: str
     attempt_id: str
     attempt_type: str = "run"
@@ -21,7 +22,9 @@ class ToolCallRecord:
     arguments: str = "{}"
     arguments_ref: str = ""
     idempotency_key: str = ""
-    status: Literal["pending", "approved", "executing", "succeeded", "failed", "unknown", "cancelled"] = "pending"
+    status: Literal[
+        "pending", "approved", "executing", "succeeded", "failed", "unknown", "cancelled"
+    ] = "pending"
     started_at: int | None = None
     completed_at: int | None = None
     result_ref: str = ""
@@ -45,12 +48,24 @@ class ToolCallRepository:
             "arguments, arguments_ref, idempotency_key, status, started_at, completed_at, "
             "result_ref, result_summary, result_trust_label, result_size_bytes, constraints_json) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (record.tool_call_id, record.attempt_id, record.attempt_type,
-             record.tool_name, record.tool_version,
-             record.arguments, record.arguments_ref, record.idempotency_key,
-             record.status, record.started_at, record.completed_at,
-             record.result_ref, record.result_summary, record.result_trust_label,
-             record.result_size_bytes, record.constraints_json),
+            (
+                record.tool_call_id,
+                record.attempt_id,
+                record.attempt_type,
+                record.tool_name,
+                record.tool_version,
+                record.arguments,
+                record.arguments_ref,
+                record.idempotency_key,
+                record.status,
+                record.started_at,
+                record.completed_at,
+                record.result_ref,
+                record.result_summary,
+                record.result_trust_label,
+                record.result_size_bytes,
+                record.constraints_json,
+            ),
         )
 
     def update_status(
@@ -70,8 +85,15 @@ class ToolCallRepository:
                 "UPDATE tool_calls SET status=?, completed_at=?, result_ref=?, "
                 "result_summary=?, result_trust_label=?, result_size_bytes=? "
                 "WHERE tool_call_id=?",
-                (status, completed_at, result_ref, result_summary,
-                 result_trust_label, result_size_bytes, tool_call_id),
+                (
+                    status,
+                    completed_at,
+                    result_ref,
+                    result_summary,
+                    result_trust_label,
+                    result_size_bytes,
+                    tool_call_id,
+                ),
             )
         else:
             self._conn.execute(

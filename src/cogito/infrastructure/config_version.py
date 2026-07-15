@@ -4,6 +4,7 @@
 后层只覆盖显式字段，未知字段报错。Secret 只保存 secret_ref。
 热更新先 parse/validate/dry-run，再原子激活；配置失败继续使用旧版本。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -15,18 +16,43 @@ _LOGGER = logging.getLogger("cogito.config_version")
 
 # 顶层覆盖 17 个一级 key (Plan 06 M2)
 CONFIG_TOP_LEVEL_KEYS = {
-    "runtime", "storage", "interaction", "worker", "model", "agent",
-    "embedding", "capability", "channel", "conversation", "memory",
-    "sandbox", "scheduler", "connector", "proactive", "security",
-    "observability", "retention", "backup",
+    "runtime",
+    "storage",
+    "interaction",
+    "worker",
+    "model",
+    "agent",
+    "embedding",
+    "capability",
+    "channel",
+    "conversation",
+    "memory",
+    "sandbox",
+    "scheduler",
+    "connector",
+    "proactive",
+    "security",
+    "observability",
+    "retention",
+    "backup",
 }
 
 # 跨字段校验规则 (Plan 06 M2)
 CROSS_FIELD_RULES = [
-    ("worker.heartbeat_s * 2", lambda c: c.get("worker", {}).get("heartbeat_s", 0) * 2
-                          < c.get("worker", {}).get("lease_ttl_s", 999)),
-    ("output_budget < context_window", lambda c: c.get("agent", {}).get("max_output_tokens", 0)
-                          < c.get("model", {}).get("context_window", 999999)),
+    (
+        "worker.heartbeat_s * 2",
+        lambda c: (
+            c.get("worker", {}).get("heartbeat_s", 0) * 2
+            < c.get("worker", {}).get("lease_ttl_s", 999)
+        ),
+    ),
+    (
+        "output_budget < context_window",
+        lambda c: (
+            c.get("agent", {}).get("max_output_tokens", 0)
+            < c.get("model", {}).get("context_window", 999999)
+        ),
+    ),
 ]
 
 
@@ -35,9 +61,7 @@ def normalize_config(raw: dict[str, Any]) -> dict[str, Any]:
     layers = []
     if raw:
         layers.append("profile")
-    content_hash = hashlib.sha256(
-        json.dumps(raw, sort_keys=True).encode()
-    ).hexdigest()[:16]
+    content_hash = hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()[:16]
     return {
         **raw,
         "config_version": "1.0",
@@ -103,10 +127,12 @@ class ConfigHotReloader:
         dry_errors = hot_reload_dry_run(new_config)
         if dry_errors:
             errors.extend(dry_errors)
-            self._failed_attempts.append({
-                "config": new_config,
-                "errors": errors,
-            })
+            self._failed_attempts.append(
+                {
+                    "config": new_config,
+                    "errors": errors,
+                }
+            )
             _LOGGER.warning("Config hot reload rejected: %s", "; ".join(errors))
             return False, errors
 
@@ -120,10 +146,12 @@ class ConfigHotReloader:
             # 3. 失败 → 保留旧版本
             self._current = old_config
             errors.append(f"activation failed: {e}")
-            self._failed_attempts.append({
-                "config": new_config,
-                "errors": errors,
-            })
+            self._failed_attempts.append(
+                {
+                    "config": new_config,
+                    "errors": errors,
+                }
+            )
             _LOGGER.error("Config hot reload failed, kept old version: %s", e)
             return False, errors
 

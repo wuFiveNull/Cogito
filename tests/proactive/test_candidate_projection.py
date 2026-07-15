@@ -7,6 +7,7 @@
 - connector_items.status='digest' 才投影，silent/new 不投影
 - source='mcp:…' origin 的 event 正确处理
 """
+
 from __future__ import annotations
 
 import json
@@ -27,6 +28,7 @@ from cogito.store.migration import migrate
 @pytest.fixture
 def memory_db():
     import sqlite3
+
     conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.execute("PRAGMA foreign_keys=ON;")
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -37,13 +39,21 @@ def memory_db():
     conn.close()
 
 
-def _insert_digest_item(conn, item_id="item-1", title="AI 模型更新",
-                       body="重要更新...", relevance=0.7, connector_id="conn-mcp"):
+def _insert_digest_item(
+    conn,
+    item_id="item-1",
+    title="AI 模型更新",
+    body="重要更新...",
+    relevance=0.7,
+    connector_id="conn-mcp",
+):
     """预置一条 status='digest' 的 connector_item（含必要的外键行）。"""
     from cogito.domain.connector import Connector, ConnectorRawItem
     from cogito.store.connector_repo import (
-        ConnectorRepository, ConnectorRawRepository,
+        ConnectorRepository,
+        ConnectorRawRepository,
     )
+
     # connector FK (唯一主键；已存在则跳过)
     if not ConnectorRepository(conn).get(connector_id):
         conn.execute(
@@ -73,9 +83,15 @@ def _insert_digest_item(conn, item_id="item-1", title="AI 模型更新",
         relevance=relevance,
         status=ItemStatus.digest,
     )
-    ConnectorItemRepository(conn).insert(item, source_metadata=json.dumps({
-        "id": item_id, "category": "ai-models",
-    }))
+    ConnectorItemRepository(conn).insert(
+        item,
+        source_metadata=json.dumps(
+            {
+                "id": item_id,
+                "category": "ai-models",
+            }
+        ),
+    )
     conn.commit()
 
 
@@ -167,12 +183,18 @@ def test_status_digest_only_projected(memory_db):
     # 写入 new / silent 两个 item
     for st in ("new", "silent"):
         item_id = f"item-{st}"
-        ConnectorItemRepository(conn).insert(ConnectorItem(
-            item_id=item_id, connector_id="conn-mcp", raw_item_id="raw-shared",
-            source_item_id=f"ext-{item_id}", title="t", summary="s",
-            content_hash=f"h-{item_id}",
-            status=ItemStatus(st),
-        ))
+        ConnectorItemRepository(conn).insert(
+            ConnectorItem(
+                item_id=item_id,
+                connector_id="conn-mcp",
+                raw_item_id="raw-shared",
+                source_item_id=f"ext-{item_id}",
+                title="t",
+                summary="s",
+                content_hash=f"h-{item_id}",
+                status=ItemStatus(st),
+            )
+        )
     conn.commit()
 
     cnt = conn.execute("SELECT COUNT(*) FROM proactive_candidates").fetchone()[0]
@@ -186,12 +208,20 @@ def test_can_handle_filter(memory_db):
     assert consumer.can_handle(source_evt) is True
 
     other_evt = OutboxLease(
-        event_id="e2", event_type="InboundMessageAccepted",
-        aggregate_type="message", aggregate_id="m1",
-        aggregate_version=1, payload_ref=None,
-        content_hash="", schema_version="1",
-        correlation_id="", causation_id="", origin="channel",
-        trust_label="internal", created_at=0,
-        lease_version=1, attempt_count=0,
+        event_id="e2",
+        event_type="InboundMessageAccepted",
+        aggregate_type="message",
+        aggregate_id="m1",
+        aggregate_version=1,
+        payload_ref=None,
+        content_hash="",
+        schema_version="1",
+        correlation_id="",
+        causation_id="",
+        origin="channel",
+        trust_label="internal",
+        created_at=0,
+        lease_version=1,
+        attempt_count=0,
     )
     assert consumer.can_handle(other_evt) is False

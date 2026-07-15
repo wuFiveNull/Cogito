@@ -4,6 +4,7 @@ The port represents platform operations only.  It never creates or mutates a
 Core Delivery aggregate; callers persist intent before invoking it and persist
 the returned receipt afterwards.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -38,14 +39,18 @@ class GatewayClient(Protocol):
     """
 
     def send(
-        self, target_snapshot: str, content: str, idempotency_key: str,
-    ) -> GatewayResult:
-        ...
+        self,
+        target_snapshot: str,
+        content: str,
+        idempotency_key: str,
+    ) -> GatewayResult: ...
 
     def start_placeholder(
-        self, target_snapshot: str, content: str, idempotency_key: str,
-    ) -> GatewayResult:
-        ...
+        self,
+        target_snapshot: str,
+        content: str,
+        idempotency_key: str,
+    ) -> GatewayResult: ...
 
     def edit(
         self,
@@ -56,8 +61,7 @@ class GatewayClient(Protocol):
         idempotency_key: str,
         *,
         is_final: bool = False,
-    ) -> GatewayResult:
-        ...
+    ) -> GatewayResult: ...
 
     def finish(
         self,
@@ -66,8 +70,7 @@ class GatewayClient(Protocol):
         content: str,
         operation_seq: int,
         idempotency_key: str,
-    ) -> GatewayResult:
-        ...
+    ) -> GatewayResult: ...
 
     def delete(
         self,
@@ -75,24 +78,27 @@ class GatewayClient(Protocol):
         platform_message_id: str,
         operation_seq: int,
         idempotency_key: str,
-    ) -> GatewayResult:
-        ...
+    ) -> GatewayResult: ...
 
     def reconcile(
         self,
         target_snapshot: str,
         platform_message_id: str | None,
         idempotency_key: str,
-    ) -> GatewayResult:
-        ...
+    ) -> GatewayResult: ...
 
-    def health(self) -> dict[str, Any]:
-        ...
+    def health(self) -> dict[str, Any]: ...
 
 
-PERMANENT_GATEWAY_STATUSES = frozenset({
-    "permanent", "auth_error", "route_expired", "unsupported", "too_large",
-})
+PERMANENT_GATEWAY_STATUSES = frozenset(
+    {
+        "permanent",
+        "auth_error",
+        "route_expired",
+        "unsupported",
+        "too_large",
+    }
+)
 
 
 def gateway_status_to_channel(status: str) -> str:

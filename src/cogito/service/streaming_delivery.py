@@ -22,9 +22,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from cogito.bench import timing as _bench_timing
+from cogito.contracts.clock import Clock, ProductionClock
 from cogito.domain.events import DomainEvent
 from cogito.domain.message import ContentPart, Message, MessageDirection, MessageRole
-from cogito.contracts.clock import Clock, ProductionClock
 from cogito.runtime.loop import AgentLoop
 from cogito.service.dispatcher import Dispatcher
 from cogito.service.unit_of_work import UnitOfWork
@@ -43,13 +43,15 @@ def _noop_on_delta(*_args: Any, **_kwargs: Any) -> None:
 @dataclass
 class StreamPolicy:
     """流式节流策略。"""
-    throttle_ms: int = 40          # 两次 edit 之间最小间隔（节流合并）
-    max_operations: int = 300      # 单 Delivery 最大 edit 操作数
+
+    throttle_ms: int = 40  # 两次 edit 之间最小间隔（节流合并）
+    max_operations: int = 300  # 单 Delivery 最大 edit 操作数
 
 
 @dataclass
 class StreamInputMeta:
     """流式投递所需的输入元数据（来自输入消息 + Turn/Attempt）。"""
+
     conversation_id: str
     session_id: str
     endpoint_id: str
@@ -159,7 +161,9 @@ class StreamingDeliveryController:
                     result = self._gateway.send_text(target_json, "…")
                     platform_message_id = result.platform_message_id or f"web-msg-{delivery_id}"
                     self._delivery_repo.mark_placeholder(
-                        delivery_id, attempt_id, platform_message_id,
+                        delivery_id,
+                        attempt_id,
+                        platform_message_id,
                     )
                     _first_token_ms = (now - _start_ts) * 1000
                     _bench_timing.checkpoint(
@@ -168,7 +172,9 @@ class StreamingDeliveryController:
                     )
                     _LOG.info(
                         "stream first-token latency=%.0fms conversation=%s turn=%s",
-                        _first_token_ms, input_meta.conversation_id, turn.turn_id,
+                        _first_token_ms,
+                        input_meta.conversation_id,
+                        turn.turn_id,
                     )
                     on_delta(input_meta.conversation_id, full, 0, False)
                 else:
@@ -178,8 +184,11 @@ class StreamingDeliveryController:
                         operation_seq += 1
                         self._gateway.edit(target_json, platform_message_id, full, operation_seq)
                         self._delivery_repo.record_edit(
-                            delivery_id, attempt_id, operation_seq,
-                            platform_message_id, "confirmed",
+                            delivery_id,
+                            attempt_id,
+                            operation_seq,
+                            platform_message_id,
+                            "confirmed",
                         )
                         on_delta(input_meta.conversation_id, full, operation_seq, False)
                         last_push = now
@@ -205,27 +214,45 @@ class StreamingDeliveryController:
             return None
 
         final_text = "".join(accumulated)
-        _bench_timing.checkpoint("streaming:model_done", extra={
-            "accumulated_chars": len(final_text),
-            "operation_seq": operation_seq,
-        })
+        _bench_timing.checkpoint(
+            "streaming:model_done",
+            extra={
+                "accumulated_chars": len(final_text),
+                "operation_seq": operation_seq,
+            },
+        )
         # 定稿前再推一次完整文本作为最终 edit（保证前端收到最终全文，
         # 即便最后一次节流 edit 因间隔未触发）。
         operation_seq += 1
         self._gateway.edit(
-            target_json, platform_message_id, final_text, operation_seq, is_final=True,
+            target_json,
+            platform_message_id,
+            final_text,
+            operation_seq,
+            is_final=True,
         )
         self._delivery_repo.record_edit(
-            delivery_id, attempt_id, operation_seq,
-            platform_message_id, "confirmed",
+            delivery_id,
+            attempt_id,
+            operation_seq,
+            platform_message_id,
+            "confirmed",
         )
         _bench_timing.checkpoint("streaming:final_edit_sent")
         final_message_id = self._finalize(
-            delivery_id, platform_message_id, turn, attempt, final_text, input_meta,
+            delivery_id,
+            platform_message_id,
+            turn,
+            attempt,
+            final_text,
+            input_meta,
         )
-        _bench_timing.checkpoint("streaming:finalize_tx_done", extra={
-            "final_message_id": final_message_id or "",
-        })
+        _bench_timing.checkpoint(
+            "streaming:finalize_tx_done",
+            extra={
+                "final_message_id": final_message_id or "",
+            },
+        )
         if final_message_id is None and platform_message_id is not None:
             # 定稿事务失败（如 Turn 已被其他 worker 完成）→ 撤回占位，避免残留气泡
             self._gateway.delete(target_json, platform_message_id, "finalize_failed")
@@ -235,8 +262,11 @@ class StreamingDeliveryController:
         _LOG.info(
             "stream turn finished: total=%.0fms first-token included, "
             "conversation=%s turn=%s chars=%d ops=%d",
-            _total_ms, input_meta.conversation_id, turn.turn_id,
-            len(final_text), operation_seq,
+            _total_ms,
+            input_meta.conversation_id,
+            turn.turn_id,
+            len(final_text),
+            operation_seq,
         )
         return final_message_id
 
@@ -246,7 +276,9 @@ class StreamingDeliveryController:
             result = self._gateway.send_text(target_json, message)
             _LOG.info(
                 "push_error: %s (status=%s) conversation=%s",
-                message, result.status, input_meta.conversation_id,
+                message,
+                result.status,
+                input_meta.conversation_id,
             )
         except Exception:
             _LOG.warning("push_error failed: %s", message, exc_info=True)
@@ -259,11 +291,7 @@ class StreamingDeliveryController:
         idempotency_key: str,
     ) -> dict[str, Any]:
         reply_route = meta.reply_route or {}
-        adapter_id = (
-            reply_route.get("channel_instance_id")
-            or reply_route.get("adapter_id")
-            or ""
-        )
+        adapter_id = reply_route.get("channel_instance_id") or reply_route.get("adapter_id") or ""
         target_endpoint_ref = reply_route.get("target_endpoint_ref") or adapter_id or ""
         # 路由键用平台会话 ID（与 ChannelGateway 非流式投递、Web WS 订阅键一致），
         # 而非内部 DB conversation_id（UUID），否则事件会落到信箱而非实时队列。
@@ -309,25 +337,30 @@ class StreamingDeliveryController:
                 uow.message.insert_content_part(part, message.message_id)
 
             self._delivery_repo.finish_streaming(
-                delivery_id, message.message_id, platform_message_id or "", text,
+                delivery_id,
+                message.message_id,
+                platform_message_id or "",
+                text,
             )
 
             now = self._clock.now()
-            uow.outbox.insert(DomainEvent(
-                event_type="TurnCompleted",
-                aggregate_type="turn",
-                aggregate_id=turn.turn_id,
-                aggregate_version=turn.version + 1,
-                payload={
-                    "turn_id": turn.turn_id,
-                    "message_id": message.message_id,
-                    "delivery_id": delivery_id,
-                },
-                occurred_at=now,
-                correlation_id=turn.turn_id,
-                causation_id=turn.turn_id,
-                origin="agent",
-            ))
+            uow.outbox.insert(
+                DomainEvent(
+                    event_type="TurnCompleted",
+                    aggregate_type="turn",
+                    aggregate_id=turn.turn_id,
+                    aggregate_version=turn.version + 1,
+                    payload={
+                        "turn_id": turn.turn_id,
+                        "message_id": message.message_id,
+                        "delivery_id": delivery_id,
+                    },
+                    occurred_at=now,
+                    correlation_id=turn.turn_id,
+                    causation_id=turn.turn_id,
+                    origin="agent",
+                )
+            )
 
             ok = self._dispatcher.complete(
                 turn.turn_id,

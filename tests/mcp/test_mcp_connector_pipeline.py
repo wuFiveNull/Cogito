@@ -4,6 +4,7 @@
 MCP 调用通过 `asyncio.run` 在独立线程内执行，每个 test function 独占自己的
 in-memory DB + fake MCP 子进程。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -47,7 +48,9 @@ class _FakeManager:
     ) -> MCPCallResult:
         async def _call():
             return await self._client.call_tool_structured(
-                tool_name, arguments, max_output_bytes=max_output_bytes,
+                tool_name,
+                arguments,
+                max_output_bytes=max_output_bytes,
             )
 
         # 使用 MCP 专用 persistent loop
@@ -66,6 +69,7 @@ class _MCPPersistentRunner:
         if self._started:
             return
         import threading
+
         loop = asyncio.new_event_loop()
         self._loop = loop
 
@@ -81,6 +85,7 @@ class _MCPPersistentRunner:
 
     def run(self, coro, timeout: float = 30):
         import asyncio
+
         if self._loop is None:
             raise RuntimeError("loop not started")
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
@@ -93,6 +98,7 @@ class _MCPPersistentRunner:
 
 import threading
 import sys
+
 _mcp_loop_runner = _MCPPersistentRunner()
 
 
@@ -157,17 +163,23 @@ def isolated_memory_db():
 
     class _NoCloseConn:
         """代理连接：close() 是 no-op（底层连接由 fixture 管理）。"""
+
         def __init__(self, real):
             self._r = real
+
         def execute(self, *a, **kw):
             return self._r.execute(*a, **kw)
+
         def commit(self):
             return self._r.commit()
+
         def close(self):
             pass  # no-op，防止 handler 关闭 fixture 的底层连接
+
         @property
         def row_factory(self):
             return self._r.row_factory
+
         @row_factory.setter
         def row_factory(self, v):
             self._r.row_factory = v
@@ -185,6 +197,7 @@ def ctx_factory():
             workspace_path="",
             mcp_manager=mcp_manager,
         )
+
     return _make
 
 
@@ -254,6 +267,39 @@ def test_full_pipeline_two_pages(
         ("conn-test-mcp",),
     ).fetchone()[0]
     assert cnt == 8
+    statuses = {
+        row[0]
+        for row in isolated_memory_db.execute(
+            "SELECT DISTINCT status FROM connector_items WHERE connector_id=?",
+            ("conn-test-mcp",),
+        ).fetchall()
+    }
+    assert statuses <= {"digest", "silent"}
+    assert "new" not in statuses
+
+
+def test_model_enrichment_runs_outside_write_transaction(
+    isolated_memory_db,
+    mcp_manager: _FakeManager,
+    ctx_factory,
+    monkeypatch,
+):
+    import cogito.service.mcp_connector_handler as handler_module
+
+    _seed_connector_and_mapping(isolated_memory_db)
+    ctx = ctx_factory(mcp_manager, isolated_memory_db)
+    ctx.model_router = object()
+    transaction_states: list[bool] = []
+
+    async def fake_summary(title, body, model_router):
+        transaction_states.append(isolated_memory_db._r.in_transaction)
+        return f"summary:{title}"
+
+    monkeypatch.setattr(handler_module, "summarize_item", fake_summary)
+    handle_mcp_connector_poll(_make_task("conn-test-mcp"), ctx)
+
+    assert transaction_states
+    assert transaction_states == [False] * len(transaction_states)
 
 
 def test_idempotent_repoll(
@@ -321,8 +367,7 @@ def test_ingestion_batch_logging(
     handle_mcp_connector_poll(_make_task("conn-test-mcp"), ctx)
 
     cnt = isolated_memory_db.execute(
-        "SELECT COUNT(*) FROM ingestion_batches "
-        "WHERE connector_id=? AND status='committed'",
+        "SELECT COUNT(*) FROM ingestion_batches WHERE connector_id=? AND status='committed'",
         ("conn-test-mcp",),
     ).fetchone()[0]
     assert cnt >= 1

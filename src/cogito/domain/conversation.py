@@ -76,7 +76,9 @@ class Conversation:
             conversation_endpoint_ref=data.get("conversation_endpoint_ref", ""),
             conversation_type=ConversationType(data["conversation_type"]),
             principal_scope=data.get("principal_scope", ""),
-            context_partition_policy=ContextPartitionPolicy(data.get("context_partition_policy", "isolated")),
+            context_partition_policy=ContextPartitionPolicy(
+                data.get("context_partition_policy", "isolated")
+            ),
             status=ConversationStatus(data["status"]),
         )
 

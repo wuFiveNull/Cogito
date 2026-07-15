@@ -2,6 +2,7 @@
 
 PLAN-13 MEM-P00-01: 旧 MemoryItem 不丢失来源，新写入强制走新表。
 """
+
 from __future__ import annotations
 
 import uuid
@@ -14,9 +15,11 @@ from cogito.store.memory_repo import MemoryRepository
 @pytest.fixture
 def db():
     import sqlite3
+
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     from cogito.store.migration import migrate
+
     migrate(conn)
     return conn
 
@@ -29,8 +32,12 @@ def _insert_legacy(db, source_type="extractor", source_id="auto_extract"):
         "(memory_id, kind, subject, predicate, value, principal_id, "
         "source_type, source_id, status, created_at) "
         "VALUES (?, 'fact', 's', 'p', 'v', 'owner', ?, ?, 'confirmed', ?)",
-        (mid, source_type, source_id,
-         __import__("datetime").datetime.now(__import__("datetime").UTC).isoformat()),
+        (
+            mid,
+            source_type,
+            source_id,
+            __import__("datetime").datetime.now(__import__("datetime").UTC).isoformat(),
+        ),
     )
     db.commit()
     return mid
@@ -47,8 +54,13 @@ class TestLegacyBackfill:
             "  memory_source_id, memory_id, source_type, source_id, "
             "  trust_label, created_at"
             ") VALUES (?, ?, ?, ?, 'medium', ?)",
-            (f"{mid}-legacy", mid, "message", "msg-old-1",
-             __import__("datetime").datetime.now(__import__("datetime").UTC).isoformat()),
+            (
+                f"{mid}-legacy",
+                mid,
+                "message",
+                "msg-old-1",
+                __import__("datetime").datetime.now(__import__("datetime").UTC).isoformat(),
+            ),
         )
         db.commit()
 
@@ -66,9 +78,13 @@ class TestLegacyBackfill:
             "  memory_source_id, memory_id, source_type, source_id, "
             "  evidence_ref, trust_label, created_at"
             ") VALUES (?, ?, ?, '', ?, 'legacy_unresolved', ?)",
-            (f"{mid}-legacy", mid, "message",
-             "original_source_type=extractor",
-             __import__("datetime").datetime.now(__import__("datetime").UTC).isoformat()),
+            (
+                f"{mid}-legacy",
+                mid,
+                "message",
+                "original_source_type=extractor",
+                __import__("datetime").datetime.now(__import__("datetime").UTC).isoformat(),
+            ),
         )
         db.commit()
 
@@ -114,9 +130,11 @@ class TestLegacyBackfill:
     def test_remember_writes_memory_source(self, db):
         """手工 remember() 也写 memory_sources（P13-03）。"""
         from cogito.service.memory_service import SqliteMemoryService
+
         svc = SqliteMemoryService(db)
-        mem = svc.remember(kind="fact", subject="user", predicate="lang",
-                           value="Python", principal_id="owner")
+        mem = svc.remember(
+            kind="fact", subject="user", predicate="lang", value="Python", principal_id="owner"
+        )
         repo = MemoryRepository(db)
         sources = repo.list_sources(mem.memory_id)
         # 至少有一条 manual 来源

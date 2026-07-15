@@ -3,13 +3,14 @@
 轻量包装：MCP 映射配置以 JSON 字段为主，
 读写聚焦在 connectors + mcp_connector_configs 两张表。
 """
+
 from __future__ import annotations
 
 import sqlite3
 from typing import Any
 
-from cogito.domain.mcp_connector import MCPConnectorConfig
 from cogito.contracts.clock import now_ms
+from cogito.domain.mcp_connector import MCPConnectorConfig
 
 
 class MCPConnectorConfigRepository:
@@ -99,6 +100,7 @@ def _parse_json(raw: str | None, fallback: type) -> Any:
     if not raw:
         return fallback()
     import json
+
     try:
         return json.loads(raw)
     except (ValueError, TypeError):
@@ -107,4 +109,5 @@ def _parse_json(raw: str | None, fallback: type) -> Any:
 
 def _dump_json(value: Any) -> str:
     import json
+
     return json.dumps(value, ensure_ascii=False, sort_keys=True)

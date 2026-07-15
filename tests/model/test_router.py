@@ -38,6 +38,7 @@ class TestModelRouter:
         class UnhealthyProvider(StubModelProvider):
             async def health(self):
                 from cogito.model.provider import HealthStatus
+
                 return HealthStatus(healthy=False, message="Down")
 
         primary = UnhealthyProvider()
@@ -57,6 +58,7 @@ class TestModelRouter:
         class AlwaysDown(StubModelProvider):
             async def health(self):
                 from cogito.model.provider import HealthStatus
+
                 return HealthStatus(healthy=False, message="Down")
 
         router = ModelRouter(
@@ -70,13 +72,17 @@ class TestModelRouter:
 
     @pytest.mark.asyncio
     async def test_context_overflow_not_retried(self):
-        provider = StubModelProvider([
-            StubScenario(error=ErrorEnvelope(
-                category=ErrorCategory.context_overflow,
-                message="Context too long",
-                retryable=False,
-            )),
-        ])
+        provider = StubModelProvider(
+            [
+                StubScenario(
+                    error=ErrorEnvelope(
+                        category=ErrorCategory.context_overflow,
+                        message="Context too long",
+                        retryable=False,
+                    )
+                ),
+            ]
+        )
         router = ModelRouter(
             providers={"stub": provider},
             role_map={"main": "stub"},
@@ -87,13 +93,17 @@ class TestModelRouter:
 
     @pytest.mark.asyncio
     async def test_non_retryable_error_not_fallback(self):
-        provider = StubModelProvider([
-            StubScenario(error=ErrorEnvelope(
-                category=ErrorCategory.authentication,
-                message="Auth failed",
-                retryable=False,
-            )),
-        ])
+        provider = StubModelProvider(
+            [
+                StubScenario(
+                    error=ErrorEnvelope(
+                        category=ErrorCategory.authentication,
+                        message="Auth failed",
+                        retryable=False,
+                    )
+                ),
+            ]
+        )
         router = ModelRouter(
             providers={"stub": provider},
             role_map={"main": "stub"},

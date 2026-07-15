@@ -3,6 +3,7 @@
 复用现有 ChannelManager + Adapter；delivery 经 service 层完成，
 platform 回执经 ChannelAdapter.send 真实发出（或测试时走 fake adapter）。
 """
+
 from __future__ import annotations
 
 import json
@@ -26,7 +27,10 @@ class LoopbackGatewayClient:
         self._manager = getattr(channel_gateway, "_channel_manager", channel_gateway)
 
     def send(
-        self, target_snapshot: str, content: str, idempotency_key: str,
+        self,
+        target_snapshot: str,
+        content: str,
+        idempotency_key: str,
     ) -> GatewayResult:
         """Send resolved text through the in-process ChannelGateway."""
         if hasattr(self._gateway, "send_text"):
@@ -85,7 +89,10 @@ class LoopbackGatewayClient:
             return GatewayResult(status="temporary", error_code="exception")
 
     def start_placeholder(
-        self, target_snapshot: str, content: str, idempotency_key: str,
+        self,
+        target_snapshot: str,
+        content: str,
+        idempotency_key: str,
     ) -> GatewayResult:
         return self.send(target_snapshot, content, idempotency_key)
 
@@ -103,7 +110,10 @@ class LoopbackGatewayClient:
             return GatewayResult(status="unsupported", error_code="adapter_no_edit_support")
         try:
             result = self._gateway.edit(
-                target_snapshot, platform_message_id, content, operation_seq,
+                target_snapshot,
+                platform_message_id,
+                content,
+                operation_seq,
                 is_final=is_final,
             )
             return _from_channel_result(result)
@@ -120,8 +130,12 @@ class LoopbackGatewayClient:
         idempotency_key: str,
     ) -> GatewayResult:
         return self.edit(
-            target_snapshot, platform_message_id, content, operation_seq,
-            idempotency_key, is_final=True,
+            target_snapshot,
+            platform_message_id,
+            content,
+            operation_seq,
+            idempotency_key,
+            is_final=True,
         )
 
     def delete(
@@ -157,13 +171,15 @@ class LoopbackGatewayClient:
         instances = []
         for name, adapter in adapters.items():
             status = str(getattr(adapter, "status", "unknown"))
-            instances.append({
-                "instance_id": getattr(adapter, "adapter_id", name),
-                "channel_type": getattr(adapter, "channel_type", name),
-                "connected": status.endswith("running"),
-                "auth_ok": status not in ("error", "AdapterStatus.error"),
-                "rate_limited": False,
-            })
+            instances.append(
+                {
+                    "instance_id": getattr(adapter, "adapter_id", name),
+                    "channel_type": getattr(adapter, "channel_type", name),
+                    "connected": status.endswith("running"),
+                    "auth_ok": status not in ("error", "AdapterStatus.error"),
+                    "rate_limited": False,
+                }
+            )
         return {
             "status": "healthy" if all(i["connected"] for i in instances) else "degraded",
             "instances": instances,

@@ -206,7 +206,9 @@ class SqliteMemoryService:
         else:
             raise ValueError("Either conn or repo must be provided")
 
-    def _emit_memory_event(self, event_type: str, memory_id: str, payload: dict | None = None) -> None:
+    def _emit_memory_event(
+        self, event_type: str, memory_id: str, payload: dict | None = None
+    ) -> None:
         """发布 Memory 领域事件到 Outbox（PLAN-16 M2 TX-01/TX-03 + 完整版本单调）。
 
         与调用方共享同一连接 / 事务：写入失败会向上传播，由调用方
@@ -216,17 +218,20 @@ class SqliteMemoryService:
         """
         from cogito.domain.events import DomainEvent
         from cogito.store.repositories import OutboxRepository
+
         data = payload or {}
         version = OutboxRepository(self._repo._conn).next_aggregate_version("memory", memory_id)
-        OutboxRepository(self._repo._conn).insert(DomainEvent(
-            event_type=event_type,
-            aggregate_type="memory",
-            aggregate_id=memory_id,
-            aggregate_version=version,
-            payload=data,
-            payload_ref=__import__("json").dumps(data, ensure_ascii=False),
-            origin="memory_service",
-        ))
+        OutboxRepository(self._repo._conn).insert(
+            DomainEvent(
+                event_type=event_type,
+                aggregate_type="memory",
+                aggregate_id=memory_id,
+                aggregate_version=version,
+                payload=data,
+                payload_ref=__import__("json").dumps(data, ensure_ascii=False),
+                origin="memory_service",
+            )
+        )
 
     # ── 写入 ──
 
@@ -262,8 +267,12 @@ class SqliteMemoryService:
             extraction_id: 提取任务 ID（如 session:from:to:version），用于 memory_sources。
         """
         canonical_key = _make_canonical_key(
-            principal_id, subject, predicate,
-            scope_type=scope_type, scope_id=scope_id, value=value,
+            principal_id,
+            subject,
+            predicate,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            value=value,
         )
 
         existing = self._repo.find_by_canonical_key(
@@ -310,8 +319,11 @@ class SqliteMemoryService:
 
         # PLAN-13 P13-02: 同事务写入精确来源（memory_sources）
         self._write_memory_sources(
-            created.memory_id, source_type=source_type, source_id=source_id,
-            evidence=evidence, extraction_id=extraction_id,
+            created.memory_id,
+            source_type=source_type,
+            source_id=source_id,
+            evidence=evidence,
+            extraction_id=extraction_id,
             trust_label=self._trust_from_explicitness(explicitness),
         )
 
@@ -340,12 +352,22 @@ class SqliteMemoryService:
             created.confirmed_at = now
 
         # PLAN-14 R-08: Memory 候选已创建
-        event = "MemoryConfirmed" if created.status == MemoryStatus.confirmed else "MemoryCandidateCreated"
-        self._emit_memory_event(event, created.memory_id, {
-            "kind": created.kind.value if hasattr(created.kind, "value") else str(created.kind),
-            "status": created.status.value if hasattr(created.status, "value") else str(created.status),
-            "principal_id": principal_id,
-        })
+        event = (
+            "MemoryConfirmed"
+            if created.status == MemoryStatus.confirmed
+            else "MemoryCandidateCreated"
+        )
+        self._emit_memory_event(
+            event,
+            created.memory_id,
+            {
+                "kind": created.kind.value if hasattr(created.kind, "value") else str(created.kind),
+                "status": created.status.value
+                if hasattr(created.status, "value")
+                else str(created.status),
+                "principal_id": principal_id,
+            },
+        )
 
         return created
 
@@ -364,33 +386,38 @@ class SqliteMemoryService:
         - 无 evidence但有 source_id → 建立一条范围来源
         """
         from cogito.domain.memory import MemorySource
+
         if evidence:
-            for ev in (evidence or []):
+            for ev in evidence or []:
                 if not isinstance(ev, dict):
                     continue
                 ev_id = ev.get("message_id", "")
                 if not ev_id:
                     continue
-                self._repo.insert_source(MemorySource(
+                self._repo.insert_source(
+                    MemorySource(
+                        memory_source_id="",
+                        memory_id=memory_id,
+                        source_type=source_type or "message",
+                        source_id=ev_id,
+                        evidence_ref=ev.get("evidence_ref", ""),
+                        evidence_hash=ev.get("evidence_hash", ""),
+                        trust_label=ev.get("trust_label", trust_label),
+                        extraction_id=extraction_id,
+                    )
+                )
+        else:
+            # 无精确 evidence 时，记录一条范围/手动来源，确保可追踪率 100%
+            self._repo.insert_source(
+                MemorySource(
                     memory_source_id="",
                     memory_id=memory_id,
                     source_type=source_type or "message",
-                    source_id=ev_id,
-                    evidence_ref=ev.get("evidence_ref", ""),
-                    evidence_hash=ev.get("evidence_hash", ""),
-                    trust_label=ev.get("trust_label", trust_label),
+                    source_id=source_id or extraction_id or "unknown",
+                    trust_label=trust_label,
                     extraction_id=extraction_id,
-                ))
-        else:
-            # 无精确 evidence 时，记录一条范围/手动来源，确保可追踪率 100%
-            self._repo.insert_source(MemorySource(
-                memory_source_id="",
-                memory_id=memory_id,
-                source_type=source_type or "message",
-                source_id=source_id or extraction_id or "unknown",
-                trust_label=trust_label,
-                extraction_id=extraction_id,
-            ))
+                )
+            )
 
     @staticmethod
     def _trust_from_explicitness(explicitness: str) -> str:
@@ -425,8 +452,12 @@ class SqliteMemoryService:
         4. 不存在 → 新建
         """
         canonical_key = _make_canonical_key(
-            principal_id, subject, predicate,
-            scope_type=scope_type, scope_id=scope_id, value=value,
+            principal_id,
+            subject,
+            predicate,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            value=value,
         )
 
         # 查找已有有效记忆
@@ -473,7 +504,8 @@ class SqliteMemoryService:
         # 此处若未被显式设为非 message，则归为 manual 以区分自动提取
         effective_source_type = source_type if source_type not in ("", "message") else "manual"
         self._write_memory_sources(
-            created.memory_id, source_type=effective_source_type,
+            created.memory_id,
+            source_type=effective_source_type,
             source_id=source_id,
             trust_label=self._trust_from_explicitness(explicitness),
             extraction_id=f"manual:{principal_id}",
@@ -506,8 +538,11 @@ class SqliteMemoryService:
     ) -> bool:
         """按 canonical_key 忘记。"""
         canonical_key = _make_canonical_key(
-            principal_id, subject, predicate,
-            scope_type=scope_type, scope_id=scope_id,
+            principal_id,
+            subject,
+            predicate,
+            scope_type=scope_type,
+            scope_id=scope_id,
         )
         existing = self._repo.find_by_canonical_key(
             principal_id=principal_id,
@@ -536,6 +571,7 @@ class SqliteMemoryService:
         并落审计（Audit）。重复擦除（已 deleted_at）幂等返回 True。
         """
         from cogito.domain.errors import EntityNotFoundError
+
         target = self.get(memory_id)
         if target is None:
             raise EntityNotFoundError("memory", memory_id)
@@ -552,11 +588,15 @@ class SqliteMemoryService:
             principal_id=principal_id,
         )
         if ok:
-            self._emit_memory_event("MemoryErased", memory_id, {
-                "reason": reason,
-                "receipt_id": receipt_id,
-                "principal_id": target.principal_id,
-            })
+            self._emit_memory_event(
+                "MemoryErased",
+                memory_id,
+                {
+                    "reason": reason,
+                    "receipt_id": receipt_id,
+                    "principal_id": target.principal_id,
+                },
+            )
         return ok
 
     # ── 读取 ──
@@ -595,34 +635,55 @@ class SqliteMemoryService:
 
     # ── 管理 ──
 
-    def confirm(self, memory_id: str, confirmed_by: str = "", *, expected_version: int | None = None) -> bool:
+    def confirm(
+        self, memory_id: str, confirmed_by: str = "", *, expected_version: int | None = None
+    ) -> bool:
         """确认候选记忆（PLAN-14 R-08: emit MemoryConfirmed）。"""
         ok = self._repo.confirm(
-            memory_id, confirmed_by=confirmed_by, confirmation_method="manual",
+            memory_id,
+            confirmed_by=confirmed_by,
+            confirmation_method="manual",
             expected_version=expected_version,
         )
         if ok:
-            self._emit_memory_event("MemoryConfirmed", memory_id, {
-                "confirmed_by": confirmed_by, "method": "manual",
-            })
+            self._emit_memory_event(
+                "MemoryConfirmed",
+                memory_id,
+                {
+                    "confirmed_by": confirmed_by,
+                    "method": "manual",
+                },
+            )
         return ok
 
-    def reject(self, memory_id: str, principal_id: str = "", *, expected_version: int | None = None) -> bool:
+    def reject(
+        self, memory_id: str, principal_id: str = "", *, expected_version: int | None = None
+    ) -> bool:
         """拒绝候选记忆（PLAN-14 R-08: emit MemoryRejected）。"""
-        ok = self._repo.reject(memory_id, principal_id=principal_id, expected_version=expected_version)
+        ok = self._repo.reject(
+            memory_id, principal_id=principal_id, expected_version=expected_version
+        )
         if ok:
-            self._emit_memory_event("MemoryRejected", memory_id, {
-                "principal_id": principal_id,
-            })
+            self._emit_memory_event(
+                "MemoryRejected",
+                memory_id,
+                {
+                    "principal_id": principal_id,
+                },
+            )
         return ok
 
     def supersede(self, old_id: str, new_id: str) -> bool:
         """标旧记忆被新记忆覆盖（PLAN-14 R-05, R-08）。"""
         ok = self._repo.supersede(old_id, new_id)
         if ok:
-            self._emit_memory_event("MemorySuperseded", old_id, {
-                "superseded_by": new_id,
-            })
+            self._emit_memory_event(
+                "MemorySuperseded",
+                old_id,
+                {
+                    "superseded_by": new_id,
+                },
+            )
         return ok
 
     # ── Correct（PLAN-16 M3 MEM-03/04/06）──
@@ -652,9 +713,11 @@ class SqliteMemoryService:
         old = self.get(memory_id)
         if old is None:
             from cogito.domain.errors import EntityNotFoundError
+
             raise EntityNotFoundError("memory", memory_id)
         if expected_version is not None and old.version != expected_version:
             from cogito.domain.errors import ConcurrencyConflictError
+
             raise ConcurrencyConflictError("memory", memory_id, expected_version, old.version)
 
         now = datetime.now(UTC)
@@ -708,20 +771,30 @@ class SqliteMemoryService:
         )
 
         # PLAN-13/16: 确认事件（新记忆）+ superseded 事件（旧记忆）
-        self._emit_memory_event("MemoryConfirmed", created.memory_id, {
-            "kind": created.kind.value,
-            "status": created.status.value,
-            "principal_id": old.principal_id,
-            "corrected": True,
-        })
-        self._emit_memory_event("MemorySuperseded", old.memory_id, {
-            "superseded_by": created.memory_id,
-        })
+        self._emit_memory_event(
+            "MemoryConfirmed",
+            created.memory_id,
+            {
+                "kind": created.kind.value,
+                "status": created.status.value,
+                "principal_id": old.principal_id,
+                "corrected": True,
+            },
+        )
+        self._emit_memory_event(
+            "MemorySuperseded",
+            old.memory_id,
+            {
+                "superseded_by": created.memory_id,
+            },
+        )
 
         # MEM-04: 正向 user_corrected 信号落在新事实上（而非旧记忆）
         from cogito.service.memory_signals import SignalWriter
+
         SignalWriter(self._repo._conn).record_signal(
-            "user_corrected", created.memory_id,
+            "user_corrected",
+            created.memory_id,
             actor_principal_id=old.principal_id,
             idempotency_key=_user_corrected_idempotency_key(memory_id, created.memory_id),
             algorithm_version="2",
@@ -758,10 +831,14 @@ class SqliteMemoryService:
         ).fetchone()
         if remaining is None:
             self._repo.expire(memory_id)
-            self._emit_memory_event("MemoryExpired", memory_id, {
-                "reason": reason,
-                "source_resource_id": source_resource_id,
-            })
+            self._emit_memory_event(
+                "MemoryExpired",
+                memory_id,
+                {
+                    "reason": reason,
+                    "source_resource_id": source_resource_id,
+                },
+            )
 
 
 # ── helpers ────────────────────────────────────────────────────────────────

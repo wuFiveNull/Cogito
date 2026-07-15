@@ -619,17 +619,22 @@ class AgentLoop:
         # 注入工具 Schema
         tools = ()
         if state.capability_schemas:
-            tools = tuple({
-                "type": "function",
-                "function": {
-                    "name": item["name"],
-                    "description": str(item.get("description", ""))[:512],
-                    "parameters": item["parameters"],
-                },
-            } for item in state.capability_schemas if not item.get("deferred") or (
-                item["name"] in state.exposed_tools
-                or item["capability_id"] in state.exposed_tools
-            ))
+            tools = tuple(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": item["name"],
+                        "description": str(item.get("description", ""))[:512],
+                        "parameters": item["parameters"],
+                    },
+                }
+                for item in state.capability_schemas
+                if not item.get("deferred")
+                or (
+                    item["name"] in state.exposed_tools
+                    or item["capability_id"] in state.exposed_tools
+                )
+            )
 
         return ModelRequest(
             messages=messages,
@@ -643,8 +648,10 @@ class AgentLoop:
                     1,
                     state.budget.max_wall_time_s
                     - int(
-                        ((state.last_iteration_at or datetime.now(UTC))
-                         - (state.started_at or datetime.now(UTC))).total_seconds()
+                        (
+                            (state.last_iteration_at or datetime.now(UTC))
+                            - (state.started_at or datetime.now(UTC))
+                        ).total_seconds()
                     ),
                 ),
             ),
@@ -816,8 +823,10 @@ class AgentLoop:
                 "wall_time_s": max(
                     0,
                     int(
-                        ((state.last_iteration_at or datetime.now(UTC))
-                         - (state.started_at or datetime.now(UTC))).total_seconds()
+                        (
+                            (state.last_iteration_at or datetime.now(UTC))
+                            - (state.started_at or datetime.now(UTC))
+                        ).total_seconds()
                     ),
                 ),
             },
@@ -829,7 +838,8 @@ class AgentLoop:
         tool = self._registry.get(name)
         snapshot_ids = {item["capability_id"] for item in state.capability_schemas}
         if (
-            tool is None or tool.capability_id not in snapshot_ids
+            tool is None
+            or tool.capability_id not in snapshot_ids
             or not (set(tool.toolset) & self._toolsets)
         ):
             return False
@@ -876,7 +886,8 @@ class AgentLoop:
                     "accumulated_cost": state.accumulated_cost,
                     "elapsed_wall_seconds": (
                         (datetime.now(UTC) - state.started_at).total_seconds()
-                        if state.started_at else 0.0
+                        if state.started_at
+                        else 0.0
                     ),
                     "budget": state.budget.to_dict(),
                     "message_count": len(state.messages),

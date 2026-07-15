@@ -8,6 +8,7 @@ pending → sending → sent
 
 实现：`SqliteDeliveryService`（service/sqlite_delivery_service.py）。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ from typing import Any, Protocol
 @dataclass(frozen=True)
 class DeliveryRequest:
     """投递请求。"""
+
     target: dict[str, Any]
     content_ref: str
     idempotency_key: str = ""
@@ -27,6 +29,7 @@ class DeliveryRequest:
 @dataclass(frozen=True)
 class DeliveryRef:
     """投递引用。"""
+
     delivery_id: str
 
     def __str__(self) -> str:
@@ -36,6 +39,7 @@ class DeliveryRef:
 @dataclass(frozen=True)
 class ReconcileResult:
     """reconcile 结果。"""
+
     delivery_id: str
     status: str  # 'sent' | 'failed' | 'still_unknown'
     platform_message_id: str | None = None
@@ -44,6 +48,7 @@ class ReconcileResult:
 @dataclass
 class DeliveryView:
     """Delivery 聚合只读视图（对齐 ACCESS-DELIVERY / 4 Delivery）。"""
+
     delivery_id: str = ""
     status: str = "pending"
     target_snapshot: dict[str, Any] = field(default_factory=dict)
@@ -82,8 +87,9 @@ class DeliveryService(Protocol):
         ...
 
     async def reconcile(
-        self, delivery_id: str, platform_message_id: str | None = None,
+        self,
+        delivery_id: str,
+        platform_message_id: str | None = None,
     ) -> ReconcileResult:
         """Ask Gateway for evidence before resolving an unknown Delivery."""
         ...
-

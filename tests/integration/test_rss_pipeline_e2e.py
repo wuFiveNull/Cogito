@@ -50,10 +50,12 @@ class FakeSummaryProvider(ModelProvider):
 
     def capabilities(self):
         from cogito.model.contracts import ModelCapabilities
+
         return ModelCapabilities(context_window=128000, max_output_tokens=4096)
 
     async def health(self):
         from cogito.model.provider import HealthStatus
+
         return HealthStatus(healthy=True)
 
 
@@ -95,7 +97,9 @@ class TestRssPipelineE2E:
 
     def _setup_connector(self, conn, fake_rss_server, name="feed1", timeout_s=5):
         connector = Connector(
-            connector_id=f"c-{name}", name=name, url=fake_rss_server.url,
+            connector_id=f"c-{name}",
+            name=name,
+            url=fake_rss_server.url,
             fetch_timeout_s=timeout_s,
         )
         ConnectorRepository(conn).insert(connector)
@@ -112,26 +116,44 @@ class TestRssPipelineE2E:
         router = _build_router()
         factory = self._factory(db_path)
 
-        fake_rss_server.set_entries([
-            {"title": "AI breakthrough announced", "link": "http://x/ai-1",
-             "description": "A" * 200, "guid": "g1"},
-            {"title": "Cooking tips", "link": "http://x/cook-1",
-             "description": "B" * 200, "guid": "g2"},
-        ])
+        fake_rss_server.set_entries(
+            [
+                {
+                    "title": "AI breakthrough announced",
+                    "link": "http://x/ai-1",
+                    "description": "A" * 200,
+                    "guid": "g1",
+                },
+                {
+                    "title": "Cooking tips",
+                    "link": "http://x/cook-1",
+                    "description": "B" * 200,
+                    "guid": "g2",
+                },
+            ]
+        )
 
         from cogito.domain.task import Task, TaskStatus
         from cogito.service.connector_handler import handle_connector_poll
         from cogito.service.task_handlers import TaskHandlerContext
 
-        task = Task(task_type="connector.poll", payload_ref=connector.connector_id,
-                    status=TaskStatus.queued, idempotency_key="e2e-1")
+        task = Task(
+            task_type="connector.poll",
+            payload_ref=connector.connector_id,
+            status=TaskStatus.queued,
+            idempotency_key="e2e-1",
+        )
         ctx = TaskHandlerContext(connection_factory=factory, model_router=router)
         result = handle_connector_poll(task, ctx)
         assert "new=2" in result
 
         # 第二次抓取（ETag 匹配）→ 304 not modified
-        task2 = Task(task_type="connector.poll", payload_ref=connector.connector_id,
-                     status=TaskStatus.queued, idempotency_key="e2e-2")
+        task2 = Task(
+            task_type="connector.poll",
+            payload_ref=connector.connector_id,
+            status=TaskStatus.queued,
+            idempotency_key="e2e-2",
+        )
         result2 = handle_connector_poll(task2, ctx)
         assert result2 == "not modified"  # ETag 匹配 → 无更新
 
@@ -150,23 +172,33 @@ class TestRssPipelineE2E:
         connector = self._setup_connector(conn, fake_rss_server)
         factory = self._factory(db_path)
 
-        fake_rss_server.set_entries([
-            {"title": "T", "link": "http://x/t", "description": "D" * 200, "guid": "gt"},
-        ])
+        fake_rss_server.set_entries(
+            [
+                {"title": "T", "link": "http://x/t", "description": "D" * 200, "guid": "gt"},
+            ]
+        )
 
         from cogito.domain.task import Task, TaskStatus
         from cogito.service.connector_handler import handle_connector_poll
         from cogito.service.task_handlers import TaskHandlerContext
 
-        task = Task(task_type="connector.poll", payload_ref=connector.connector_id,
-                    status=TaskStatus.queued, idempotency_key="e2e-3")
+        task = Task(
+            task_type="connector.poll",
+            payload_ref=connector.connector_id,
+            status=TaskStatus.queued,
+            idempotency_key="e2e-3",
+        )
         ctx = TaskHandlerContext(connection_factory=factory)
         r1 = handle_connector_poll(task, ctx)
         assert "new=1" in r1
 
         # 第二次（ETag 匹配）
-        task2 = Task(task_type="connector.poll", payload_ref=connector.connector_id,
-                     status=TaskStatus.queued, idempotency_key="e2e-4")
+        task2 = Task(
+            task_type="connector.poll",
+            payload_ref=connector.connector_id,
+            status=TaskStatus.queued,
+            idempotency_key="e2e-4",
+        )
         r2 = handle_connector_poll(task2, ctx)
         assert r2 == "not modified"
 
@@ -179,17 +211,23 @@ class TestRssPipelineE2E:
         connector = self._setup_connector(conn, fake_rss_server, timeout_s=1)
         factory = self._factory(db_path)
 
-        fake_rss_server.set_entries([
-            {"title": "T", "link": "http://x/t", "description": "D", "guid": "gt"},
-        ])
+        fake_rss_server.set_entries(
+            [
+                {"title": "T", "link": "http://x/t", "description": "D", "guid": "gt"},
+            ]
+        )
         fake_rss_server.set_next_timeout(2.0)  # 服务端 2s > 客户端 1s → 超时
 
         from cogito.domain.task import Task, TaskStatus
         from cogito.service.connector_handler import handle_connector_poll
         from cogito.service.task_handlers import TaskHandlerContext
 
-        task = Task(task_type="connector.poll", payload_ref=connector.connector_id,
-                    status=TaskStatus.queued, idempotency_key="e2e-5")
+        task = Task(
+            task_type="connector.poll",
+            payload_ref=connector.connector_id,
+            status=TaskStatus.queued,
+            idempotency_key="e2e-5",
+        )
         ctx = TaskHandlerContext(connection_factory=factory)
 
         with pytest.raises(RuntimeError, match="retryable"):
@@ -204,8 +242,11 @@ class TestRssPipelineE2E:
         connector = self._setup_connector(conn, fake_rss_server)
         now = clock.now()
         s = Schedule(
-            schedule_id="s1", schedule_type=ScheduleType.interval, expression="30m",
-            next_fire_at=now, connector_id=connector.connector_id,
+            schedule_id="s1",
+            schedule_type=ScheduleType.interval,
+            expression="30m",
+            next_fire_at=now,
+            connector_id=connector.connector_id,
         )
         ScheduleRepository(conn).insert(s)
         conn.commit()
@@ -226,23 +267,33 @@ class TestRssPipelineE2E:
         connector = self._setup_connector(conn, fake_rss_server)
         factory = self._factory(db_path)
 
-        fake_rss_server.set_entries([
-            {"title": "First", "link": "http://x/1", "description": "D" * 200, "guid": "g1"},
-        ])
+        fake_rss_server.set_entries(
+            [
+                {"title": "First", "link": "http://x/1", "description": "D" * 200, "guid": "g1"},
+            ]
+        )
 
         from cogito.domain.task import Task, TaskStatus
         from cogito.service.connector_handler import handle_connector_poll
         from cogito.service.task_handlers import TaskHandlerContext
 
-        task = Task(task_type="connector.poll", payload_ref=connector.connector_id,
-                    status=TaskStatus.queued, idempotency_key="e2e-6")
+        task = Task(
+            task_type="connector.poll",
+            payload_ref=connector.connector_id,
+            status=TaskStatus.queued,
+            idempotency_key="e2e-6",
+        )
         ctx = TaskHandlerContext(connection_factory=factory)
         handle_connector_poll(task, ctx)
 
         # 新增条目后再次抓取
         fake_rss_server.add_entry("Second", description="E" * 200)
-        task2 = Task(task_type="connector.poll", payload_ref=connector.connector_id,
-                     status=TaskStatus.queued, idempotency_key="e2e-7")
+        task2 = Task(
+            task_type="connector.poll",
+            payload_ref=connector.connector_id,
+            status=TaskStatus.queued,
+            idempotency_key="e2e-7",
+        )
         result = handle_connector_poll(task2, ctx)
         assert "new=1" in result  # g1 已存在，仅新增 1 条
 
@@ -259,15 +310,25 @@ class TestRssPipelineE2E:
         from cogito.store.task_repo import TaskRepository, TaskAttemptRepository
         from cogito.service.recovery_service import RecoveryService
 
-        t = Task(task_id="t-old", task_type="connector.poll",
-                 payload_ref=connector.connector_id, status=TaskStatus.running,
-                 lease_owner="old-worker", lease_expires_at=now - timedelta(minutes=10),
-                 idempotency_key="old-1")
+        t = Task(
+            task_id="t-old",
+            task_type="connector.poll",
+            payload_ref=connector.connector_id,
+            status=TaskStatus.running,
+            lease_owner="old-worker",
+            lease_expires_at=now - timedelta(minutes=10),
+            idempotency_key="old-1",
+        )
         TaskRepository(conn).insert(t)
-        a = TaskAttempt(task_id="t-old", attempt_no=1, status=TaskAttemptStatus.running,
-                        lease_owner="old-worker", lease_version=1,
-                        lease_expires_at=now - timedelta(minutes=10),
-                        started_at=now - timedelta(minutes=15))
+        a = TaskAttempt(
+            task_id="t-old",
+            attempt_no=1,
+            status=TaskAttemptStatus.running,
+            lease_owner="old-worker",
+            lease_version=1,
+            lease_expires_at=now - timedelta(minutes=10),
+            started_at=now - timedelta(minutes=15),
+        )
         TaskAttemptRepository(conn).insert(a)
         conn.commit()
         conn.close()

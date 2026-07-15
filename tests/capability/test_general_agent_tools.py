@@ -82,7 +82,9 @@ async def test_large_file_can_be_paged_and_grepped_without_full_read(tmp_path: P
     )
 
     assert page["content"].splitlines() == [
-        "350: line-350", "351: line-351", "352: line-352",
+        "350: line-350",
+        "351: line-351",
+        "352: line-352",
     ]
     assert page["total_lines"] == 399
     assert page["next_offset"] == 353
@@ -215,7 +217,10 @@ async def test_executor_fails_closed_when_intent_cannot_be_persisted() -> None:
 
     registry.register(ToolDef("guarded_write", "write", {"type": "object"}, handler))
     result = await ToolExecutor(registry, sink=BrokenSink()).execute(
-        "call-1", "guarded_write", {}, _context(),
+        "call-1",
+        "guarded_write",
+        {},
+        _context(),
     )
 
     assert result.status == "error"
@@ -232,20 +237,28 @@ async def test_executor_enforces_snapshot_and_output_schema() -> None:
 
     registry.register(
         ToolDef(
-            "structured", "structured", {"type": "object"}, handler,
+            "structured",
+            "structured",
+            {"type": "object"},
+            handler,
             output_schema={
-                "type": "object", "properties": {"value": {"type": "integer"}},
+                "type": "object",
+                "properties": {"value": {"type": "integer"}},
                 "required": ["value"],
             },
         )
     )
     executor = ToolExecutor(registry)
     hidden = await executor.execute(
-        "call-1", "structured", {},
+        "call-1",
+        "structured",
+        {},
         _context(capability_snapshot_ids=("core:other",)),
     )
     invalid = await executor.execute(
-        "call-2", "structured", {},
+        "call-2",
+        "structured",
+        {},
         _context(capability_snapshot_ids=("core:structured",)),
     )
 
@@ -263,7 +276,10 @@ async def test_executor_validates_plain_text_string_output_schema() -> None:
 
     registry.register(
         ToolDef(
-            "text", "text", {"type": "object"}, handler,
+            "text",
+            "text",
+            {"type": "object"},
+            handler,
             output_schema={"type": "string", "minLength": 1},
         )
     )
@@ -298,13 +314,19 @@ async def test_uncertain_side_effect_queues_reconciliation_without_retry() -> No
 
     registry.register(
         ToolDef(
-            "external_write", "write", {"type": "object"}, handler,
+            "external_write",
+            "write",
+            {"type": "object"},
+            handler,
             side_effect_class="reconcilable",
         )
     )
     sink = Sink()
     result = await ToolExecutor(registry, sink=sink).execute(
-        "call-1", "external_write", {}, _context(),
+        "call-1",
+        "external_write",
+        {},
+        _context(),
     )
 
     assert result.status == "error"

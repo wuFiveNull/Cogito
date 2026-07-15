@@ -5,8 +5,8 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 
-from cogito.domain.digest import Digest, DigestStatus
 from cogito.contracts.clock import epoch_ms, from_epoch_ms
+from cogito.domain.digest import Digest, DigestStatus
 
 
 class DigestRepository:
@@ -44,18 +44,30 @@ class DigestRepository:
         ).fetchone()
         return self._row_to_digest(row) if row else None
 
+    def find_by_date_topic(
+        self,
+        principal_id: str,
+        digest_date: str,
+        topic: str,
+    ) -> Digest | None:
+        """Return the newest digest for the exact proactive bucket."""
+        row = self._conn.execute(
+            "SELECT * FROM digests WHERE principal_id=? AND digest_date=? AND topic=? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (principal_id, digest_date, topic),
+        ).fetchone()
+        return self._row_to_digest(row) if row else None
+
     def find_latest(self, principal_id: str) -> Digest | None:
         row = self._conn.execute(
-            "SELECT * FROM digests WHERE principal_id=? "
-            "ORDER BY digest_date DESC LIMIT 1",
+            "SELECT * FROM digests WHERE principal_id=? ORDER BY digest_date DESC LIMIT 1",
             (principal_id,),
         ).fetchone()
         return self._row_to_digest(row) if row else None
 
     def find_all(self, principal_id: str, limit: int = 30) -> list[Digest]:
         rows = self._conn.execute(
-            "SELECT * FROM digests WHERE principal_id=? "
-            "ORDER BY digest_date DESC LIMIT ?",
+            "SELECT * FROM digests WHERE principal_id=? ORDER BY digest_date DESC LIMIT ?",
             (principal_id, limit),
         ).fetchall()
         return [self._row_to_digest(r) for r in rows]
@@ -68,8 +80,7 @@ class DigestRepository:
 
     def set_rendered(self, digest_id: str, content_ref: str) -> None:
         self._conn.execute(
-            "UPDATE digests SET content_ref=?, rendered_at=?, status='ready' "
-            "WHERE digest_id=?",
+            "UPDATE digests SET content_ref=?, rendered_at=?, status='ready' WHERE digest_id=?",
             (content_ref, epoch_ms(datetime.now(UTC)), digest_id),
         )
 

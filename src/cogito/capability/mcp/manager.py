@@ -112,7 +112,10 @@ class MCPServerManager:
                 sampling_callback=(
                     (
                         lambda context, params, scope: self._sampling_callback(
-                            config.name, scope, context, params,
+                            config.name,
+                            scope,
+                            context,
+                            params,
                         )
                     )
                     if self._sampling_callback is not None
@@ -273,9 +276,7 @@ class MCPServerManager:
         previous = self._refresh_tasks.get(key)
         if previous and not previous.done():
             previous.cancel()
-        self._refresh_tasks[key] = asyncio.create_task(
-            self._debounced_refresh(name, method)
-        )
+        self._refresh_tasks[key] = asyncio.create_task(self._debounced_refresh(name, method))
 
     async def _debounced_refresh(self, name: str, method: str) -> None:
         await asyncio.sleep(0.5)
@@ -374,7 +375,8 @@ class MCPServerManager:
                 # can be classified more precisely only through trusted local policy.
                 side_effect_class=side_effect,
                 result_trust_label="external_untrusted",
-                output_schema=info.get("output_schema") or {
+                output_schema=info.get("output_schema")
+                or {
                     "type": ["object", "array", "string", "number", "boolean", "null"],
                 },
                 deferred=True,

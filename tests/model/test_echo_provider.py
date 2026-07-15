@@ -28,24 +28,31 @@ async def test_echo_simple_user_message(provider: EchoModelProvider) -> None:
 
 @pytest.mark.asyncio
 async def test_echo_ignores_system_uses_last_user(provider: EchoModelProvider) -> None:
-    req = ModelRequest(messages=(
-        {"role": "system", "content": "You are helpful"},
-        {"role": "user", "content": "第一个问题"},
-        {"role": "assistant", "content": "回复1"},
-        {"role": "user", "content": "第二个问题"},
-    ))
+    req = ModelRequest(
+        messages=(
+            {"role": "system", "content": "You are helpful"},
+            {"role": "user", "content": "第一个问题"},
+            {"role": "assistant", "content": "回复1"},
+            {"role": "user", "content": "第二个问题"},
+        )
+    )
     resp = await provider.generate(req)
     assert resp.text == "第二个问题"
 
 
 @pytest.mark.asyncio
 async def test_echo_content_block_format(provider: EchoModelProvider) -> None:
-    req = ModelRequest(messages=(
-        {"role": "user", "content": [
-            {"type": "text", "text": "hello "},
-            {"type": "text", "text": "world"},
-        ]},
-    ))
+    req = ModelRequest(
+        messages=(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "hello "},
+                    {"type": "text", "text": "world"},
+                ],
+            },
+        )
+    )
     resp = await provider.generate(req)
     assert resp.text == "hello world"
 
@@ -60,10 +67,12 @@ async def test_echo_empty_messages(provider: EchoModelProvider) -> None:
 
 @pytest.mark.asyncio
 async def test_echo_no_user_message(provider: EchoModelProvider) -> None:
-    req = ModelRequest(messages=(
-        {"role": "system", "content": "sysonly"},
-        {"role": "assistant", "content": "asst reply"},
-    ))
+    req = ModelRequest(
+        messages=(
+            {"role": "system", "content": "sysonly"},
+            {"role": "assistant", "content": "asst reply"},
+        )
+    )
     resp = await provider.generate(req)
     assert resp.text == ""
 

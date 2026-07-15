@@ -7,18 +7,34 @@ class TestMigration:
     def test_migrate_creates_tables(self, in_memory_db):
         """After migration, all core tables should exist."""
         tables = [
-            "principals", "endpoints", "conversations", "sessions",
-            "messages", "content_parts", "message_revisions", "inbound_inbox",
-            "turns", "run_attempts", "turn_checkpoints",
-            "tasks", "task_attempts",
-            "deliveries", "delivery_attempts", "delivery_receipts",
-            "tool_calls", "approvals",
+            "principals",
+            "endpoints",
+            "conversations",
+            "sessions",
+            "messages",
+            "content_parts",
+            "message_revisions",
+            "inbound_inbox",
+            "turns",
+            "run_attempts",
+            "turn_checkpoints",
+            "tasks",
+            "task_attempts",
+            "deliveries",
+            "delivery_attempts",
+            "delivery_receipts",
+            "tool_calls",
+            "approvals",
             "memory_items",
-            "memory_relations", "memory_sources",
-            "session_summaries", "processing_watermarks",
+            "memory_relations",
+            "memory_sources",
+            "session_summaries",
+            "processing_watermarks",
             "model_calls",
-            "events", "outbox_events",
-            "payload_objects", "audit_records",
+            "events",
+            "outbox_events",
+            "payload_objects",
+            "audit_records",
             "_schema_version",
         ]
         existing = {
@@ -41,21 +57,22 @@ class TestMigration:
         """Running migrate twice should be safe."""
         from pathlib import Path
         from cogito.store.migration import (
-            migrate, MIGRATIONS_DIR, PLUGIN_MIGRATIONS_DIR,
+            migrate,
+            MIGRATIONS_DIR,
+            PLUGIN_MIGRATIONS_DIR,
         )
+
         migrate(empty_db)
         migrate(empty_db)  # second run
         rows = empty_db.execute("SELECT version FROM _schema_version ORDER BY version").fetchall()
         versions = [r[0] for r in rows]
         # 动态计算预期版本列表（core + plugin 迁移），避免每加一个 migration 就改一次断言
-        core_files = [
-            p for p in Path(MIGRATIONS_DIR).glob("*.sql")
-            if p.name[:4].isdigit()
-        ]
-        plugin_files = [
-            p for p in Path(PLUGIN_MIGRATIONS_DIR).glob("*.sql")
-            if p.name[:4].isdigit()
-        ] if PLUGIN_MIGRATIONS_DIR.exists() else []
+        core_files = [p for p in Path(MIGRATIONS_DIR).glob("*.sql") if p.name[:4].isdigit()]
+        plugin_files = (
+            [p for p in Path(PLUGIN_MIGRATIONS_DIR).glob("*.sql") if p.name[:4].isdigit()]
+            if PLUGIN_MIGRATIONS_DIR.exists()
+            else []
+        )
         expected = sorted(int(p.name[:4]) for p in core_files + plugin_files)
         assert versions == expected  # all migration versions applied exactly once
 
@@ -106,9 +123,7 @@ class TestMigrationUpgrade:
         migrate(empty_db)
 
         # Verify data survived: 'created' → 'accepted'
-        rows = empty_db.execute(
-            "SELECT turn_id, status FROM turns ORDER BY turn_id"
-        ).fetchall()
+        rows = empty_db.execute("SELECT turn_id, status FROM turns ORDER BY turn_id").fetchall()
         assert [(r["turn_id"], r["status"]) for r in rows] == [
             ("t1", "accepted"),
             ("t2", "running"),
@@ -136,16 +151,21 @@ class TestMigrationUpgrade:
         migrate(empty_db)
 
         versions = {
-            r[0] for r in empty_db.execute(
-                "SELECT version FROM _schema_version"
-            ).fetchall()
+            r[0] for r in empty_db.execute("SELECT version FROM _schema_version").fetchall()
         }
         from pathlib import Path
         from cogito.store.migration import MIGRATIONS_DIR, PLUGIN_MIGRATIONS_DIR
-        core = {int(p.name[:4]) for p in Path(MIGRATIONS_DIR).glob("*.sql")
-                if p.name[:4].isdigit()}
-        plugin = {int(p.name[:4]) for p in Path(PLUGIN_MIGRATIONS_DIR).glob("*.sql")
-                  if p.name[:4].isdigit()} if PLUGIN_MIGRATIONS_DIR.exists() else set()
+
+        core = {int(p.name[:4]) for p in Path(MIGRATIONS_DIR).glob("*.sql") if p.name[:4].isdigit()}
+        plugin = (
+            {
+                int(p.name[:4])
+                for p in Path(PLUGIN_MIGRATIONS_DIR).glob("*.sql")
+                if p.name[:4].isdigit()
+            }
+            if PLUGIN_MIGRATIONS_DIR.exists()
+            else set()
+        )
         expected = core | plugin
         assert versions == expected
 
@@ -155,16 +175,21 @@ class TestMigrationUpgrade:
 
         migrate(empty_db)
         versions = {
-            r[0] for r in empty_db.execute(
-                "SELECT version FROM _schema_version"
-            ).fetchall()
+            r[0] for r in empty_db.execute("SELECT version FROM _schema_version").fetchall()
         }
         from pathlib import Path
         from cogito.store.migration import MIGRATIONS_DIR, PLUGIN_MIGRATIONS_DIR
-        core = {int(p.name[:4]) for p in Path(MIGRATIONS_DIR).glob("*.sql")
-                if p.name[:4].isdigit()}
-        plugin = {int(p.name[:4]) for p in Path(PLUGIN_MIGRATIONS_DIR).glob("*.sql")
-                  if p.name[:4].isdigit()} if PLUGIN_MIGRATIONS_DIR.exists() else set()
+
+        core = {int(p.name[:4]) for p in Path(MIGRATIONS_DIR).glob("*.sql") if p.name[:4].isdigit()}
+        plugin = (
+            {
+                int(p.name[:4])
+                for p in Path(PLUGIN_MIGRATIONS_DIR).glob("*.sql")
+                if p.name[:4].isdigit()
+            }
+            if PLUGIN_MIGRATIONS_DIR.exists()
+            else set()
+        )
         expected = core | plugin
         assert versions == expected
 
@@ -196,12 +221,14 @@ class TestConfigIntegrity:
             db_path = config.resolve_db_path()
             from cogito.store.connection import get_connection
             from cogito.store.migration import migrate
+
             conn = get_connection(db_path)
             try:
                 migrate(conn)
                 # Verify turns table exists
                 tables = {
-                    r[0] for r in conn.execute(
+                    r[0]
+                    for r in conn.execute(
                         "SELECT name FROM sqlite_master WHERE type='table'"
                     ).fetchall()
                 }
@@ -315,9 +342,7 @@ class TestMessageDeletedAt:
     """Tests for messages.deleted_at column (migration 0003)."""
 
     def test_deleted_at_default_null(self, in_memory_db):
-        row = in_memory_db.execute(
-            "PRAGMA table_info(messages)"
-        ).fetchall()
+        row = in_memory_db.execute("PRAGMA table_info(messages)").fetchall()
         cols = {r[1] for r in row}
         assert "deleted_at" in cols
 
@@ -369,6 +394,7 @@ class TestVersionUpgrade:
 
         # 此时是 v4 架构（所有时间列 TEXT），插入 v5 前兼容的数据
         import uuid
+
         sid = uuid.uuid4().hex
         empty_db.execute(
             "INSERT INTO conversations (conversation_id, conversation_type, platform_conversation_id) "
@@ -376,11 +402,13 @@ class TestVersionUpgrade:
         )
         empty_db.execute(
             "INSERT INTO sessions (session_id, conversation_id, context_partition_key, created_at) "
-            "VALUES (?, 'c1', 'c1', '2026-01-01T00:00:00Z')", (sid,)
+            "VALUES (?, 'c1', 'c1', '2026-01-01T00:00:00Z')",
+            (sid,),
         )
         empty_db.execute(
             "INSERT INTO turns (turn_id, session_id, status, created_at) "
-            "VALUES ('t1', ?, 'queued', '2026-01-01T00:00:00Z')", (sid,)
+            "VALUES ('t1', ?, 'queued', '2026-01-01T00:00:00Z')",
+            (sid,),
         )
         empty_db.execute(
             "INSERT INTO outbox_events (event_id, event_type, aggregate_id, aggregate_version, created_at) "
@@ -404,7 +432,8 @@ class TestVersionUpgrade:
 
         # 验证 delivery_receipts 表存在（migration 0008）
         tables = {
-            r[0] for r in empty_db.execute(
+            r[0]
+            for r in empty_db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
@@ -454,9 +483,7 @@ class TestVersionUpgrade:
         migrate(empty_db)
 
         # 验证数据完整
-        turn = empty_db.execute(
-            "SELECT status FROM turns WHERE turn_id='t1'"
-        ).fetchone()
+        turn = empty_db.execute("SELECT status FROM turns WHERE turn_id='t1'").fetchone()
         assert turn is not None
         assert turn["status"] == "queued"
 
@@ -515,9 +542,7 @@ class TestVersionUpgrade:
         migrate(empty_db)
 
         # ISO → 正确转换
-        t_iso = empty_db.execute(
-            "SELECT created_at FROM turns WHERE turn_id='t_iso'"
-        ).fetchone()
+        t_iso = empty_db.execute("SELECT created_at FROM turns WHERE turn_id='t_iso'").fetchone()
         assert isinstance(t_iso["created_at"], int)
 
         # epoch ms as text → 正确转换

@@ -3,6 +3,7 @@
 capability.executor 通过此端口持久化 tool-call 记录；
 具体实现：store.tool_call_repo.ToolCallRepository。
 """
+
 from __future__ import annotations
 
 from typing import Protocol

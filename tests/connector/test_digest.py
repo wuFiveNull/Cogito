@@ -16,7 +16,10 @@ from cogito.store.digest_repo import DigestRepository
 class TestDigestEntity:
     def test_round_trip(self):
         d = Digest(
-            digest_id="d1", principal_id="owner", digest_date="2026-07-07", item_count=3,
+            digest_id="d1",
+            principal_id="owner",
+            digest_date="2026-07-07",
+            item_count=3,
         )
         assert d.status == DigestStatus.pending
         data = d.to_dict()
@@ -39,6 +42,7 @@ class TestDigestRepository:
         # 先建 connector + item 满足外键
         from cogito.domain.connector import Connector
         from cogito.store.connector_repo import ConnectorRepository
+
         ConnectorRepository(conn).insert(Connector(connector_id="c1", url="http://x"))
         conn.commit()
         self._insert_raw_item(conn, "item-a")
@@ -55,6 +59,7 @@ class TestDigestRepository:
     def test_add_item_idempotent(self, conn):
         from cogito.domain.connector import Connector
         from cogito.store.connector_repo import ConnectorRepository
+
         ConnectorRepository(conn).insert(Connector(connector_id="c1", url="http://x"))
         conn.commit()
         self._insert_raw_item(conn, "x")
@@ -69,10 +74,16 @@ class TestDigestRepository:
     @staticmethod
     def _insert_raw_item(conn, item_id):
         from cogito.domain.connector import ConnectorItem
-        ConnectorItemRepository(conn).insert(ConnectorItem(
-            item_id=item_id, connector_id="c1", source_item_id=item_id,
-            content_hash=f"h-{item_id}", status=ItemStatus.digest,
-        ))
+
+        ConnectorItemRepository(conn).insert(
+            ConnectorItem(
+                item_id=item_id,
+                connector_id="c1",
+                source_item_id=item_id,
+                content_hash=f"h-{item_id}",
+                status=ItemStatus.digest,
+            )
+        )
         conn.commit()
 
     def test_find_latest(self, conn):
@@ -105,11 +116,19 @@ class TestDigestService:
     def conn(self, in_memory_db):
         return in_memory_db
 
-    def _make_item(self, conn, connector_id="c1", title="T", status=ItemStatus.digest,
-                   relevance=0.8, days_ago=0):
+    def _make_item(
+        self,
+        conn,
+        connector_id="c1",
+        title="T",
+        status=ItemStatus.digest,
+        relevance=0.8,
+        days_ago=0,
+    ):
         # 确保 connector 存在
         from cogito.domain.connector import Connector
         from cogito.store.connector_repo import ConnectorRepository
+
         if ConnectorRepository(conn).get(connector_id) is None:
             ConnectorRepository(conn).insert(
                 Connector(connector_id=connector_id, url="http://x"),
@@ -171,8 +190,12 @@ class TestDigestService:
 
     def test_list_digests(self, conn):
         repo = DigestRepository(conn)
-        repo.insert(Digest(digest_id="d1", principal_id="owner", digest_date="2026-07-07", item_count=2))
-        repo.insert(Digest(digest_id="d2", principal_id="owner", digest_date="2026-07-08", item_count=5))
+        repo.insert(
+            Digest(digest_id="d1", principal_id="owner", digest_date="2026-07-07", item_count=2)
+        )
+        repo.insert(
+            Digest(digest_id="d2", principal_id="owner", digest_date="2026-07-08", item_count=5)
+        )
         svc = DigestService(conn)
         listing = svc.list_digests("owner")
         assert len(listing) == 2

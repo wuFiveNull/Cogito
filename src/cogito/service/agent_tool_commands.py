@@ -175,11 +175,7 @@ class AgentToolCommandService:
                     )
                 status, version = "active", manifest.version
             elif action == "archive":
-                if (
-                    row is None
-                    or row["status"] != "active"
-                    or row["version"] != expected_version
-                ):
+                if row is None or row["status"] != "active" or row["version"] != expected_version:
                     raise ValueError("skill version conflict")
                 if archived.exists():
                     raise ValueError("archived skill already exists")
@@ -192,11 +188,7 @@ class AgentToolCommandService:
                 )
                 skill_id, status, version = row["skill_id"], "archived", row["version"]
             elif action == "restore":
-                if (
-                    row is None
-                    or row["status"] != "archived"
-                    or row["version"] != expected_version
-                ):
+                if row is None or row["status"] != "archived" or row["version"] != expected_version:
                     raise ValueError("skill version conflict")
                 if active.exists():
                     raise ValueError("active skill already exists")

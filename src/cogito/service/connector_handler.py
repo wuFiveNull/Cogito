@@ -15,6 +15,7 @@ import logging
 import sqlite3
 from datetime import UTC, datetime
 
+from cogito.contracts.clock import epoch_ms
 from cogito.domain.connector import (
     ConnectorCursor,
     ConnectorItem,
@@ -38,7 +39,6 @@ from cogito.store.connector_repo import (
     ConnectorRawRepository,
     ConnectorRepository,
 )
-from cogito.contracts.clock import epoch_ms
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -70,7 +70,9 @@ def handle_connector_poll(task: Task, ctx: TaskHandlerContext) -> str:
 
 
 def _poll_connector(
-    conn: sqlite3.Connection, connector_id: str, ctx: TaskHandlerContext,
+    conn: sqlite3.Connection,
+    connector_id: str,
+    ctx: TaskHandlerContext,
 ) -> str:
     conn.row_factory = sqlite3.Row
 
@@ -90,12 +92,14 @@ def _poll_connector(
 
     if isinstance(fetch_result, NotModified):
         _LOGGER.info("connector.poll: %s not modified", connector_id)
-        ConnectorCursorRepository(conn).upsert(ConnectorCursor(
-            connector_id=connector_id,
-            etag=cursor.etag if cursor else "",
-            last_modified=cursor.last_modified if cursor else "",
-            last_polled_at=datetime.now(UTC),
-        ))
+        ConnectorCursorRepository(conn).upsert(
+            ConnectorCursor(
+                connector_id=connector_id,
+                etag=cursor.etag if cursor else "",
+                last_modified=cursor.last_modified if cursor else "",
+                last_polled_at=datetime.now(UTC),
+            )
+        )
         return "not modified"
 
     if isinstance(fetch_result, FetchFailed):
@@ -111,13 +115,15 @@ def _poll_connector(
     # 2. 推进 cursor + 更新 connector 状态
     new_item_ids = [e.source_item_id for e in fetch_result.entries]
     now = datetime.now(UTC)
-    ConnectorCursorRepository(conn).upsert(ConnectorCursor(
-        connector_id=connector_id,
-        etag=fetch_result.new_etag,
-        last_modified=fetch_result.new_last_modified,
-        last_item_ids=new_item_ids,
-        last_polled_at=now,
-    ))
+    ConnectorCursorRepository(conn).upsert(
+        ConnectorCursor(
+            connector_id=connector_id,
+            etag=fetch_result.new_etag,
+            last_modified=fetch_result.new_last_modified,
+            last_item_ids=new_item_ids,
+            last_polled_at=now,
+        )
+    )
     ConnectorRepository(conn).update_success(connector_id)
 
     # 3. 归档 raw
@@ -139,11 +145,13 @@ def _poll_connector(
     with UnitOfWork(conn) as uow:
         for entry in fetch_result.entries:
             existing = ConnectorItemRepository(conn).find_by_source_id(
-                connector_id, entry.source_item_id,
+                connector_id,
+                entry.source_item_id,
             )
             if existing is None:
                 existing = ConnectorItemRepository(conn).find_by_content_hash(
-                    connector_id, entry.content_hash,
+                    connector_id,
+                    entry.content_hash,
                 )
 
             if existing is not None:
@@ -157,15 +165,21 @@ def _poll_connector(
 
             if model_router is not None:
                 try:
-                    summary_text = asyncio.run(summarize_item(
-                        entry.title, entry.summary, model_router,
-                    ))
+                    summary_text = asyncio.run(
+                        summarize_item(
+                            entry.title,
+                            entry.summary,
+                            model_router,
+                        )
+                    )
                 except Exception:
                     _LOGGER.warning("summary failed for %s", entry.source_item_id)
 
                 try:
                     relevance = score_relevance(
-                        entry.title, entry.summary, entry.published_at,
+                        entry.title,
+                        entry.summary,
+                        entry.published_at,
                         interests=[],  # 可由 ctx 传递配置
                     )
                     decision = decide(relevance, threshold=0.4)
@@ -193,8 +207,10 @@ def _poll_connector(
             # PLAN-16 M4 KNOW-01: 新 digest 内容经 durable Task 进入 Knowledge
             if item_status == ItemStatus.digest:
                 from cogito.service.knowledge.sync import enqueue_connector_knowledge_sync
+
                 enqueue_connector_knowledge_sync(
-                    conn, connector_id=connector_id,
+                    conn,
+                    connector_id=connector_id,
                     item={
                         "source_item_id": entry.source_item_id,
                         "title": entry.title,
@@ -210,6 +226,9 @@ def _poll_connector(
 
     _LOGGER.info(
         "connector.poll: %s fetched=%d new=%d dup=%d",
-        connector_id, len(fetch_result.entries), new_count, dup_count,
+        connector_id,
+        len(fetch_result.entries),
+        new_count,
+        dup_count,
     )
     return f"fetched={len(fetch_result.entries)} new={new_count} dup={dup_count}"

@@ -83,14 +83,17 @@ class MemoryViewsGenerator:
     # ── 待确认候 ──
 
     def _write_pending(self) -> None:
-        rows = self._conn.execute("""
+        rows = self._conn.execute(
+            """
             SELECT memory_id, kind, subject, predicate, value,
                    confidence, importance, source_type, created_at
             FROM memory_items
             WHERE status='candidate'
               AND deleted_at IS NULL
             ORDER BY created_at DESC LIMIT ?
-        """, (self.PENDING_MAX_ROWS,)).fetchall()
+        """,
+            (self.PENDING_MAX_ROWS,),
+        ).fetchall()
 
         if not rows:
             self._write_file("PENDING.md", "# 待确认候选\n\n_暂无待确认记忆。_\n")
@@ -111,7 +114,8 @@ class MemoryViewsGenerator:
     def _write_history(self) -> None:
         # G4: 不查询 Schema 不允许的 superseded status；
         # 通过 superseded 关系 + valid_to 判断历史覆盖
-        rows = self._conn.execute("""
+        rows = self._conn.execute(
+            """
             SELECT mi.memory_id, mi.kind, mi.subject, mi.predicate, mi.value,
                    mi.status, mi.supersedes_id, mi.deleted_at, mi.valid_to,
                    mi.created_at
@@ -120,11 +124,14 @@ class MemoryViewsGenerator:
                OR mi.deleted_at IS NOT NULL
                OR mi.valid_to IS NOT NULL
             ORDER BY mi.created_at DESC LIMIT ?
-        """, (self.HISTORY_MAX_ROWS,)).fetchall()
+        """,
+            (self.HISTORY_MAX_ROWS,),
+        ).fetchall()
 
         # Also include superseded items (those pointed to by supersedes_id)
         try:
-            superseded_rows = self._conn.execute("""
+            superseded_rows = self._conn.execute(
+                """
                 SELECT mi.memory_id, mi.kind, mi.subject, mi.predicate, mi.value,
                        mi.status, mi.supersedes_id, mi.deleted_at, mi.valid_to,
                        mi.created_at
@@ -133,7 +140,9 @@ class MemoryViewsGenerator:
                 WHERE rel.relation_type = 'supersedes'
                 AND mi.deleted_at IS NULL
                 ORDER BY mi.created_at DESC LIMIT ?
-            """, (self.HISTORY_MAX_ROWS,)).fetchall()
+            """,
+                (self.HISTORY_MAX_ROWS,),
+            ).fetchall()
         except sqlite3.OperationalError:
             superseded_rows = []
 
@@ -143,7 +152,7 @@ class MemoryViewsGenerator:
 
         lines = [f"# 历史记录（{len(rows) + len(superseded_rows)} 条）\n"]
         seen: set[str] = set()
-        for r in (list(rows) + list(superseded_rows)):
+        for r in list(rows) + list(superseded_rows):
             mid = r["memory_id"]
             if mid in seen:
                 continue

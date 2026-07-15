@@ -6,6 +6,7 @@
     data/cache / plugins / skills / memory / logs / backups
   profiles/<name>/ 同构且完全隔离
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ def display_home(profile: str = "default") -> str:
 @dataclass(frozen=True)
 class ProfileLayout:
     """Profile 目录布局 (Plan 06 M1)。"""
+
     home: Path
 
     @property
@@ -66,9 +68,16 @@ class ProfileLayout:
 
     def ensure_directories(self) -> None:
         """创建全部目录（幂等）。"""
-        for d in [self.payload_dir, self.cache_dir, self.plugins_dir,
-                  self.skills_dir, self.memory_dir, self.logs_dir, self.backups_dir,
-                  self.database.parent]:
+        for d in [
+            self.payload_dir,
+            self.cache_dir,
+            self.plugins_dir,
+            self.skills_dir,
+            self.memory_dir,
+            self.logs_dir,
+            self.backups_dir,
+            self.database.parent,
+        ]:
             d.mkdir(parents=True, exist_ok=True)
 
 

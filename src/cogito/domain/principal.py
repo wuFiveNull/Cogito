@@ -120,7 +120,9 @@ class Endpoint:
             endpoint_ref=data.get("endpoint_ref", ""),
             capabilities=data.get("capabilities", []),
             status=EndpointStatus(data["status"]),
-            verified_at=datetime.fromisoformat(data["verified_at"]) if data.get("verified_at") else None,
+            verified_at=datetime.fromisoformat(data["verified_at"])
+            if data.get("verified_at")
+            else None,
         )
 
     def __eq__(self, other: object) -> bool:

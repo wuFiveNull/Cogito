@@ -178,7 +178,10 @@ async def test_classifier_unavailable_creates_approval_when_service_exists(in_me
     )
 
     result = await executor.execute(
-        "tc-unavailable", "tool", {}, _context(turn_id="turn", principal_id="owner"),
+        "tc-unavailable",
+        "tool",
+        {},
+        _context(turn_id="turn", principal_id="owner"),
     )
 
     assert result.status == "approval_required"
@@ -198,9 +201,15 @@ async def test_auto_mode_allows_ordinary_idempotent_write():
     registry.register(_tool(handler=handler, side_effect_class="idempotent"))
     executor = ToolExecutor(
         registry,
-        auto_mode=AutoModeGate(_Classifier(AutoModeResult(
-            AutoModeDecision.allow, "ordinary write", "classifier_stage1",
-        ))),
+        auto_mode=AutoModeGate(
+            _Classifier(
+                AutoModeResult(
+                    AutoModeDecision.allow,
+                    "ordinary write",
+                    "classifier_stage1",
+                )
+            )
+        ),
     )
 
     result = await executor.execute("tc-write", "tool", {}, _context())

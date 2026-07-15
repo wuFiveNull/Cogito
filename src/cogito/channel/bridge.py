@@ -2,6 +2,7 @@
 
 QQ-ONEBOT-E2E-01: 增强 OneBot 来源 message_id 提取，修复 QQ-09。
 """
+
 from __future__ import annotations
 
 import logging
@@ -121,35 +122,45 @@ def _extract_content(
     result: list[InboundContent] = []
     for component in message_chain:
         if isinstance(component, lb_message.Plain):
-            result.append(InboundContent(
-                type="text",
-                data=component.text or "",
-            ))
+            result.append(
+                InboundContent(
+                    type="text",
+                    data=component.text or "",
+                )
+            )
         elif isinstance(component, lb_message.Image):
-            result.append(InboundContent(
-                type="image",
-                data=component.base64 or "",
-                mime="image/jpeg",
-            ))
+            result.append(
+                InboundContent(
+                    type="image",
+                    data=component.base64 or "",
+                    mime="image/jpeg",
+                )
+            )
         elif isinstance(component, lb_message.Voice):
-            result.append(InboundContent(
-                type="voice",
-                data=component.base64 or "",
-                mime="audio/ogg",
-                size=0,
-            ))
+            result.append(
+                InboundContent(
+                    type="voice",
+                    data=component.base64 or "",
+                    mime="audio/ogg",
+                    size=0,
+                )
+            )
         elif isinstance(component, lb_message.File):
-            result.append(InboundContent(
-                type="file",
-                data=component.base64 or "",
-                mime="application/octet-stream",
-                name=component.name or "",
-                size=component.size or 0,
-            ))
+            result.append(
+                InboundContent(
+                    type="file",
+                    data=component.base64 or "",
+                    mime="application/octet-stream",
+                    name=component.name or "",
+                    size=component.size or 0,
+                )
+            )
         elif isinstance(component, lb_message.At):
-            result.append(InboundContent(
-                type="at",
-                data=component.target or "",
-            ))
+            result.append(
+                InboundContent(
+                    type="at",
+                    data=component.target or "",
+                )
+            )
         # Forward 和其他复杂类型暂不处理
     return result

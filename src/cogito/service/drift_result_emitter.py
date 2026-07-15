@@ -5,6 +5,7 @@ Consumer (DriftResultCommittedConsumer) 校验 completed/principal/config/manife
 调 DriftProjectionService 写 ProactiveCandidate(origin=drift)；dry_run 只保存 preview，
 不写真实 Candidate (PLAN-17 R5 P0-06)。
 """
+
 from __future__ import annotations
 
 import logging
@@ -75,8 +76,11 @@ def emit_drift_result(
     from cogito.store.drift_result_repo import DriftResult, DriftResultRepository
 
     items = items or []
-    rc_value = reason_code.value if hasattr(reason_code, "value") else (
-        str(reason_code) if reason_code else "")
+    rc_value = (
+        reason_code.value
+        if hasattr(reason_code, "value")
+        else (str(reason_code) if reason_code else "")
+    )
 
     has_items = bool(items)
     if has_items and manifest_can_emit_candidate:
@@ -92,18 +96,20 @@ def emit_drift_result(
 
     now = _now_ms()
     result_id = f"dr-res-{_uuid4_hex()[:16]}"
-    DriftResultRepository(conn).insert(DriftResult(
-        drift_result_id=result_id,
-        drift_run_id=drift_run_id,
-        task_attempt_id=task_attempt_id,
-        result_kind=result_kind,
-        result_ref=result_ref,
-        summary=summary[:500] if summary else "",
-        items=items,
-        candidate_draft=draft.to_dict() if draft else None,
-        emitted=False,
-        created_at=now,
-    ))
+    DriftResultRepository(conn).insert(
+        DriftResult(
+            drift_result_id=result_id,
+            drift_run_id=drift_run_id,
+            task_attempt_id=task_attempt_id,
+            result_kind=result_kind,
+            result_ref=result_ref,
+            summary=summary[:500] if summary else "",
+            items=items,
+            candidate_draft=draft.to_dict() if draft else None,
+            emitted=False,
+            created_at=now,
+        )
+    )
 
     # 发射 Outbox 事件：Candidate emission path / internal_only 都发事件，
     # Consumer 决定实际投影（遵循"dry-run 仅 preview"语义由 DriftProjectionService 决定）。
@@ -113,7 +119,7 @@ def emit_drift_result(
         aggregate_type="drift_result",
         aggregate_id=result_id,
         aggregate_version=1,
-        payload_ref=drift_run_id,                     # payload 指向 run id
+        payload_ref=drift_run_id,  # payload 指向 run id
         payload={
             "drift_run_id": drift_run_id,
             "drift_result_id": result_id,
@@ -127,13 +133,19 @@ def emit_drift_result(
         origin="drift-runner",
     )
     from cogito.store.repositories import OutboxRepository
+
     OutboxRepository(conn).insert(event)
     _LOGGER.info(
         "drift result emitted: run=%s result=%s kind=%s (items=%d)",
-        drift_run_id, result_id, result_kind, len(items))
+        drift_run_id,
+        result_id,
+        result_kind,
+        len(items),
+    )
     return result_id
 
 
 def _uuid4_hex() -> str:
     import uuid as _uuid
+
     return _uuid.uuid4().hex

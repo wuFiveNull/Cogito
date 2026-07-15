@@ -3,6 +3,7 @@
 完整解析 SKILL.md frontmatter/Markdown，支持内置/用户/Plugin Skill 来源。
 状态 active/stale/archived/pinned；只移动到 .archive，支持恢复。
 """
+
 from __future__ import annotations
 
 import re
@@ -14,13 +15,14 @@ from typing import Any
 @dataclass(frozen=True)
 class SkillManifest:
     """解析后的 Skill 声明。"""
+
     name: str
     description: str = ""
     version: str = "1.0"
     toolsets: tuple[str, ...] = ()
     permissions: tuple[str, ...] = ()
     content: str = ""
-    source: str = "user"        # builtin | user | plugin
+    source: str = "user"  # builtin | user | plugin
     author: str = ""
     requires: tuple[str, ...] = ()
 
@@ -28,8 +30,9 @@ class SkillManifest:
 @dataclass
 class SkillState:
     """Skill 运行时状态。"""
+
     manifest: SkillManifest
-    status: str = "active"      # active | stale | archived | pinned
+    status: str = "active"  # active | stale | archived | pinned
     loaded_at: str = ""
     last_used_at: str = ""
     use_count: int = 0
@@ -84,12 +87,14 @@ def parse_skill_md(raw: str, *, source: str = "user") -> SkillManifest:
     )
 
 
-def validate_skill(manifest: SkillManifest, *,
-                   max_content_chars: int = 50_000) -> list[str]:
+def validate_skill(manifest: SkillManifest, *, max_content_chars: int = 50_000) -> list[str]:
     """校验 Skill 声明。"""
     errors: list[str] = []
-    if (not manifest.name or manifest.name == "unnamed"
-            or not re.match(r"^[a-zA-Z0-9_-]+$", manifest.name)):
+    if (
+        not manifest.name
+        or manifest.name == "unnamed"
+        or not re.match(r"^[a-zA-Z0-9_-]+$", manifest.name)
+    ):
         errors.append(f"invalid skill name: {manifest.name!r}")
     if len(manifest.content) > max_content_chars:
         errors.append(f"skill {manifest.name}: content too large ({len(manifest.content)})")
@@ -103,8 +108,9 @@ class SkillRuntime:
         self._conn = conn
         self._skills: dict[str, SkillState] = {}
 
-    def parse_and_register(self, raw: str, *,
-                           source: str = "user") -> tuple[SkillManifest, list[str]]:
+    def parse_and_register(
+        self, raw: str, *, source: str = "user"
+    ) -> tuple[SkillManifest, list[str]]:
         """解析 + 校验 + 注册 Skill。"""
         manifest = parse_skill_md(raw, source=source)
         errors = validate_skill(manifest)
@@ -152,5 +158,4 @@ class SkillRuntime:
 
     def list_active(self) -> list[SkillState]:
         """列出 active/pinned Skill。"""
-        return [s for s in self._skills.values()
-                if s.status in ("active", "pinned")]
+        return [s for s in self._skills.values() if s.status in ("active", "pinned")]

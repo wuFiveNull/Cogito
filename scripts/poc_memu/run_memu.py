@@ -9,6 +9,7 @@ Owner 在 Python 3.13 + memU 环境执行：
 
 隔离约束：使用临时内存数据库（:memory:），不污染生产。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -45,8 +46,15 @@ def main():
     from scripts.poc_memu.metrics import evaluate_backend
 
     docs = [
-        type("Doc", (), {"doc_id": d["doc_id"], "content": d["content"],
-                          "expected_queries": d["expected_queries"]})
+        type(
+            "Doc",
+            (),
+            {
+                "doc_id": d["doc_id"],
+                "content": d["content"],
+                "expected_queries": d["expected_queries"],
+            },
+        )
         for d in dataset
     ]
 
@@ -59,8 +67,7 @@ def main():
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2),
-                        encoding="utf-8")
+    out_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
     print(f"\nResults written to {out_path}")
 

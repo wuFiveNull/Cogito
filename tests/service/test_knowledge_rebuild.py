@@ -2,6 +2,7 @@
 
 PLAN-13 M4 §11.5：FTS-only 降级 + rebuild + Embedding version 隔离。
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -21,6 +22,7 @@ def db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     from cogito.store.migration import migrate
+
     migrate(conn)
     return conn
 

@@ -3,6 +3,7 @@
 只读视图：Resource/Document 索引和 freshness。数据库是唯一事实源；
 Markdown 丢失可重建；View 失败不回滚数据库事务。
 """
+
 from __future__ import annotations
 
 import logging

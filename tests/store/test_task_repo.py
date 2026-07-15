@@ -110,9 +110,7 @@ class TestTaskRepository:
 
         repo.claim("t_c", "worker1", lease_ttl_ms=120000)
         # 获取当前 lease_version（claim 后 version=1）
-        row = repo._conn.execute(
-            "SELECT lease_version FROM tasks WHERE task_id='t_c'"
-        ).fetchone()
+        row = repo._conn.execute("SELECT lease_version FROM tasks WHERE task_id='t_c'").fetchone()
         lease_version = row["lease_version"]
 
         ok = repo.complete("t_c", "worker1", lease_version)
@@ -139,9 +137,7 @@ class TestTaskRepository:
         repo.insert(task)
         repo.claim("t_f", "worker1", lease_ttl_ms=120000)
 
-        row = repo._conn.execute(
-            "SELECT lease_version FROM tasks WHERE task_id='t_f'"
-        ).fetchone()
+        row = repo._conn.execute("SELECT lease_version FROM tasks WHERE task_id='t_f'").fetchone()
         lease_version = row["lease_version"]
 
         ok = repo.fail("t_f", "worker1", lease_version)
@@ -155,9 +151,7 @@ class TestTaskRepository:
         repo.insert(task)
         repo.claim("t_hb", "worker1", lease_ttl_ms=120000)
 
-        row = repo._conn.execute(
-            "SELECT lease_version FROM tasks WHERE task_id='t_hb'"
-        ).fetchone()
+        row = repo._conn.execute("SELECT lease_version FROM tasks WHERE task_id='t_hb'").fetchone()
         lease_version = row["lease_version"]
 
         ok = repo.heartbeat("t_hb", "worker1", lease_version, lease_ttl_ms=240000)
@@ -199,9 +193,7 @@ class TestTaskAttemptRepository:
         )
         at_repo.insert(attempt)
 
-        row = db.execute(
-            "SELECT status FROM task_attempts WHERE task_attempt_id='ta1'"
-        ).fetchone()
+        row = db.execute("SELECT status FROM task_attempts WHERE task_attempt_id='ta1'").fetchone()
         assert row is not None
         assert row["status"] == "created"
 
@@ -209,30 +201,30 @@ class TestTaskAttemptRepository:
         self._insert_parent_task(db)
         at_repo = TaskAttemptRepository(db)
         attempt = TaskAttempt(
-            task_attempt_id="ta1", task_id="t1", attempt_no=1,
+            task_attempt_id="ta1",
+            task_id="t1",
+            attempt_no=1,
         )
         at_repo.insert(attempt)
 
         ok = at_repo.succeed("ta1")
         assert ok is True
 
-        row = db.execute(
-            "SELECT status FROM task_attempts WHERE task_attempt_id='ta1'"
-        ).fetchone()
+        row = db.execute("SELECT status FROM task_attempts WHERE task_attempt_id='ta1'").fetchone()
         assert row["status"] == "succeeded"
 
     def test_fail(self, db):
         self._insert_parent_task(db)
         at_repo = TaskAttemptRepository(db)
         attempt = TaskAttempt(
-            task_attempt_id="ta1", task_id="t1", attempt_no=1,
+            task_attempt_id="ta1",
+            task_id="t1",
+            attempt_no=1,
         )
         at_repo.insert(attempt)
 
         ok = at_repo.fail("ta1")
         assert ok is True
 
-        row = db.execute(
-            "SELECT status FROM task_attempts WHERE task_attempt_id='ta1'"
-        ).fetchone()
+        row = db.execute("SELECT status FROM task_attempts WHERE task_attempt_id='ta1'").fetchone()
         assert row["status"] == "failed"

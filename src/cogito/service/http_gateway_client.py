@@ -1,4 +1,5 @@
 """HTTP implementation of the GatewayClient port."""
+
 from __future__ import annotations
 
 import json
@@ -28,10 +29,16 @@ class HttpGatewayClient:
         return self._operation("send", target_snapshot, content, idempotency_key)
 
     def start_placeholder(
-        self, target_snapshot: str, content: str, idempotency_key: str,
+        self,
+        target_snapshot: str,
+        content: str,
+        idempotency_key: str,
     ) -> GatewayResult:
         return self._operation(
-            "start_placeholder", target_snapshot, content, idempotency_key,
+            "start_placeholder",
+            target_snapshot,
+            content,
+            idempotency_key,
         )
 
     def edit(
@@ -62,8 +69,12 @@ class HttpGatewayClient:
         idempotency_key: str,
     ) -> GatewayResult:
         return self.edit(
-            target_snapshot, platform_message_id, content, operation_seq,
-            idempotency_key, is_final=True,
+            target_snapshot,
+            platform_message_id,
+            content,
+            operation_seq,
+            idempotency_key,
+            is_final=True,
         )
 
     def delete(
@@ -74,8 +85,12 @@ class HttpGatewayClient:
         idempotency_key: str,
     ) -> GatewayResult:
         return self._operation(
-            "delete", target_snapshot, "", idempotency_key,
-            operation_seq=operation_seq, platform_message_id=platform_message_id,
+            "delete",
+            target_snapshot,
+            "",
+            idempotency_key,
+            operation_seq=operation_seq,
+            platform_message_id=platform_message_id,
         )
 
     def reconcile(
@@ -85,7 +100,10 @@ class HttpGatewayClient:
         idempotency_key: str,
     ) -> GatewayResult:
         return self._operation(
-            "reconcile", target_snapshot, "", idempotency_key,
+            "reconcile",
+            target_snapshot,
+            "",
+            idempotency_key,
             platform_message_id=platform_message_id,
         )
 
@@ -94,11 +112,7 @@ class HttpGatewayClient:
             response = self._client.get(f"{self._base_url}/bridge/v1/health")
             response.raise_for_status()
             value = response.json()
-            return (
-                value
-                if isinstance(value, dict)
-                else {"status": "degraded", "instances": []}
-            )
+            return value if isinstance(value, dict) else {"status": "degraded", "instances": []}
         except Exception as exc:
             return {"status": "unavailable", "instances": [], "error_code": type(exc).__name__}
 
@@ -143,11 +157,13 @@ class HttpGatewayClient:
             )
             if response.status_code >= 500:
                 return GatewayResult(
-                    status="temporary", error_code=f"http_{response.status_code}",
+                    status="temporary",
+                    error_code=f"http_{response.status_code}",
                 )
             if response.status_code >= 400:
                 return GatewayResult(
-                    status="permanent", error_code=f"http_{response.status_code}",
+                    status="permanent",
+                    error_code=f"http_{response.status_code}",
                 )
             payload = response.json()
             return GatewayResult(
@@ -187,9 +203,7 @@ def _target_dto(target: dict[str, Any]) -> TargetSnapshot:
             or ""
         ),
         endpoint_ref=str(
-            target.get("target_endpoint_ref")
-            or route.get("target_endpoint_ref")
-            or ""
+            target.get("target_endpoint_ref") or route.get("target_endpoint_ref") or ""
         ),
         platform=str(target.get("platform") or ""),
     )

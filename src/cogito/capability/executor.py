@@ -115,9 +115,8 @@ class ToolExecutor:
                     else f"Tool '{tool_name}' not found in registry"
                 ),
             )
-        if (
+        if context.capability_snapshot_ids and tool.capability_id not in set(
             context.capability_snapshot_ids
-            and tool.capability_id not in set(context.capability_snapshot_ids)
         ):
             return ToolResult(
                 tool_call_id,
@@ -193,11 +192,16 @@ class ToolExecutor:
             self._enforce_constraints(tool, validated, constraints)
         except ToolValidationError as exc:
             return ToolResult(
-                tool_call_id, tool_name, "error", error_message=str(exc),
+                tool_call_id,
+                tool_name,
+                "error",
+                error_message=str(exc),
                 constraints=constraints,
             )
         runtime_context = replace(
-            context, constraints=constraints, tool_call_id=tool_call_id,
+            context,
+            constraints=constraints,
+            tool_call_id=tool_call_id,
         )
 
         # 3. 持久化 executing + 计算幂等键（副作用 Tool 复用）
@@ -244,7 +248,9 @@ class ToolExecutor:
                     summary=raw_result.summary,
                 )
                 self._persist_end(
-                    tool_call_id, "waiting_external", result=raw_result.summary,
+                    tool_call_id,
+                    "waiting_external",
+                    result=raw_result.summary,
                     request_hash=request_hash,
                 )
                 return ToolResult(
@@ -258,7 +264,9 @@ class ToolExecutor:
                 )
             duration = int((datetime.now(UTC) - started_at).total_seconds() * 1000)
             result_text, payload_ref, raw_size, truncated = self._prepare_output(
-                tool, raw_result, constraints,
+                tool,
+                raw_result,
+                constraints,
             )
 
             self._persist_receipt(
@@ -312,7 +320,8 @@ class ToolExecutor:
                 status="error",
                 error_message=(
                     f"{e}; execution audit failed: {persistence_error}"
-                    if persistence_error else str(e)
+                    if persistence_error
+                    else str(e)
                 ),
                 duration_ms=duration,
                 constraints=constraints,
@@ -407,7 +416,9 @@ class ToolExecutor:
             or request.get("auto_mode_version") != "2"
         ):
             invalidate = getattr(
-                self._approval_service, "invalidate_approved_tool_call", None,
+                self._approval_service,
+                "invalidate_approved_tool_call",
+                None,
             )
             if invalidate is not None:
                 invalidate(
@@ -416,7 +427,10 @@ class ToolExecutor:
                 )
             if tool is not None:
                 refreshed = self._policy.evaluate(
-                    tool.name, arguments, tool, agent_mode=context.agent_mode,
+                    tool.name,
+                    arguments,
+                    tool,
+                    agent_mode=context.agent_mode,
                 )
                 return self._require_approval(
                     str(request.get("tool_call_id", "")),
@@ -464,7 +478,9 @@ class ToolExecutor:
             self._enforce_constraints(tool, arguments, constraints)
         except ToolValidationError as exc:
             return ToolResult(
-                str(request.get("tool_call_id", "")), tool.name, "error",
+                str(request.get("tool_call_id", "")),
+                tool.name,
+                "error",
                 error_message=str(exc),
             )
         consume = getattr(self._approval_service, "consume_approved_tool_call", None)
@@ -500,7 +516,9 @@ class ToolExecutor:
                 timeout=constraints.timeout_seconds,
             )
             text, payload_ref, raw_size, truncated = self._prepare_output(
-                tool, raw, constraints,
+                tool,
+                raw,
+                constraints,
             )
             duration = int((datetime.now(UTC) - started_at).total_seconds() * 1000)
             self._persist_receipt(
@@ -551,7 +569,8 @@ class ToolExecutor:
                 "error",
                 error_message=(
                     f"{exc}; execution audit failed: {persistence_error}"
-                    if persistence_error else str(exc)
+                    if persistence_error
+                    else str(exc)
                 ),
                 approval_id=str(request.get("approval_id", "")),
                 constraints=constraints,
@@ -575,7 +594,9 @@ class ToolExecutor:
 
     def _invalidate_approval(self, request: dict[str, Any]) -> None:
         invalidate = getattr(
-            self._approval_service, "invalidate_approved_tool_call", None,
+            self._approval_service,
+            "invalidate_approved_tool_call",
+            None,
         )
         if invalidate is not None:
             invalidate(
@@ -688,13 +709,15 @@ class ToolExecutor:
         if enqueue is None:
             return
         try:
-            enqueue({
-                "capability_id": tool.capability_id,
-                "tool_call_id": tool_call_id,
-                "attempt_id": context.attempt_id,
-                "request_hash": request_hash,
-                "receipt_id": receipt_id,
-            })
+            enqueue(
+                {
+                    "capability_id": tool.capability_id,
+                    "tool_call_id": tool_call_id,
+                    "attempt_id": context.attempt_id,
+                    "request_hash": request_hash,
+                    "receipt_id": receipt_id,
+                }
+            )
         except Exception as exc:
             raise ToolExecutionError("cannot enqueue reconciliation") from exc
 
@@ -713,19 +736,21 @@ class ToolExecutor:
         if insert_receipt is None:
             return ""
         try:
-            return str(insert_receipt(
-                {
-                    "capability_id": tool.capability_id,
-                    "operation_id": context.tool_call_id,
-                    "request_hash": request_hash,
-                    "side_effect_class": tool.side_effect_class,
-                    "status": status,
-                    "reconcile_status": ("pending" if status == "unknown" else "not_needed"),
-                    "summary": summary,
-                    "attempt_id": context.attempt_id,
-                    "created_at": epoch_ms(datetime.now(UTC)),
-                }
-            ))
+            return str(
+                insert_receipt(
+                    {
+                        "capability_id": tool.capability_id,
+                        "operation_id": context.tool_call_id,
+                        "request_hash": request_hash,
+                        "side_effect_class": tool.side_effect_class,
+                        "status": status,
+                        "reconcile_status": ("pending" if status == "unknown" else "not_needed"),
+                        "summary": summary,
+                        "attempt_id": context.attempt_id,
+                        "created_at": epoch_ms(datetime.now(UTC)),
+                    }
+                )
+            )
         except Exception as exc:
             raise ToolExecutionError("cannot persist side-effect receipt") from exc
 
@@ -764,7 +789,11 @@ class ToolExecutor:
         if status == "unknown" and receipt_id:
             try:
                 self._enqueue_reconcile(
-                    tool_call_id, tool, context, request_hash, receipt_id,
+                    tool_call_id,
+                    tool,
+                    context,
+                    request_hash,
+                    receipt_id,
                 )
             except ToolExecutionError as exc:
                 failures.append(str(exc))
@@ -796,7 +825,10 @@ class ToolExecutor:
         return arguments
 
     def _enforce_constraints(
-        self, tool: ToolDef, arguments: dict[str, Any], constraints: ConstraintSet,
+        self,
+        tool: ToolDef,
+        arguments: dict[str, Any],
+        constraints: ConstraintSet,
     ) -> None:
         path = arguments.get("path") or arguments.get("cwd")
         if path and constraints.allowed_paths:
@@ -806,9 +838,7 @@ class ToolExecutor:
                 for value in constraints.allowed_paths
             )
             if not any(
-                scope == "."
-                or normalized == scope
-                or normalized.startswith(scope + "/")
+                scope == "." or normalized == scope or normalized.startswith(scope + "/")
                 for scope in allowed
             ):
                 raise ToolValidationError("Policy constraints reject the requested path")
@@ -829,7 +859,10 @@ class ToolExecutor:
             raise ToolValidationError("Policy constraints disable network access")
 
     def _prepare_output(
-        self, tool: ToolDef, result: Any, constraints: ConstraintSet,
+        self,
+        tool: ToolDef,
+        result: Any,
+        constraints: ConstraintSet,
     ) -> tuple[str, str, int, bool]:
         if isinstance(result, (dict, list)):
             structured = result
@@ -860,8 +893,7 @@ class ToolExecutor:
             item_count = _count_result_items(structured)
             if item_count > constraints.max_result_items:
                 raise ToolValidationError(
-                    f"Tool result has {item_count} items; "
-                    f"limit is {constraints.max_result_items}"
+                    f"Tool result has {item_count} items; limit is {constraints.max_result_items}"
                 )
         clean = _redact_secret_text(text)
         raw = clean.encode("utf-8")
@@ -869,21 +901,28 @@ class ToolExecutor:
         truncated = len(clean) > constraints.max_output_chars
         if truncated:
             payload_ref = self._store_payload(
-                raw, content_type="application/json" if structured is not None else "text/plain",
+                raw,
+                content_type="application/json" if structured is not None else "text/plain",
             )
             clean = (
-                clean[:constraints.max_output_chars]
+                clean[: constraints.max_output_chars]
                 + f"\n... (truncated, payload_ref={payload_ref}, {len(raw)} bytes)"
             )
         return clean, payload_ref, len(raw), truncated
 
     def _store_payload(
-        self, data: bytes, *, content_type: str, retention_class: str = "hot",
+        self,
+        data: bytes,
+        *,
+        content_type: str,
+        retention_class: str = "hot",
     ) -> str:
         if self._payload_store is None:
             return ""
         obj = self._payload_store.put(
-            data, content_type=content_type, retention_class=retention_class,
+            data,
+            content_type=content_type,
+            retention_class=retention_class,
         )
         return str(getattr(obj, "payload_id", ""))
 
@@ -983,7 +1022,10 @@ def _tool_schema_hash(tool: ToolDef) -> str:
 
 def _canonical_arguments(arguments: dict[str, Any]) -> str:
     return json.dumps(
-        arguments, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+        arguments,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
 
 
@@ -1004,5 +1046,7 @@ _SECRET_PATTERNS = (
 def _redact_secret_text(value: str) -> str:
     text = value
     for pattern in _SECRET_PATTERNS:
-        text = pattern.sub(lambda match: match.group(1) + '"<redacted>"' if match.lastindex else "<redacted>", text)
+        text = pattern.sub(
+            lambda match: match.group(1) + '"<redacted>"' if match.lastindex else "<redacted>", text
+        )
     return text

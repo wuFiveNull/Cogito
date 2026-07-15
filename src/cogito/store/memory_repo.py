@@ -90,6 +90,7 @@ def _fts_escape(query: str) -> str:
         return ""
     # 移除非单词字符，构建短语查询
     import re
+
     tokens = re.findall(r"[-\w]+", query)
     return " OR ".join(tokens) if tokens else query
 
@@ -207,8 +208,7 @@ class MemoryRepository:
             return
         try:
             self._conn.execute(
-                "INSERT INTO memory_fts (memory_id, subject, predicate, value) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT INTO memory_fts (memory_id, subject, predicate, value) VALUES (?, ?, ?, ?)",
                 (memory_id, subject, predicate, value),
             )
         except sqlite3.OperationalError:
@@ -221,8 +221,7 @@ class MemoryRepository:
         try:
             self._conn.execute("DELETE FROM memory_fts WHERE memory_id=?", (memory_id,))
             self._conn.execute(
-                "INSERT INTO memory_fts (memory_id, subject, predicate, value) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT INTO memory_fts (memory_id, subject, predicate, value) VALUES (?, ?, ?, ?)",
                 (memory_id, subject, predicate, value),
             )
         except sqlite3.OperationalError:
@@ -233,9 +232,7 @@ class MemoryRepository:
         if not self._ensure_fts():
             return
         try:
-            self._conn.execute(
-                "DELETE FROM memory_fts WHERE memory_id=?", (memory_id,)
-            )
+            self._conn.execute("DELETE FROM memory_fts WHERE memory_id=?", (memory_id,))
         except sqlite3.OperationalError:
             pass
 
@@ -254,6 +251,7 @@ class MemoryRepository:
             return
         import json as _json
         from datetime import UTC, datetime
+
         try:
             blob = _json.dumps(vector).encode("utf-8")
             self._conn.execute(
@@ -274,6 +272,7 @@ class MemoryRepository:
             ).fetchone()
             if row and row["vector"]:
                 import json as _json
+
                 return _json.loads(row["vector"])
         except (sqlite3.OperationalError, Exception):
             pass
@@ -291,9 +290,7 @@ class MemoryRepository:
     def _sync_embedding_delete(self, memory_id: str) -> None:
         """删除一笔 Embedding。"""
         try:
-            self._conn.execute(
-                "DELETE FROM memory_embeddings WHERE memory_id=?", (memory_id,)
-            )
+            self._conn.execute("DELETE FROM memory_embeddings WHERE memory_id=?", (memory_id,))
         except sqlite3.OperationalError:
             pass
 
@@ -412,10 +409,7 @@ class MemoryRepository:
             ")"
         )
 
-        sql = (
-            "SELECT mi.* FROM memory_items mi "
-            "WHERE " + " AND ".join(conditions)
-        )
+        sql = "SELECT mi.* FROM memory_items mi WHERE " + " AND ".join(conditions)
         sql += " ORDER BY mi.importance DESC, mi.confidence DESC, mi.created_at DESC"
         sql += f" LIMIT {int(limit)}"
 
@@ -502,19 +496,19 @@ class MemoryRepository:
                     "SELECT mi.* FROM memory_items mi "
                     "WHERE mi.memory_id IN ("
                     "  SELECT memory_id FROM memory_fts WHERE memory_fts MATCH ?"
-                    ") AND " + fts_where
-                    + " ORDER BY mi.importance DESC, mi.confidence DESC",
+                    ") AND " + fts_where + " ORDER BY mi.importance DESC, mi.confidence DESC",
                     [fts_expr] + params,
                 ).fetchall()
                 if rows:
                     results = []
                     for r in rows:
                         item = _row_to_memory(r)
-                        scope_match = (
-                            (not scope_type or item.scope_type == scope_type)
-                            and (not scope_id or item.scope_id == scope_id)
+                        scope_match = (not scope_type or item.scope_type == scope_type) and (
+                            not scope_id or item.scope_id == scope_id
                         )
-                        final_score = _compute_score(item, keyword_hit=True, scope_match=scope_match, now=now)
+                        final_score = _compute_score(
+                            item, keyword_hit=True, scope_match=scope_match, now=now
+                        )
                         results.append((item, final_score))
                     results.sort(key=lambda x: -x[1])
                     return results[:limit]
@@ -525,9 +519,7 @@ class MemoryRepository:
         has_query = bool(query)
         if has_query:
             like_pattern = f"%{query}%"
-            conditions.append(
-                "(mi.value LIKE ? OR mi.subject LIKE ? OR mi.predicate LIKE ?)"
-            )
+            conditions.append("(mi.value LIKE ? OR mi.subject LIKE ? OR mi.predicate LIKE ?)")
             params.extend([like_pattern, like_pattern, like_pattern])
 
         sql = "SELECT mi.* FROM memory_items mi WHERE " + " AND ".join(conditions)
@@ -538,9 +530,8 @@ class MemoryRepository:
         results = []
         for r in rows:
             item = _row_to_memory(r)
-            scope_match = (
-                (not scope_type or item.scope_type == scope_type)
-                and (not scope_id or item.scope_id == scope_id)
+            scope_match = (not scope_type or item.scope_type == scope_type) and (
+                not scope_id or item.scope_id == scope_id
             )
             score = _compute_score(item, keyword_hit=has_query, scope_match=scope_match, now=now)
             results.append((item, score))
@@ -735,7 +726,9 @@ class MemoryRepository:
         )
         return cursor.rowcount > 0
 
-    def reject(self, memory_id: str, principal_id: str = "", expected_version: int | None = None) -> bool:
+    def reject(
+        self, memory_id: str, principal_id: str = "", expected_version: int | None = None
+    ) -> bool:
         """拒绝记忆（candidate → rejected）。
 
         PLAN-16 MEM-06：expected_version 非空时加入 WHERE 条件做乐观锁。
@@ -782,9 +775,7 @@ class MemoryRepository:
     def _ensure_relations_table(self) -> bool:
         """检查 memory_relations 表是否存在。"""
         try:
-            self._conn.execute(
-                "SELECT 1 FROM memory_relations LIMIT 1"
-            ).fetchone()
+            self._conn.execute("SELECT 1 FROM memory_relations LIMIT 1").fetchone()
             return True
         except sqlite3.OperationalError:
             return False
@@ -801,6 +792,7 @@ class MemoryRepository:
         if not self._ensure_relations_table():
             return False
         import uuid
+
         now = datetime.now(UTC).isoformat()
         try:
             self._conn.execute(
@@ -810,8 +802,12 @@ class MemoryRepository:
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     uuid.uuid4().hex,
-                    from_memory_id, to_memory_id, relation_type,
-                    source_type, source_id, now,
+                    from_memory_id,
+                    to_memory_id,
+                    relation_type,
+                    source_type,
+                    source_id,
+                    now,
                 ),
             )
             return True
@@ -827,6 +823,7 @@ class MemoryRepository:
         重复插入不产生重复行。
         """
         import uuid
+
         if not source.memory_source_id:
             source.memory_source_id = uuid.uuid4().hex
         if source.created_at is None:
@@ -864,10 +861,7 @@ class MemoryRepository:
     ) -> list[MemorySource]:
         """列出记忆的有效来源（PLAN-13 dual-read：优先读新表）。"""
         try:
-            sql = (
-                "SELECT * FROM memory_sources "
-                "WHERE memory_id=?"
-            )
+            sql = "SELECT * FROM memory_sources WHERE memory_id=?"
             params: list[Any] = [memory_id]
             if not include_deleted:
                 sql += " AND deleted_at IS NULL"
@@ -886,8 +880,7 @@ class MemoryRepository:
         now = datetime.now(UTC).isoformat()
         try:
             cur = self._conn.execute(
-                "UPDATE memory_sources SET deleted_at=? "
-                "WHERE memory_id=? AND deleted_at IS NULL",
+                "UPDATE memory_sources SET deleted_at=? WHERE memory_id=? AND deleted_at IS NULL",
                 (now, memory_id),
             )
             return cur.rowcount
@@ -984,9 +977,11 @@ class MemoryRepository:
             return row is not None  # 已擦除 → 幂等成功；不存在 → False
         if expected_version is not None and row.version != expected_version:
             from cogito.domain.errors import ConcurrencyConflictError
+
             raise ConcurrencyConflictError("memory", memory_id, expected_version, row.version)
         if principal_id is not None and row.principal_id != principal_id:
             from cogito.domain.errors import EntityNotFoundError
+
             raise EntityNotFoundError("memory", memory_id)
 
         now = datetime.now(UTC).isoformat()
@@ -1054,6 +1049,7 @@ class MemoryRepository:
             MemoryWeightPolicy,
             compute_weight_for_item,
         )
+
         policy = policy or MemoryWeightPolicy()
         row = self._conn.execute(
             "SELECT * FROM memory_items WHERE memory_id=? AND deleted_at IS NULL",
@@ -1118,8 +1114,10 @@ class MemoryRepository:
         count = 0
         for r in rows:
             self.recompute_weight(
-                memory_id=r["memory_id"], now=now,
-                policy=policy, signals_repo=signals_repo,
+                memory_id=r["memory_id"],
+                now=now,
+                policy=policy,
+                signals_repo=signals_repo,
             )
             count += 1
             if count % batch_size == 0:
@@ -1133,7 +1131,8 @@ class MemoryRepository:
         保留此方法作为兼容 shim，内部委托给纯函数重算。
         """
         return self.recompute_all_weights(
-            now=datetime.now(UTC), principal_id=principal_id,
+            now=datetime.now(UTC),
+            principal_id=principal_id,
         )
 
     # ── 索引全量重建 (Plan 02 M7) ──────────────────────────────

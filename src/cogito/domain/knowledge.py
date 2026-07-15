@@ -6,6 +6,7 @@ PLAN-13 M4 / §5.3：Resource → Document → Segment 三层独立聚合，
  KnowledgeService 是唯一写入者；从内容抽取出的 Owner 事实仍走
  MemoryService candidate/confirm 流程。
 """
+
 from __future__ import annotations
 
 import uuid
@@ -45,6 +46,7 @@ def _parse_dt(s: Any) -> datetime | None:
 @dataclass
 class KnowledgeResource:
     """外部/本地资源的注册记录（PLAN-13 §5.3）。"""
+
     resource_id: str = ""
     principal_id: str = ""
     connector_id: str = ""
@@ -73,6 +75,7 @@ class KnowledgeResource:
 @dataclass
 class KnowledgeDocument:
     """资源解析后的文档对象。"""
+
     document_id: str = ""
     resource_id: str = ""
     title: str = ""
@@ -100,6 +103,7 @@ class KnowledgeSegment:
     PLAN-16 M4 完整 payload 边界：大正文写入 PayloadStore 时
     text_ref_or_inline=''，payload_ref 保存 sha256 引用（resolver 读取）。
     """
+
     segment_id: str = ""
     document_id: str = ""
     ordinal: int = 0
@@ -126,6 +130,7 @@ class KnowledgeSegment:
 @dataclass
 class KnowledgeEmbedding:
     """段落地 Embedding 向量索引。"""
+
     segment_id: str = ""
     embedding_model: str = ""
     embedding_version: str = ""

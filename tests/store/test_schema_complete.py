@@ -48,9 +48,7 @@ class TestNewTablesExist:
     def test_new_tables_exist(self, conn):
         existing = {
             row[0]
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
         for tbl in self.EXPECTED_NEW_TABLES:
             assert tbl in existing, f"Missing table: {tbl}"
@@ -136,9 +134,15 @@ class TestCommandsTable:
     def test_mark_consumed(self, conn):
         repo = CommandAuditRepository(conn)
         rec = CommandRecord(
-            command_id="cmd-c", actor="owner", command_type="Approve",
-            idempotency_key="idem-c", target_type=None, target_id=None,
-            expected_version=None, payload=None, created_at=1000,
+            command_id="cmd-c",
+            actor="owner",
+            command_type="Approve",
+            idempotency_key="idem-c",
+            target_type=None,
+            target_id=None,
+            expected_version=None,
+            payload=None,
+            created_at=1000,
         )
         repo.insert(rec)
         conn.commit()
@@ -223,8 +227,12 @@ class TestCapabilities:
     def test_update_health(self, conn):
         repo = CapabilityRepository(conn)
         rec = CapabilityRecord(
-            capability_id="ns:t2", kind="tool", version="1.0",
-            health="healthy", discovered_at=1000, updated_at=1000,
+            capability_id="ns:t2",
+            kind="tool",
+            version="1.0",
+            health="healthy",
+            discovered_at=1000,
+            updated_at=1000,
         )
         repo.insert(rec)
         conn.commit()
@@ -250,7 +258,9 @@ class TestContextSnapshots:
             tokens_used=4000,
             created_at=1000,
             items=[
-                SnapshotItem(item_index=0, source="memory", content_ref="mem:1", score=0.9, tokens=500),
+                SnapshotItem(
+                    item_index=0, source="memory", content_ref="mem:1", score=0.9, tokens=500
+                ),
                 SnapshotItem(item_index=1, source="recent", content_ref="msg:2", tokens=300),
             ],
         )
@@ -285,8 +295,12 @@ class TestTraces:
         trace = TraceRecord(trace_id="trace-1", started_at=1000, actor="owner", origin="web")
         repo.insert_trace(trace)
         span = SpanRecord(
-            span_id="span-1", trace_id="trace-1", name="turn-1", kind="turn",
-            started_at=1000, attributes={"turn_id": "turn-1"},
+            span_id="span-1",
+            trace_id="trace-1",
+            name="turn-1",
+            kind="turn",
+            started_at=1000,
+            attributes={"turn_id": "turn-1"},
         )
         repo.insert_span(span)
         conn.commit()
@@ -299,7 +313,10 @@ class TestTraces:
     def test_foreign_key_constraint(self, conn):
         repo = TraceRepository(conn)
         span = SpanRecord(
-            span_id="orphan", trace_id="no-such-trace", name="x", kind="custom",
+            span_id="orphan",
+            trace_id="no-such-trace",
+            name="x",
+            kind="custom",
             started_at=1000,
         )
         with pytest.raises(Exception):
@@ -330,14 +347,24 @@ class TestConfigVersions:
 
     def test_latest(self, conn):
         repo = ConfigVersionRepository(conn)
-        repo.insert(ConfigVersionRecord(
-            version_id="cfg-1", content_hash="h1", schema_version="1",
-            source_layers=[], applied_at=1000,
-        ))
-        repo.insert(ConfigVersionRecord(
-            version_id="cfg-2", content_hash="h2", schema_version="1",
-            source_layers=[], applied_at=2000,
-        ))
+        repo.insert(
+            ConfigVersionRecord(
+                version_id="cfg-1",
+                content_hash="h1",
+                schema_version="1",
+                source_layers=[],
+                applied_at=1000,
+            )
+        )
+        repo.insert(
+            ConfigVersionRecord(
+                version_id="cfg-2",
+                content_hash="h2",
+                schema_version="1",
+                source_layers=[],
+                applied_at=2000,
+            )
+        )
         conn.commit()
         assert repo.latest().version_id == "cfg-2"
 
@@ -351,14 +378,13 @@ class TestUpgradePath:
     """
 
     def test_current_version_at_least_29(self, conn):
-        row = conn.execute(
-            "SELECT MAX(version) FROM _schema_version"
-        ).fetchone()
+        row = conn.execute("SELECT MAX(version) FROM _schema_version").fetchone()
         assert row[0] >= 29, f"Expected version >= 29, got {row[0]}"
 
     def test_idempotent_reapply(self, conn):
         """sch-03: 重复启动幂等 —— 再次运行 migrate() 不报错。"""
         from cogito.store.migration import migrate
+
         migrate(conn)  # 不应抛异常
         row = conn.execute("SELECT MAX(version) FROM _schema_version").fetchone()
         assert row[0] >= 29

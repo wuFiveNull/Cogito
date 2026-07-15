@@ -3,6 +3,7 @@
 允许一个 Connector 基于 MCP Server 提供的数据源，而非 RSS 源。
 映射字段全部来自 config，不硬编码任何数据源字段。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

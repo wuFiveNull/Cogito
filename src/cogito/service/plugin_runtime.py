@@ -6,6 +6,7 @@ capability → service ❌（循环）。本模块仅重导出，不重新定义
 
 真实 Protocol + 实现均在 capability/plugin_runtime.py。
 """
+
 from cogito.capability.plugin_runtime import (  # noqa: F401
     CircuitBreaker,
     PluginManifest,

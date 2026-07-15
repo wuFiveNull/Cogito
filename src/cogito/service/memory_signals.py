@@ -4,6 +4,7 @@ PLAN-13 P13-04：强化信号幂等写入，不直接修改 reinforcement 计数
 reinforcement 由 aggregate_reinforcement() 从 signals 聚合，供
 memory.recompute_weight Task 和纯权重函数使用。
 """
+
 from __future__ import annotations
 
 import logging
@@ -36,6 +37,7 @@ class SignalWriter:
         """幂等写入一条信号（PLAN-14 R-08: 同时发 MemorySignalRecorded 到 Outbox）。"""
         # OPS-04 完整：记录信号指标（无论写入成功与否均计数类型）
         from cogito.infrastructure.metrics_access import _metrics
+
         _metrics().record_signal(signal_type)
         signal = MemorySignal(
             signal_id="",
@@ -54,7 +56,9 @@ class SignalWriter:
             self._emit_signal_event(signal_type, memory_id, signal_value, task_id)
         return ok
 
-    def _emit_signal_event(self, signal_type: str, memory_id: str, signal_value: int, task_id: str) -> None:
+    def _emit_signal_event(
+        self, signal_type: str, memory_id: str, signal_value: int, task_id: str
+    ) -> None:
         """PLAN-14/16 R-08: MemorySignalRecorded 领域事件（PLAN-16 M2 TX-02/TX-03 + 完整版本单调）。
 
         与信号行共享同一连接 / 事务：写入失败向上传播，确保信号与
@@ -63,17 +67,20 @@ class SignalWriter:
         """
         from cogito.domain.events import DomainEvent
         from cogito.store.repositories import OutboxRepository
+
         payload = {"signal_type": signal_type, "signal_value": signal_value, "task_id": task_id}
         version = OutboxRepository(self._conn).next_aggregate_version("memory", memory_id)
-        OutboxRepository(self._conn).insert(DomainEvent(
-            event_type="MemorySignalRecorded",
-            aggregate_type="memory",
-            aggregate_id=memory_id,
-            aggregate_version=version,
-            payload=payload,
-            payload_ref=__import__("json").dumps(payload, ensure_ascii=False),
-            origin="signal_writer",
-        ))
+        OutboxRepository(self._conn).insert(
+            DomainEvent(
+                event_type="MemorySignalRecorded",
+                aggregate_type="memory",
+                aggregate_id=memory_id,
+                aggregate_version=version,
+                payload=payload,
+                payload_ref=__import__("json").dumps(payload, ensure_ascii=False),
+                origin="signal_writer",
+            )
+        )
 
     def record_exposed(self, memory_id: str, **kwargs) -> bool:
         """召回展示信号（不增加 reinforcement）。"""
@@ -99,8 +106,7 @@ class SignalWriter:
         value = self.aggregate_reinforcement(memory_id)
         try:
             self._conn.execute(
-                "UPDATE memory_items SET reinforcement=? "
-                "WHERE memory_id=? AND deleted_at IS NULL",
+                "UPDATE memory_items SET reinforcement=? WHERE memory_id=? AND deleted_at IS NULL",
                 (value, memory_id),
             )
         except sqlite3.OperationalError:

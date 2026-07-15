@@ -6,6 +6,7 @@
 - unauthorized Tool 在执行前被拒绝（MVP 无 shell/network/send）
 - crash → lease expiry → recovery
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -35,8 +36,14 @@ def _seed_turn(conn, status="running"):
     conn.execute(
         "INSERT INTO turns (turn_id, session_id, input_message_id, status, priority, created_at) "
         "VALUES (?,?,?,?,?,?)",
-        (f"t-{status}-{int(time.time()*1000)%100000}", "s1", "m1", status,
-         80, str(int(time.time()*1000))),
+        (
+            f"t-{status}-{int(time.time() * 1000) % 100000}",
+            "s1",
+            "m1",
+            status,
+            80,
+            str(int(time.time() * 1000)),
+        ),
     )
     conn.commit()
 
@@ -45,16 +52,23 @@ def _seed_run_active(conn, run_id="dr-active", status="running"):
     conn.execute(
         "INSERT INTO tasks (task_id, task_type, status, priority, idempotency_key, created_at) "
         "VALUES (?,?,?,?,?,?)",
-        (f"t-{run_id}", "drift.run", "running", 5, f"id-{run_id}",
-         int(time.time()*1000)),
+        (f"t-{run_id}", "drift.run", "running", 5, f"id-{run_id}", int(time.time() * 1000)),
     )
     conn.execute(
         "INSERT INTO drift_runs "
         "(drift_run_id, task_id, principal_id, skill_name, skill_version, "
         " status, admission_snapshot_json, created_at) "
         "VALUES (?,?,?,?,?,?,?,?)",
-        (run_id, f"t-{run_id}", "owner", "proactive-policy-view-audit",
-         "1.0", status, "{}", int(time.time()*1000)),
+        (
+            run_id,
+            f"t-{run_id}",
+            "owner",
+            "proactive-policy-view-audit",
+            "1.0",
+            status,
+            "{}",
+            int(time.time() * 1000),
+        ),
     )
     conn.commit()
 
@@ -88,15 +102,14 @@ class TestDriftAdmissionReplay:
         conn.execute(
             "INSERT INTO tasks (task_id, task_type, status, priority, idempotency_key, created_at) "
             "VALUES (?,?,?,?,?,?)",
-            ("t-p", "drift.run", "running", 5, "id-p", int(time.time()*1000)),
+            ("t-p", "drift.run", "running", 5, "id-p", int(time.time() * 1000)),
         )
         conn.execute(
             "INSERT INTO drift_runs "
             "(drift_run_id, task_id, principal_id, skill_name, skill_version, "
             " status, admission_snapshot_json, created_at) "
             "VALUES (?,?,?,?,?,?,?,?)",
-            ("dr-p", "t-p", "owner", "s", "1.0", "paused",
-             "{}", int(time.time()*1000)),
+            ("dr-p", "t-p", "owner", "s", "1.0", "paused", "{}", int(time.time() * 1000)),
         )
         conn.commit()
         r = admit(conn, principal_id="owner")
@@ -115,7 +128,8 @@ class TestDriftPreemptionReplay:
         conn = _fresh_db()
         request_preemption(conn, "owner", "new_turn")
         preempted, reason = should_preempt_step(
-            conn, principal_id="owner", lease_valid=True, budget_remaining=10)
+            conn, principal_id="owner", lease_valid=True, budget_remaining=10
+        )
         assert preempted is True
         assert "preempted" in reason
 
@@ -123,7 +137,8 @@ class TestDriftPreemptionReplay:
         """lease 无效 → zero new side-effects。"""
         conn = _fresh_db()
         preempted, reason = should_preempt_step(
-            conn, principal_id="owner", lease_valid=False, budget_remaining=10)
+            conn, principal_id="owner", lease_valid=False, budget_remaining=10
+        )
         assert preempted is True
         assert "lease_lost" in reason
 
@@ -131,7 +146,8 @@ class TestDriftPreemptionReplay:
         """budget=0 → paused_budget_exhausted。"""
         conn = _fresh_db()
         preempted, reason = should_preempt_step(
-            conn, principal_id="owner", lease_valid=True, budget_remaining=0)
+            conn, principal_id="owner", lease_valid=True, budget_remaining=0
+        )
         assert preempted is True
         assert "budget_exhausted" in reason
 
@@ -147,19 +163,28 @@ class TestReplayMetricsConstraints:
         # 断言：执行 drift.run handler 不会创建 Delivery 行
         from cogito.domain.task import Task, TaskStatus
         from cogito.service.drift_runner import handle_drift_run
+
         conn2 = _fresh_db()
         conn2.execute(
             "INSERT INTO tasks (task_id, task_type, status, priority, idempotency_key, created_at) "
             "VALUES (?,?,?,?,?,?)",
-            ("t-dup", "drift.run", "running", 5, "id-dup", int(time.time()*1000)),
+            ("t-dup", "drift.run", "running", 5, "id-dup", int(time.time() * 1000)),
         )
         conn2.execute(
             "INSERT INTO drift_runs "
             "(drift_run_id, task_id, principal_id, skill_name, skill_version, "
             " status, admission_snapshot_json, created_at) "
             "VALUES (?,?,?,?,?,?,?,?)",
-            ("dr-dup", "t-dup", "owner", "proactive-policy-view-audit",
-             "1.0", "admitted", "{}", int(time.time()*1000)),
+            (
+                "dr-dup",
+                "t-dup",
+                "owner",
+                "proactive-policy-view-audit",
+                "1.0",
+                "admitted",
+                "{}",
+                int(time.time() * 1000),
+            ),
         )
         conn2.commit()
         task = Task(task_id="t-dup", task_type="drift.run", status=TaskStatus.running)
@@ -169,6 +194,7 @@ class TestReplayMetricsConstraints:
                 self.connection_factory = lambda p=c: p
                 self.config_version_id = "cfg-1"
                 self.workspace_path = ""
+
         handle_drift_run(task, _Ctx(conn2))
         # MVP read-only 不创建 Delivery
         cnt = conn2.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0]
@@ -179,18 +205,28 @@ class TestReplayMetricsConstraints:
 
         验证：drift_allowed_tools 集合中不含未授权工具类别。"""
         # MVP allowed_tools 仅包含 filesystem.read / query.*
-        manifest = DriftSkillManifest.from_dict({
-            "name": "test-skill",
-            "allowed_tools": ["filesystem.read:workspace", "query.prohibited"],
-        })
+        manifest = DriftSkillManifest.from_dict(
+            {
+                "name": "test-skill",
+                "allowed_tools": ["filesystem.read:workspace", "query.prohibited"],
+            }
+        )
         categories = set()
         for t in manifest.allowed_tools:
             base = t.split(":")[0]
             categories.add(base)
         # 必须不含未授权类别
-        forbidden = {"shell", "network.write", "message.send",
-                     "plugin.manage", "secret.read", "exec", "filesystem.write"}
-        assert not (categories & forbidden), \
+        forbidden = {
+            "shell",
+            "network.write",
+            "message.send",
+            "plugin.manage",
+            "secret.read",
+            "exec",
+            "filesystem.write",
+        }
+        assert not (categories & forbidden), (
             f"unauthorized tool categories in MVP: {categories & forbidden}"
+        )
         # manifest 的 can_emit_candidate / requires_approval 默认安全
         assert manifest.can_emit_candidate is False

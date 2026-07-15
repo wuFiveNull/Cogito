@@ -1,4 +1,5 @@
 """PR-O7+O8+O9: Backup + Startup/Shutdown — Plan 06 M7/M9."""
+
 from __future__ import annotations
 
 import sqlite3

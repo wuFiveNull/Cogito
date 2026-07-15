@@ -1,4 +1,5 @@
 """Channel Manager — 适配器生命周期管理。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -27,7 +28,9 @@ class ChannelManager:
         self._log = logging.getLogger("cogito.channel.manager")
 
     async def start_channel(
-        self, name: str, config: dict[str, Any],
+        self,
+        name: str,
+        config: dict[str, Any],
     ) -> ChannelAdapter:
         """创建并启动一个 Channel 适配器。"""
         if name in self._adapters:
@@ -52,7 +55,9 @@ class ChannelManager:
         return adapter
 
     async def start_adapter(
-        self, name: str, adapter: ChannelAdapter,
+        self,
+        name: str,
+        adapter: ChannelAdapter,
     ) -> ChannelAdapter:
         """直接注册并启动一个已构造的 Adapter 实例。
 

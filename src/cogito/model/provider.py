@@ -19,6 +19,7 @@ from cogito.model.contracts import (
 
 class HealthStatus:
     """Provider 健康状态。"""
+
     healthy: bool = True
     latency_ms: int = 0
     message: str = ""

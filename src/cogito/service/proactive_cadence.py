@@ -9,6 +9,7 @@
 - jitter 打破同步共振；RNG 可注入，测试可复现。
 - 区间严格限制在 [min_interval_seconds, max_interval_seconds]。
 """
+
 from __future__ import annotations
 
 import random
@@ -35,14 +36,14 @@ def compute_interval(
 
     base = _base_interval(energy_band, cadence)
     # 上下限裁剪
-    clamped = max(cadence.min_interval_seconds,
-                  min(cadence.max_interval_seconds, base))
+    clamped = max(cadence.min_interval_seconds, min(cadence.max_interval_seconds, base))
     # jitter: ± jitter_ratio
     jitter = int(clamped * cadence.jitter_ratio)
     if jitter > 0:
         delta = rng.randint(-jitter, jitter)
-        clamped = max(cadence.min_interval_seconds,
-                      min(cadence.max_interval_seconds, clamped + delta))
+        clamped = max(
+            cadence.min_interval_seconds, min(cadence.max_interval_seconds, clamped + delta)
+        )
     return int(clamped)
 
 

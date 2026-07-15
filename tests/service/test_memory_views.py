@@ -27,8 +27,17 @@ def views_dir(tmp_path) -> Path:
     return tmp_path / "memory"
 
 
-def _add_memory(db, memory_id="mem1", kind="fact", subject="user", predicate="lang",
-                value="Python", status="confirmed", importance=0.8, confidence=1.0):
+def _add_memory(
+    db,
+    memory_id="mem1",
+    kind="fact",
+    subject="user",
+    predicate="lang",
+    value="Python",
+    status="confirmed",
+    importance=0.8,
+    confidence=1.0,
+):
     now = epoch_ms(datetime.now(UTC))
     db.execute(
         "INSERT INTO memory_items (memory_id, kind, subject, predicate, value, "

@@ -9,6 +9,7 @@
 Seam 接入：application.process_background_once 在 OutboxWorker.publish() 前
 派发到对应 consumer；成功才 publish，失败则 retry。
 """
+
 from __future__ import annotations
 
 import json
@@ -24,6 +25,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 # ── Consumer 协议 ─────────────────────────────────────────────────────────────
+
 
 class EventConsumer:
     """单事件消费者的协议接口。
@@ -42,6 +44,7 @@ class EventConsumer:
 
 # ── 注册表 ───────────────────────────────────────────────────────────────────
 
+
 class EventConsumerRegistry:
     """事件类型 → Consumer 的注册表。"""
 
@@ -59,6 +62,7 @@ class EventConsumerRegistry:
 
 
 # ── SourceEventIngested → ProactiveCandidate 投影 ────────────────────────────
+
 
 class SourceEventIngestedConsumer(EventConsumer):
     """把 SourceEvent（外部 MCP 摄取）投影为 ProactiveCandidate。
@@ -86,8 +90,7 @@ class SourceEventIngestedConsumer(EventConsumer):
         conn.row_factory = sqlite3.Row
         # 1. 幂等：Inbox 唯一键 (consumer_name, event_id)
         existing = conn.execute(
-            "SELECT status FROM event_consumptions "
-            "WHERE consumer_name=? AND event_id=?",
+            "SELECT status FROM event_consumptions WHERE consumer_name=? AND event_id=?",
             (self.name, lease.event_id),
         ).fetchone()
         if existing is not None:
@@ -101,14 +104,14 @@ class SourceEventIngestedConsumer(EventConsumer):
             (lease.payload_ref or "",),
         ).fetchone()
         if item is None:
-            _LOGGER.warning("SourceEventIngested consumer: item %s not found",
-                            lease.payload_ref)
+            _LOGGER.warning("SourceEventIngested consumer: item %s not found", lease.payload_ref)
             return False
 
         # 候选只对 status='digest'（已决定进摘要）产生
         if item["status"] != "digest":
-            _LOGGER.info("SourceEventIngested consumer: item status=%s, no candidate",
-                         item["status"])
+            _LOGGER.info(
+                "SourceEventIngested consumer: item status=%s, no candidate", item["status"]
+            )
             return True  # 非 digest 静默跳过，不重试
 
         # 优先用 connector_items 上专用 topic 列（MCP handler 写入）
@@ -254,6 +257,7 @@ class TurnCompletedMemoryExtractionConsumer(EventConsumer):
 
         with conn:
             from cogito.service.memory_extractor import request_extraction
+
             request_extraction(
                 conn,
                 conversation_id=conversation_id,
@@ -300,6 +304,7 @@ class SessionCompletedMemoryExtractionConsumer(EventConsumer):
 
         with conn:
             from cogito.service.memory_extractor import request_extraction
+
             request_extraction(
                 conn,
                 conversation_id=conversation_id,
@@ -349,23 +354,26 @@ class MemorySourceInvalidatedConsumer(EventConsumer):
             _LOGGER.warning(
                 "MemorySourceInvalidated missing required fields "
                 "(memory_id=%r, resource_id=%r), failing event for retry",
-                memory_id, resource_id)
+                memory_id,
+                resource_id,
+            )
             return False
 
         with conn:
             from cogito.service.memory_service import SqliteMemoryService
+
             SqliteMemoryService(conn).handle_memory_source_invalidated(
-                memory_id, source_resource_id=resource_id, reason=reason,
+                memory_id,
+                source_resource_id=resource_id,
+                reason=reason,
             )
             _mark_consumed(conn, self.name, lease.event_id)
         return True
 
 
-
-
-def _mk_idempotency(principal: str, stream_type: str, event_ids: list[str],
-                    policy_ver: int) -> str:
+def _mk_idempotency(principal: str, stream_type: str, event_ids: list[str], policy_ver: int) -> str:
     import hashlib
+
     ids = sorted(set(event_ids))
     raw = f"{principal}|{stream_type}|{'|'.join(ids)}|{policy_ver}"
     return hashlib.sha256(raw.encode()).hexdigest()
@@ -377,6 +385,7 @@ def _make_candidate_summary(title: str, body: str) -> str:
 
 def _mark_consumed(conn: sqlite3.Connection, consumer_name: str, event_id: str) -> None:
     import time
+
     now_ms = int(time.time() * 1000)
     conn.execute(
         "INSERT OR REPLACE INTO event_consumptions "
@@ -404,12 +413,17 @@ class InboundImmediateEvalConsumer(EventConsumer):
         return lease.event_type == "InboundMessageAccepted"
 
     def handle(self, conn: sqlite3.Connection, lease: OutboxLease) -> bool:
-        if conn.execute(
-            "SELECT 1 FROM event_consumptions WHERE consumer_name=? AND event_id=?",
-            (self.name, lease.event_id)).fetchone() is not None:
+        if (
+            conn.execute(
+                "SELECT 1 FROM event_consumptions WHERE consumer_name=? AND event_id=?",
+                (self.name, lease.event_id),
+            ).fetchone()
+            is not None
+        ):
             return True
 
         import time as _time
+
         # 取 turn_id (aggregate_id)
         turn_id = lease.aggregate_id
 
@@ -427,6 +441,7 @@ class InboundImmediateEvalConsumer(EventConsumer):
 
         try:
             from cogito.domain.task import Task, TaskStatus
+
             task = Task(
                 task_id=f"task-pe-imm-{uuid.uuid4().hex[:16]}",
                 task_type="proactive.evaluate",
@@ -441,15 +456,23 @@ class InboundImmediateEvalConsumer(EventConsumer):
                 "(task_id, task_type, status, priority, "
                 " idempotency_key, origin, created_at) "
                 "VALUES (?,?,?,?,?,?,?)",
-                (task.task_id, task.task_type, task.status.value,
-                 task.priority, task.idempotency_key, task.origin,
-                 int(_time.time() * 1000)))
+                (
+                    task.task_id,
+                    task.task_type,
+                    task.status.value,
+                    task.priority,
+                    task.idempotency_key,
+                    task.origin,
+                    int(_time.time() * 1000),
+                ),
+            )
             with conn:
                 _mark_consumed(conn, self.name, lease.event_id)
             return True
         except Exception:
             import sys
             import traceback as _tb
+
             print("CONSUMER INSERT ERR:", file=sys.stderr)
             _tb.print_exc()
             return False
@@ -466,8 +489,7 @@ class DriftResultCommittedConsumer(EventConsumer):
 
     name = "drift-result-projector"
 
-    def __init__(self, *, default_principal_id: str = "owner",
-                 drift_config: Any = None) -> None:
+    def __init__(self, *, default_principal_id: str = "owner", drift_config: Any = None) -> None:
         self._default_principal_id = default_principal_id
         self._drift_config = drift_config
 
@@ -476,22 +498,29 @@ class DriftResultCommittedConsumer(EventConsumer):
 
     def handle(self, conn: sqlite3.Connection, lease: OutboxLease) -> bool:
         # 幂等：event_consumptions 表 (consumer_name, event_id) 唯一键
-        if conn.execute(
-            "SELECT 1 FROM event_consumptions WHERE consumer_name=? AND event_id=?",
-            (self.name, lease.event_id)).fetchone() is not None:
+        if (
+            conn.execute(
+                "SELECT 1 FROM event_consumptions WHERE consumer_name=? AND event_id=?",
+                (self.name, lease.event_id),
+            ).fetchone()
+            is not None
+        ):
             return True
         # payload_ref 直接存 drift_run_id (str)
         drift_run_id = (lease.payload_ref or "").strip()
 
         run = conn.execute(
-            "SELECT principal_id, status, skill_name FROM drift_runs "
-            "WHERE drift_run_id=?", (drift_run_id,),
+            "SELECT principal_id, status, skill_name FROM drift_runs WHERE drift_run_id=?",
+            (drift_run_id,),
         ).fetchone()
         if run is None:
             return False
         if run["status"] != "completed":
-            _LOGGER.info("DriftResultCommitted: run %s not completed (status=%s); skip",
-                         drift_run_id, run["status"])
+            _LOGGER.info(
+                "DriftResultCommitted: run %s not completed (status=%s); skip",
+                drift_run_id,
+                run["status"],
+            )
             return True
         principal_id = run["principal_id"] or self._default_principal_id
 
@@ -508,7 +537,8 @@ class DriftResultCommittedConsumer(EventConsumer):
                 dry if self._drift_config is not None else None,
                 proj if self._drift_config is not None else None,
                 emit if self._drift_config is not None else None,
-                drift_run_id)
+                drift_run_id,
+            )
             # 消费 Outbox event 防止重试 (审计证据 #6: dry_run 只保存 preview/result)
             with conn:
                 _mark_consumed(conn, self.name, lease.event_id)
@@ -516,6 +546,7 @@ class DriftResultCommittedConsumer(EventConsumer):
 
         # 每 run 最多一个用户可见 Candidate (由 DriftProjectionService 双重校验)
         from cogito.store.drift_result_repo import DriftResultRepository
+
         drr = DriftResultRepository(conn).latest_for_run(drift_run_id)
         draft_payload = (drr.candidate_draft if drr else None) or {}
         if not draft_payload:
@@ -523,6 +554,7 @@ class DriftResultCommittedConsumer(EventConsumer):
                 _mark_consumed(conn, self.name, lease.event_id)
             return True
         from cogito.domain.drift import DriftCandidateDraft
+
         try:
             draft = DriftCandidateDraft(
                 topic=str(draft_payload.get("topic", "drift.result")),
@@ -535,23 +567,23 @@ class DriftResultCommittedConsumer(EventConsumer):
                 expires_at=draft_payload.get("expires_at"),
             )
         except Exception:
-            _LOGGER.warning("invalid candidate draft for run %s", drift_run_id,
-                            exc_info=True)
+            _LOGGER.warning("invalid candidate draft for run %s", drift_run_id, exc_info=True)
             with conn:
                 _mark_consumed(conn, self.name, lease.event_id)
             return True
 
-        dry_run = bool(self._drift_config and
-                       getattr(self._drift_config, "dry_run", False))
+        dry_run = bool(self._drift_config and getattr(self._drift_config, "dry_run", False))
         from cogito.service.drift_projection import DriftProjectionService
+
         svc = DriftProjectionService(conn, dry_run=dry_run)
         try:
-            candidate_id = svc.project(drift_run_id=drift_run_id,
-                                       draft=draft, principal_id=principal_id)
+            candidate_id = svc.project(
+                drift_run_id=drift_run_id, draft=draft, principal_id=principal_id
+            )
         except Exception:
             import traceback as _tb
-            _LOGGER.warning("drift projection failed for run %s", drift_run_id,
-                            exc_info=True)
+
+            _LOGGER.warning("drift projection failed for run %s", drift_run_id, exc_info=True)
             _tb.print_exc()
             return False  # 触发 Outbox retry
 
@@ -559,33 +591,37 @@ class DriftResultCommittedConsumer(EventConsumer):
             # 回写 candidate_id on DriftRun + DriftResult
             conn.execute(
                 "UPDATE drift_runs SET candidate_id=? WHERE drift_run_id=?",
-                (candidate_id, drift_run_id))
+                (candidate_id, drift_run_id),
+            )
             if drr is not None:
-                DriftResultRepository(conn).mark_emitted(
-                    drr.drift_result_id, candidate_id)
-            _LOGGER.info("drift projected: run=%s candidate=%s",
-                         drift_run_id, candidate_id)
+                DriftResultRepository(conn).mark_emitted(drr.drift_result_id, candidate_id)
+            _LOGGER.info("drift projected: run=%s candidate=%s", drift_run_id, candidate_id)
 
         with conn:
             _mark_consumed(conn, self.name, lease.event_id)
         return True
 
 
-def build_default_registry(default_principal_id: str = "owner",
-                           drift_config: Any = None) -> EventConsumerRegistry:
+def build_default_registry(
+    default_principal_id: str = "owner", drift_config: Any = None
+) -> EventConsumerRegistry:
     """构造默认注册表。
 
     PLAN-17 R5 P0-06: DriftResultCommittedConsumer 注册；dry_run 时只保存 preview。
     """
     registry = EventConsumerRegistry()
-    registry.register(SourceEventIngestedConsumer(
-        default_principal_id=default_principal_id,
-    ))
+    registry.register(
+        SourceEventIngestedConsumer(
+            default_principal_id=default_principal_id,
+        )
+    )
     registry.register(TurnCompletedMemoryExtractionConsumer())
     registry.register(SessionCompletedMemoryExtractionConsumer())
     registry.register(MemorySourceInvalidatedConsumer())
-    registry.register(InboundImmediateEvalConsumer(
-        default_principal_id=default_principal_id))
-    registry.register(DriftResultCommittedConsumer(default_principal_id=default_principal_id,
-                                                   drift_config=drift_config))
+    registry.register(InboundImmediateEvalConsumer(default_principal_id=default_principal_id))
+    registry.register(
+        DriftResultCommittedConsumer(
+            default_principal_id=default_principal_id, drift_config=drift_config
+        )
+    )
     return registry

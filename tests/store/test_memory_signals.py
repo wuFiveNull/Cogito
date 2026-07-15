@@ -2,6 +2,7 @@
 
 PLAN-13 §5.2/§6.1：强化/展示/反馈幂等追加事件表。
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -18,6 +19,7 @@ def db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     from cogito.store.migration import migrate
+
     migrate(conn)
     return conn
 
@@ -67,11 +69,15 @@ class TestSignalRepository:
         """同 idempotency_key 重复写只产生一条。"""
         repo = SignalRepository(db)
         s1 = MemorySignal(
-            signal_id="a", memory_id=m1, signal_type="exposed",
+            signal_id="a",
+            memory_id=m1,
+            signal_type="exposed",
             idempotency_key="key-1",
         )
         s2 = MemorySignal(
-            signal_id="b", memory_id=m1, signal_type="exposed",
+            signal_id="b",
+            memory_id=m1,
+            signal_type="exposed",
             idempotency_key="key-1",
         )
         repo.insert(s1)
@@ -133,7 +139,9 @@ class TestSignalWriter:
         writer.record_task_succeeded(mid)
         value = writer.flush_reinforcement(mid)
         assert value == 3  # user_affirmed +2, task_succeeded +1
-        row = db.execute("SELECT reinforcement FROM memory_items WHERE memory_id=?", (mid,)).fetchone()
+        row = db.execute(
+            "SELECT reinforcement FROM memory_items WHERE memory_id=?", (mid,)
+        ).fetchone()
         assert row["reinforcement"] == 3
 
     def test_record_signal_convenience_methods(self, db, writer, m1, m2, m3):

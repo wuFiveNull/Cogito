@@ -6,9 +6,9 @@ import logging
 import sqlite3
 from datetime import UTC, datetime
 
+from cogito.contracts.clock import epoch_ms
 from cogito.domain.digest import Digest, DigestStatus
 from cogito.store.digest_repo import DigestRepository
-from cogito.contracts.clock import epoch_ms
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,7 +63,9 @@ class DigestService:
             digest_repo.add_item(digest.digest_id, iid)
 
         _LOGGER.info(
-            "DigestService: assembled %s with %d items", digest.digest_id, len(item_ids),
+            "DigestService: assembled %s with %d items",
+            digest.digest_id,
+            len(item_ids),
         )
         return digest
 
@@ -72,7 +74,8 @@ class DigestService:
         conn = self._conn
         conn.row_factory = sqlite3.Row
         row = conn.execute(
-            "SELECT * FROM digests WHERE digest_id=?", (digest_id,),
+            "SELECT * FROM digests WHERE digest_id=?",
+            (digest_id,),
         ).fetchone()
         if row is None:
             return None

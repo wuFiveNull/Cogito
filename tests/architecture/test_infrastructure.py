@@ -1,4 +1,5 @@
 """Track E: Profile + Payload + Migration + Backup — Plan 06 M1/M3/M6/M7."""
+
 from __future__ import annotations
 
 import sqlite3
@@ -61,8 +62,8 @@ def test_payload_store_hash_verification() -> None:
     store = PayloadStore(tmp, sqlite3.connect(":memory:"))
     obj = store.put(b"test")
     # 损坏文件
-    Path = __import__("pathlib").Path
-    Path(obj.storage_uri).write_bytes(b"corrupted")
+    path_cls = __import__("pathlib").Path
+    path_cls(obj.storage_uri).write_bytes(b"corrupted")
     with pytest.raises(ValueError, match="corrupted"):
         store.get(obj.payload_id)
 
@@ -73,8 +74,8 @@ def test_payload_store_atomic_write() -> None:
     store = PayloadStore(tmp, sqlite3.connect(":memory:"))
     store.put(b"atomic")
     # 不应有 .tmp_ 文件
-    Path = __import__("pathlib").Path
-    tmp_files = list(Path(tmp).rglob(".tmp_*"))
+    path_cls = __import__("pathlib").Path
+    tmp_files = list(path_cls(tmp).rglob(".tmp_*"))
     assert len(tmp_files) == 0
 
 
@@ -82,6 +83,7 @@ def test_create_profile() -> None:
     """从模板创建 Profile。"""
     tmp = tempfile.mkdtemp()
     import cogito.infrastructure.profile as p
+
     orig = p.get_home
     p.get_home = lambda profile="default": __import__("pathlib").Path(tmp)
     try:

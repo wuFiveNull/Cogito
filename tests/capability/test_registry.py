@@ -100,9 +100,12 @@ class TestCapabilityRegistry:
     def test_list_by_mode(self):
         registry = CapabilityRegistry()
         registry.register(_make_tool("all_mode"))  # no supported_modes → all
-        registry.register(_make_tool(
-            "reactive_only", modes=("reactive",),
-        ))
+        registry.register(
+            _make_tool(
+                "reactive_only",
+                modes=("reactive",),
+            )
+        )
 
         reactive = registry.list_by_mode("reactive")
         assert {t.name for t in reactive} == {"all_mode", "reactive_only"}

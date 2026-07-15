@@ -25,7 +25,9 @@ def db() -> sqlite3.Connection:
     return conn
 
 
-def _create_queued_turn(conn: sqlite3.Connection, session_id: str = "s1", priority: int = 80) -> Turn:
+def _create_queued_turn(
+    conn: sqlite3.Connection, session_id: str = "s1", priority: int = 80
+) -> Turn:
     """Helper: insert a queued turn directly into the database."""
     from cogito.domain.turn import TurnStatus
 
@@ -38,17 +40,26 @@ def _create_queued_turn(conn: sqlite3.Connection, session_id: str = "s1", priori
     conn.execute(
         "INSERT INTO turns (turn_id, session_id, input_message_id, status, priority, version, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (turn.turn_id, turn.session_id, turn.input_message_id,
-         turn.status.value, turn.priority, turn.version,
-         epoch_ms(turn.created_at)),
+        (
+            turn.turn_id,
+            turn.session_id,
+            turn.input_message_id,
+            turn.status.value,
+            turn.priority,
+            turn.version,
+            epoch_ms(turn.created_at),
+        ),
     )
     conn.commit()
     return turn
 
 
-def _create_session(conn: sqlite3.Connection, session_id: str = "s1",
-                    conversation_id: str = "c1",
-                    context_partition_key: str = "c1") -> None:
+def _create_session(
+    conn: sqlite3.Connection,
+    session_id: str = "s1",
+    conversation_id: str = "c1",
+    context_partition_key: str = "c1",
+) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO conversations (conversation_id, conversation_type, platform_conversation_id) "
         "VALUES (?, 'private', ?)",
@@ -57,8 +68,7 @@ def _create_session(conn: sqlite3.Connection, session_id: str = "s1",
     conn.execute(
         "INSERT OR IGNORE INTO sessions (session_id, conversation_id, context_partition_key, created_at) "
         "VALUES (?, ?, ?, ?)",
-        (session_id, conversation_id, context_partition_key,
-         epoch_ms(datetime.now(UTC))),
+        (session_id, conversation_id, context_partition_key, epoch_ms(datetime.now(UTC))),
     )
     conn.commit()
 
@@ -192,7 +202,8 @@ class TestCancelTurn:
         assert result is True
 
         row = db.execute(
-            "SELECT status FROM turns WHERE turn_id=?", (turn.turn_id,),
+            "SELECT status FROM turns WHERE turn_id=?",
+            (turn.turn_id,),
         ).fetchone()
         assert row["status"] == "cancelled"
 
@@ -368,9 +379,12 @@ class TestTurnCompletionService:
 
         service = TurnCompletionService(db)
         service.complete_with_stub(
-            claimed.turn, claimed.attempt,
-            conversation_id="c1", session_id="s1",
-            endpoint_id="ep1", principal_id="p1",
+            claimed.turn,
+            claimed.attempt,
+            conversation_id="c1",
+            session_id="s1",
+            endpoint_id="ep1",
+            principal_id="p1",
             channel_type="test",
             delivery_target="test_channel",
         )
@@ -388,16 +402,17 @@ class TestTurnCompletionService:
 
         service = TurnCompletionService(db)
         service.complete_with_stub(
-            claimed.turn, claimed.attempt,
-            conversation_id="c1", session_id="s1",
-            endpoint_id="ep1", principal_id="p1",
+            claimed.turn,
+            claimed.attempt,
+            conversation_id="c1",
+            session_id="s1",
+            endpoint_id="ep1",
+            principal_id="p1",
             channel_type="test",
             delivery_target="test_channel",
         )
 
-        events = db.execute(
-            "SELECT event_type, aggregate_id FROM outbox_events"
-        ).fetchall()
+        events = db.execute("SELECT event_type, aggregate_id FROM outbox_events").fetchall()
         assert len(events) >= 1
         assert events[0]["event_type"] == "TurnCompleted"
 
@@ -410,9 +425,12 @@ class TestTurnCompletionService:
 
         service = TurnCompletionService(db)
         service.complete_with_stub(
-            claimed.turn, claimed.attempt,
-            conversation_id="c1", session_id="s1",
-            endpoint_id="ep1", principal_id="p1",
+            claimed.turn,
+            claimed.attempt,
+            conversation_id="c1",
+            session_id="s1",
+            endpoint_id="ep1",
+            principal_id="p1",
             channel_type="test",
             delivery_target="test_channel",
         )
@@ -440,9 +458,12 @@ class TestTurnCompletionService:
         service = TurnCompletionService(db)
         with patch.object(uow_mod.UnitOfWork, "commit"):
             service.complete_with_stub(
-                claimed.turn, claimed.attempt,
-                conversation_id="c1", session_id="s1",
-                endpoint_id="ep1", principal_id="p1",
+                claimed.turn,
+                claimed.attempt,
+                conversation_id="c1",
+                session_id="s1",
+                endpoint_id="ep1",
+                principal_id="p1",
                 channel_type="test",
                 delivery_target="test_channel",
             )
@@ -469,15 +490,17 @@ class TestFullCycle:
             "VALUES ('pc1', 'private', 'pc1')"
         )
         svc = InboundService(db)
-        accept_result = svc.accept(ChannelEnvelope(
-            channel_type="test",
-            channel_instance_id="ci1",
-            platform_sender_id="user1",
-            platform_conversation_id="pc1",
-            platform_message_id="pm1",
-            content_parts=[{"content_type": "text", "inline_data": "Hello Cogito!"}],
-            received_at=datetime.now(UTC).isoformat(),
-        ))
+        accept_result = svc.accept(
+            ChannelEnvelope(
+                channel_type="test",
+                channel_instance_id="ci1",
+                platform_sender_id="user1",
+                platform_conversation_id="pc1",
+                platform_message_id="pm1",
+                content_parts=[{"content_type": "text", "inline_data": "Hello Cogito!"}],
+                received_at=datetime.now(UTC).isoformat(),
+            )
+        )
         assert accept_result.is_new is True
 
         # 2. Dispatcher claims the turn
@@ -490,7 +513,8 @@ class TestFullCycle:
         # 3. Complete with stub agent
         completion = TurnCompletionService(db)
         msg_id = completion.complete_with_stub(
-            claimed.turn, claimed.attempt,
+            claimed.turn,
+            claimed.attempt,
             conversation_id="pc1",
             session_id=claimed.turn.session_id,
             endpoint_id="ep1",
@@ -501,15 +525,21 @@ class TestFullCycle:
         assert msg_id is not None
 
         # 4. Verify full state
-        assert db.execute(
-            "SELECT status FROM turns WHERE turn_id=?",
-            (claimed.turn.turn_id,),
-        ).fetchone()["status"] == "completed"
+        assert (
+            db.execute(
+                "SELECT status FROM turns WHERE turn_id=?",
+                (claimed.turn.turn_id,),
+            ).fetchone()["status"]
+            == "completed"
+        )
 
-        assert db.execute(
-            "SELECT status FROM run_attempts WHERE attempt_id=?",
-            (claimed.attempt.attempt_id,),
-        ).fetchone()["status"] == "succeeded"
+        assert (
+            db.execute(
+                "SELECT status FROM run_attempts WHERE attempt_id=?",
+                (claimed.attempt.attempt_id,),
+            ).fetchone()["status"]
+            == "succeeded"
+        )
 
         # 2 outbox events: InboundMessageAccepted + TurnQueued + TurnCompleted
         assert db.execute("SELECT COUNT(*) FROM outbox_events").fetchone()[0] == 3
@@ -521,26 +551,34 @@ class TestFullCycle:
 
         # Accept + claim
         svc = InboundService(db)
-        svc.accept(ChannelEnvelope(
-            channel_type="test", channel_instance_id="ci1",
-            platform_sender_id="user1", platform_conversation_id="pc1",
-            platform_message_id="pm2",
-            content_parts=[{"content_type": "text", "inline_data": "Hello"}],
-            received_at=datetime.now(UTC).isoformat(),
-        ))
+        svc.accept(
+            ChannelEnvelope(
+                channel_type="test",
+                channel_instance_id="ci1",
+                platform_sender_id="user1",
+                platform_conversation_id="pc1",
+                platform_message_id="pm2",
+                content_parts=[{"content_type": "text", "inline_data": "Hello"}],
+                received_at=datetime.now(UTC).isoformat(),
+            )
+        )
 
         dispatcher = Dispatcher(db)
         claimed = dispatcher.claim_next("worker1")
         assert claimed is not None
 
         # Fail
-        dispatcher.fail(claimed.turn.turn_id, claimed.attempt.attempt_id,
-                        claimed.turn.version,
-                        worker_id=claimed.attempt.worker_id,
-                        lease_version=claimed.attempt.lease_version)
+        dispatcher.fail(
+            claimed.turn.turn_id,
+            claimed.attempt.attempt_id,
+            claimed.turn.version,
+            worker_id=claimed.attempt.worker_id,
+            lease_version=claimed.attempt.lease_version,
+        )
 
         # Retry: re-queue and claim again
         from cogito.domain.state_machines import can_transition_turn
+
         assert can_transition_turn(TurnStatus.failed, TurnStatus.queued)
         db.execute(
             "UPDATE turns SET status='queued', version=version+1 "

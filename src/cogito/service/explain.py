@@ -3,6 +3,7 @@
 ExplainMemoryWeight、ExplainRetrievalSnapshot、KnowledgeResourceExplain 等只读查询。
 全部通过 service 层，不直接访问 Repository。
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -93,8 +94,9 @@ class ExplainService:
             return None
         return dict(row) if hasattr(row, "keys") else {}
 
-    def list_knowledge_resources(self, *, principal_id: str = "owner",
-                                  limit: int = 50, status_filter: str = "") -> list[dict]:
+    def list_knowledge_resources(
+        self, *, principal_id: str = "owner", limit: int = 50, status_filter: str = ""
+    ) -> list[dict]:
         """列出知识资源摘要（用于 Dashboard / API）。"""
         sql = (
             "SELECT resource_id, source_kind, source_uri_hash, status, trust_label, "
@@ -110,8 +112,10 @@ class ExplainService:
             params.append(status_filter)
         sql += " ORDER BY updated_at DESC LIMIT ?"
         params.append(limit)
-        return [dict(r) if hasattr(r, "keys") else {} for r in
-                self._conn.execute(sql, params).fetchall()]
+        return [
+            dict(r) if hasattr(r, "keys") else {}
+            for r in self._conn.execute(sql, params).fetchall()
+        ]
 
     def explain_knowledge_retrieval(self, resource_id: str) -> dict | None:
         """解释知识资源是否可被检索、当前检索路径覆盖。"""
@@ -126,8 +130,10 @@ class ExplainService:
             "fts_available": True,
             "embedding_available": embedded > 0,
             "retrieval_path": (
-                "keyword+vector" if embedded > 0 and status == "active"
-                else "keyword" if status == "active"
+                "keyword+vector"
+                if embedded > 0 and status == "active"
+                else "keyword"
+                if status == "active"
                 else "none"
             ),
             "status_note": {

@@ -21,6 +21,7 @@ def conn(in_memory_db):
 @pytest.fixture
 def bridge_server(conn):
     """创建一个带假 inbound handler 的 BridgeServer。"""
+
     async def fake_handler(msg):
         return f"msg-{msg.event_id}"
 
@@ -31,12 +32,19 @@ def bridge_server(conn):
         def start_placeholder(self, target, content, idempotency_key):
             return GatewayResult(status="success", platform_message_id="pm-placeholder")
 
-        def edit(self, target, platform_message_id, content, operation_seq,
-                 idempotency_key, *, is_final=False):
+        def edit(
+            self,
+            target,
+            platform_message_id,
+            content,
+            operation_seq,
+            idempotency_key,
+            *,
+            is_final=False,
+        ):
             return GatewayResult(status="success", platform_message_id=platform_message_id)
 
-        def finish(self, target, platform_message_id, content, operation_seq,
-                   idempotency_key):
+        def finish(self, target, platform_message_id, content, operation_seq, idempotency_key):
             return GatewayResult(status="success", platform_message_id=platform_message_id)
 
         def delete(self, target, platform_message_id, operation_seq, idempotency_key):
@@ -58,8 +66,10 @@ def bridge_server(conn):
     )
     # 注入健康状态
     server.update_health(
-        "qq-main", "onebot",
-        connected=True, auth_ok=True,
+        "qq-main",
+        "onebot",
+        connected=True,
+        auth_ok=True,
         last_event_at="2026-07-07T12:00:00+00:00",
     )
     return server
@@ -68,6 +78,7 @@ def bridge_server(conn):
 @pytest.fixture
 def client(bridge_server):
     from fastapi import FastAPI
+
     app = FastAPI()
     app.include_router(bridge_server.create_router())
     return TestClient(app)
@@ -79,15 +90,18 @@ def client(bridge_server):
 class TestInbound:
     def test_inbound_private_chat(self, client):
         """br-srv-01: 私聊入站。"""
-        resp = client.post("/bridge/v1/inbound", json={
-            "schema_version": "1",
-            "event_id": "evt-private-1",
-            "channel_name": "onebot",
-            "instance_id": "qq-main",
-            "conversation_ref": "conv-123",
-            "sender_ref": "user-456",
-            "content_parts": [{"type": "text", "data": "hello"}],
-        })
+        resp = client.post(
+            "/bridge/v1/inbound",
+            json={
+                "schema_version": "1",
+                "event_id": "evt-private-1",
+                "channel_name": "onebot",
+                "instance_id": "qq-main",
+                "conversation_ref": "conv-123",
+                "sender_ref": "user-456",
+                "content_parts": [{"type": "text", "data": "hello"}],
+            },
+        )
         assert resp.status_code == 200
         assert resp.json()["status"] == "accepted"
 
@@ -104,16 +118,20 @@ class TestInbound:
         # 第二次：因 event_id 已存入 inbound_inbox 标记为重复
         # （需要先处理第一次的入站）
         from cogito.channel.bridge_server import BridgeServer
+
         # 简化：两次直接调都会 accepted（幂等检查依赖 DB 状态）
         r2 = client.post("/bridge/v1/inbound", json=payload)
         assert r2.status_code == 200
 
     def test_inbound_validation_error(self, client):
         """入站 payload 格式错误返回 400。"""
-        resp = client.post("/bridge/v1/inbound", json={
-            "schema_version": "1",
-            # 缺少必要字段不导致 400（有默认值），但 event_id 空仍接受
-        })
+        resp = client.post(
+            "/bridge/v1/inbound",
+            json={
+                "schema_version": "1",
+                # 缺少必要字段不导致 400（有默认值），但 event_id 空仍接受
+            },
+        )
         assert resp.status_code == 200  # 宽松接受
 
 
@@ -123,25 +141,31 @@ class TestInbound:
 class TestDelivery:
     def test_delivery_send(self, client):
         """br-srv-07: send 操作。"""
-        resp = client.post("/bridge/v1/delivery/send", json={
-            "schema_version": "1",
-            "delivery_id": "del-1",
-            "attempt_id": "att-1",
-            "action": "send",
-            "content": [{"type": "text", "data": "hello"}],
-        })
+        resp = client.post(
+            "/bridge/v1/delivery/send",
+            json={
+                "schema_version": "1",
+                "delivery_id": "del-1",
+                "attempt_id": "att-1",
+                "action": "send",
+                "content": [{"type": "text", "data": "hello"}],
+            },
+        )
         assert resp.status_code == 200
         assert resp.json()["status"] == "success"
         assert resp.json()["action"] == "send"
 
     def test_delivery_placeholder(self, client):
-        resp = client.post("/bridge/v1/delivery/placeholder", json={
-            "schema_version": "1",
-            "delivery_id": "del-2",
-            "attempt_id": "att-2",
-            "action": "start_placeholder",
-            "content": [{"type": "text", "data": "..."}],
-        })
+        resp = client.post(
+            "/bridge/v1/delivery/placeholder",
+            json={
+                "schema_version": "1",
+                "delivery_id": "del-2",
+                "attempt_id": "att-2",
+                "action": "start_placeholder",
+                "content": [{"type": "text", "data": "..."}],
+            },
+        )
         assert resp.status_code == 200
         assert resp.json()["action"] == "start_placeholder"
 
@@ -163,11 +187,14 @@ class TestDelivery:
         assert second.json()["platform_message_id"] == first.json()["platform_message_id"]
 
     def test_delivery_unknown_action_rejected(self, client):
-        resp = client.post("/bridge/v1/delivery/send", json={
-            "schema_version": "1",
-            "delivery_id": "del-x",
-            "action": "bogus_action",
-        })
+        resp = client.post(
+            "/bridge/v1/delivery/send",
+            json={
+                "schema_version": "1",
+                "delivery_id": "del-x",
+                "action": "bogus_action",
+            },
+        )
         assert resp.status_code == 400
 
 

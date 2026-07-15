@@ -2,6 +2,7 @@
 
 PLAN-13 §10: 可配置、幂等、低成本的晋升策略。
 """
+
 from __future__ import annotations
 
 from cogito.service.memory_extractor import ExtractionTriggerPolicy
@@ -75,13 +76,20 @@ class TestExtractionWatermark:
         wm_repo.upsert(PROC_MEMORY_EXTRACT, "s1", "s1")
         # 推进到 10（upsert 后 version=1，CAS 需 expected_version=1）
         assert wm_repo.advance(
-            PROC_MEMORY_EXTRACT, "s1", "s1", to_sequence=10,
-            expected_from_sequence=0, expected_version=1,
+            PROC_MEMORY_EXTRACT,
+            "s1",
+            "s1",
+            to_sequence=10,
+            expected_from_sequence=0,
+            expected_version=1,
         )
         row = wm_repo.get(PROC_MEMORY_EXTRACT, "s1", "s1")
         assert row.processed_upto_sequence == 10
         # CAS 失败案例：用过期 version 推进应返回 False
         assert not wm_repo.advance(
-            PROC_MEMORY_EXTRACT, "s1", "s1", to_sequence=20,
+            PROC_MEMORY_EXTRACT,
+            "s1",
+            "s1",
+            to_sequence=20,
             expected_version=1,  # 已过时
         )

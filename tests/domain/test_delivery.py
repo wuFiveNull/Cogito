@@ -34,7 +34,9 @@ class TestDeliveryAttempt:
 
     def test_create_with_values(self):
         da = DeliveryAttempt(
-            attempt_id="da1", delivery_id="d1", attempt_no=2,
+            attempt_id="da1",
+            delivery_id="d1",
+            attempt_no=2,
             status=DeliveryAttemptStatus.succeeded,
         )
         assert da.status == DeliveryAttemptStatus.succeeded

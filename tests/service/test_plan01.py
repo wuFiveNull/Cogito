@@ -97,7 +97,9 @@ class TestReplyRoutePersistence:
         saved = json.loads(row["capability_snapshot_json"])
         assert saved["features"] == ["text", "image"]
 
-    def test_empty_reply_route_defaults_to_empty(self, service: InboundService, db: sqlite3.Connection):
+    def test_empty_reply_route_defaults_to_empty(
+        self, service: InboundService, db: sqlite3.Connection
+    ):
         """没有 Reply Route 时存储空 JSON 对象。"""
         result = service.accept(_envelope(reply_route=None))
 
@@ -107,7 +109,9 @@ class TestReplyRoutePersistence:
         ).fetchone()
         assert json.loads(row["reply_route_json"]) == {}
 
-    def test_reply_route_immutable_after_save(self, service: InboundService, db: sqlite3.Connection):
+    def test_reply_route_immutable_after_save(
+        self, service: InboundService, db: sqlite3.Connection
+    ):
         """Reply Route 保存后不可变。"""
         reply_route = ReplyRoute(channel_instance_id="ci1")
         result = service.accept(_envelope(reply_route=reply_route))
@@ -126,12 +130,16 @@ class TestReplyRoutePersistence:
 
 
 class TestRefBasedLookup:
-    def test_sender_endpoint_ref_creates_with_ref(self, service: InboundService, db: sqlite3.Connection):
+    def test_sender_endpoint_ref_creates_with_ref(
+        self, service: InboundService, db: sqlite3.Connection
+    ):
         """使用 sender_endpoint_ref 创建 Endpoint。"""
-        result = service.accept(_envelope(
-            sender_endpoint_ref="stable://user/123",
-            platform_message_id="ref_test_1",
-        ))
+        result = service.accept(
+            _envelope(
+                sender_endpoint_ref="stable://user/123",
+                platform_message_id="ref_test_1",
+            )
+        )
 
         endpoint = db.execute(
             "SELECT endpoint_ref, platform_account_id FROM endpoints "
@@ -143,30 +151,42 @@ class TestRefBasedLookup:
 
     def test_sender_endpoint_ref_reused(self, service: InboundService, db: sqlite3.Connection):
         """同一 sender_endpoint_ref 复用同一 Endpoint。"""
-        r1 = service.accept(_envelope(
-            channel_instance_id="ci_a",
-            platform_sender_id="user_a",
-            sender_endpoint_ref="stable://user/456",
-            platform_message_id="pm_ref_1",
-        ))
-        r2 = service.accept(_envelope(
-            channel_instance_id="ci_b",  # different channel instance
-            platform_sender_id="user_b",  # different sender ID
-            sender_endpoint_ref="stable://user/456",  # same ref
-            platform_message_id="pm_ref_2",
-        ))
+        r1 = service.accept(
+            _envelope(
+                channel_instance_id="ci_a",
+                platform_sender_id="user_a",
+                sender_endpoint_ref="stable://user/456",
+                platform_message_id="pm_ref_1",
+            )
+        )
+        r2 = service.accept(
+            _envelope(
+                channel_instance_id="ci_b",  # different channel instance
+                platform_sender_id="user_b",  # different sender ID
+                sender_endpoint_ref="stable://user/456",  # same ref
+                platform_message_id="pm_ref_2",
+            )
+        )
 
         # Same endpoint reused
-        m1 = db.execute("SELECT sender_endpoint_id FROM messages WHERE message_id=?", (r1.message_id,)).fetchone()
-        m2 = db.execute("SELECT sender_endpoint_id FROM messages WHERE message_id=?", (r2.message_id,)).fetchone()
+        m1 = db.execute(
+            "SELECT sender_endpoint_id FROM messages WHERE message_id=?", (r1.message_id,)
+        ).fetchone()
+        m2 = db.execute(
+            "SELECT sender_endpoint_id FROM messages WHERE message_id=?", (r2.message_id,)
+        ).fetchone()
         assert m1["sender_endpoint_id"] == m2["sender_endpoint_id"]
 
-    def test_conversation_endpoint_ref_creates_with_ref(self, service: InboundService, db: sqlite3.Connection):
+    def test_conversation_endpoint_ref_creates_with_ref(
+        self, service: InboundService, db: sqlite3.Connection
+    ):
         """使用 conversation_endpoint_ref 创建 Conversation。"""
-        result = service.accept(_envelope(
-            conversation_endpoint_ref="stable://conv/789",
-            platform_message_id="pm_conv_ref_1",
-        ))
+        result = service.accept(
+            _envelope(
+                conversation_endpoint_ref="stable://conv/789",
+                platform_message_id="pm_conv_ref_1",
+            )
+        )
 
         conv = db.execute(
             "SELECT conversation_endpoint_ref FROM conversations "
@@ -176,42 +196,62 @@ class TestRefBasedLookup:
         assert conv is not None
         assert conv["conversation_endpoint_ref"] == "stable://conv/789"
 
-    def test_conversation_endpoint_ref_reused(self, service: InboundService, db: sqlite3.Connection):
+    def test_conversation_endpoint_ref_reused(
+        self, service: InboundService, db: sqlite3.Connection
+    ):
         """同一 conversation_endpoint_ref 复用同一 Conversation。"""
-        r1 = service.accept(_envelope(
-            channel_instance_id="ci1",
-            platform_sender_id="user1",
-            platform_conversation_id="plat_conv_1",
-            conversation_endpoint_ref="stable://conv/999",
-            platform_message_id="pm_cr_1",
-        ))
-        r2 = service.accept(_envelope(
-            channel_instance_id="ci1",
-            platform_sender_id="user1",
-            platform_conversation_id="plat_conv_2",  # different platform conv
-            conversation_endpoint_ref="stable://conv/999",  # same ref
-            platform_message_id="pm_cr_2",
-        ))
+        r1 = service.accept(
+            _envelope(
+                channel_instance_id="ci1",
+                platform_sender_id="user1",
+                platform_conversation_id="plat_conv_1",
+                conversation_endpoint_ref="stable://conv/999",
+                platform_message_id="pm_cr_1",
+            )
+        )
+        r2 = service.accept(
+            _envelope(
+                channel_instance_id="ci1",
+                platform_sender_id="user1",
+                platform_conversation_id="plat_conv_2",  # different platform conv
+                conversation_endpoint_ref="stable://conv/999",  # same ref
+                platform_message_id="pm_cr_2",
+            )
+        )
 
-        c1 = db.execute("SELECT conversation_id FROM messages WHERE message_id=?", (r1.message_id,)).fetchone()
-        c2 = db.execute("SELECT conversation_id FROM messages WHERE message_id=?", (r2.message_id,)).fetchone()
+        c1 = db.execute(
+            "SELECT conversation_id FROM messages WHERE message_id=?", (r1.message_id,)
+        ).fetchone()
+        c2 = db.execute(
+            "SELECT conversation_id FROM messages WHERE message_id=?", (r2.message_id,)
+        ).fetchone()
         assert c1["conversation_id"] == c2["conversation_id"]
 
-    def test_empty_ref_falls_back_to_platform(self, service: InboundService, db: sqlite3.Connection):
+    def test_empty_ref_falls_back_to_platform(
+        self, service: InboundService, db: sqlite3.Connection
+    ):
         """Ref 为空时退回现有 platform ID 查找。"""
-        r1 = service.accept(_envelope(
-            sender_endpoint_ref="",
-            platform_sender_id="legacy_user",
-            platform_message_id="pm_fb_1",
-        ))
-        r2 = service.accept(_envelope(
-            sender_endpoint_ref="",
-            platform_sender_id="legacy_user",
-            platform_message_id="pm_fb_2",
-        ))
+        r1 = service.accept(
+            _envelope(
+                sender_endpoint_ref="",
+                platform_sender_id="legacy_user",
+                platform_message_id="pm_fb_1",
+            )
+        )
+        r2 = service.accept(
+            _envelope(
+                sender_endpoint_ref="",
+                platform_sender_id="legacy_user",
+                platform_message_id="pm_fb_2",
+            )
+        )
 
-        m1 = db.execute("SELECT sender_endpoint_id FROM messages WHERE message_id=?", (r1.message_id,)).fetchone()
-        m2 = db.execute("SELECT sender_endpoint_id FROM messages WHERE message_id=?", (r2.message_id,)).fetchone()
+        m1 = db.execute(
+            "SELECT sender_endpoint_id FROM messages WHERE message_id=?", (r1.message_id,)
+        ).fetchone()
+        m2 = db.execute(
+            "SELECT sender_endpoint_id FROM messages WHERE message_id=?", (r2.message_id,)
+        ).fetchone()
         assert m1["sender_endpoint_id"] == m2["sender_endpoint_id"]
 
 
@@ -376,9 +416,7 @@ class TestAgentRunner:
         _setup_inbound_turn(db)
 
         # Set cancel_requested_at on the queued turn without claiming it
-        turn_row = db.execute(
-            "SELECT turn_id FROM turns WHERE status='queued' LIMIT 1"
-        ).fetchone()
+        turn_row = db.execute("SELECT turn_id FROM turns WHERE status='queued' LIMIT 1").fetchone()
         assert turn_row is not None, "No queued turn found"
         db.execute(
             "UPDATE turns SET cancel_requested_at=? WHERE turn_id=?",
@@ -429,15 +467,17 @@ def _setup_minimal(db: sqlite3.Connection) -> None:
     from cogito.service.inbound_service import InboundService
 
     svc = InboundService(db)
-    svc.accept(ChannelEnvelope(
-        channel_type="test",
-        channel_instance_id="ci1",
-        platform_sender_id="sender1",
-        platform_conversation_id="conv1",
-        platform_message_id="pm_setup",
-        content_parts=[{"content_type": "text", "inline_data": "Hello"}],
-        received_at=datetime.now(UTC).isoformat(),
-    ))
+    svc.accept(
+        ChannelEnvelope(
+            channel_type="test",
+            channel_instance_id="ci1",
+            platform_sender_id="sender1",
+            platform_conversation_id="conv1",
+            platform_message_id="pm_setup",
+            content_parts=[{"content_type": "text", "inline_data": "Hello"}],
+            received_at=datetime.now(UTC).isoformat(),
+        )
+    )
 
 
 def _setup_inbound_turn(db: sqlite3.Connection) -> None:

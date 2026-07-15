@@ -6,6 +6,7 @@
 - enable/disable via config 开关不影响 parsing
 - Command API 基础设施（approve/retry 等）存在可导入
 """
+
 from __future__ import annotations
 
 from cogito.config import Config, DriftConfig, ProactiveCadenceConfig
@@ -38,15 +39,17 @@ class TestDriftConfigDefaults:
 
 class TestDriftConfigFromRaw:
     def test_parse_drift_section(self):
-        cfg = DriftConfig._from_raw({
-            "enabled": True,
-            "dry_run": False,
-            "idle_after_minutes": 60,
-            "max_runs_per_day": 5,
-            "allow_workspace_skills": True,
-            "allow_candidate_emission": True,
-            "preemption": {"check_interval_seconds": 2},
-        })
+        cfg = DriftConfig._from_raw(
+            {
+                "enabled": True,
+                "dry_run": False,
+                "idle_after_minutes": 60,
+                "max_runs_per_day": 5,
+                "allow_workspace_skills": True,
+                "allow_candidate_emission": True,
+                "preemption": {"check_interval_seconds": 2},
+            }
+        )
         assert cfg.enabled is True
         assert cfg.dry_run is False
         assert cfg.idle_after_minutes == 60
@@ -56,17 +59,20 @@ class TestDriftConfigFromRaw:
         assert cfg.preemption.check_interval_seconds == 2
 
     def test_parse_cadence_section(self):
-        c = ProactiveCadenceConfig._from_raw({
-            "min_interval_seconds": 120,
-            "max_interval_seconds": 3600,
-            "jitter_ratio": 0.05,
-        })
+        c = ProactiveCadenceConfig._from_raw(
+            {
+                "min_interval_seconds": 120,
+                "max_interval_seconds": 3600,
+                "jitter_ratio": 0.05,
+            }
+        )
         assert c.min_interval_seconds == 120
         assert c.max_interval_seconds == 3600
         assert c.jitter_ratio == 0.05
 
     def test_unknown_drift_field_rejected(self):
         import pytest
+
         with pytest.raises(Exception):
             DriftConfig._from_raw({"nonexistent_field": 1})
 
@@ -75,8 +81,12 @@ class TestCommandInfrastructure:
     def test_command_handlers_importable(self):
         """Command API 基础设施（approve/retry/pause）可导入。"""
         from cogito.service.api.command_handlers import (
-            approve, cancel_turn, retry_task, pause_connector,
+            approve,
+            cancel_turn,
+            retry_task,
+            pause_connector,
         )
+
         assert callable(approve)
         assert callable(retry_task)
         assert callable(pause_connector)

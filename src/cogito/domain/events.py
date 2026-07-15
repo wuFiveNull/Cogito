@@ -73,8 +73,12 @@ class DomainEvent:
             aggregate_version=data.get("aggregate_version", 1),
             payload_ref=data.get("payload_ref"),
             payload=data.get("payload", {}),
-            occurred_at=datetime.fromisoformat(data["occurred_at"]) if data.get("occurred_at") else None,
-            ingested_at=datetime.fromisoformat(data["ingested_at"]) if data.get("ingested_at") else None,
+            occurred_at=datetime.fromisoformat(data["occurred_at"])
+            if data.get("occurred_at")
+            else None,
+            ingested_at=datetime.fromisoformat(data["ingested_at"])
+            if data.get("ingested_at")
+            else None,
             content_hash=data.get("content_hash", ""),
             trust_label=data.get("trust_label", "unverified"),
             schema_version=data.get("schema_version", "1.0"),

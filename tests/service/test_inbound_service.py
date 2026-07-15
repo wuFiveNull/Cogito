@@ -92,12 +92,14 @@ class TestFirstInbound:
         assert turn["input_message_id"] == result.message_id
 
     def test_creates_content_parts(self, service: InboundService, conn: sqlite3.Connection):
-        result = service.accept(_envelope(
-            content_parts=[
-                {"content_type": "text", "inline_data": "Part 1"},
-                {"content_type": "text", "inline_data": "Part 2"},
-            ],
-        ))
+        result = service.accept(
+            _envelope(
+                content_parts=[
+                    {"content_type": "text", "inline_data": "Part 1"},
+                    {"content_type": "text", "inline_data": "Part 2"},
+                ],
+            )
+        )
 
         parts = conn.execute(
             "SELECT content_type, inline_data FROM content_parts WHERE message_id=?",
@@ -130,14 +132,18 @@ class TestFirstInbound:
         assert events[1]["event_type"] == "TurnQueued"
         assert events[1]["aggregate_id"] == result.turn_id
 
-    def test_creates_principal_and_endpoint(self, service: InboundService, conn: sqlite3.Connection):
-        service.accept(_envelope(
-            channel_type="tg", channel_instance_id="tg1", platform_sender_id="user_a",
-        ))
+    def test_creates_principal_and_endpoint(
+        self, service: InboundService, conn: sqlite3.Connection
+    ):
+        service.accept(
+            _envelope(
+                channel_type="tg",
+                channel_instance_id="tg1",
+                platform_sender_id="user_a",
+            )
+        )
 
-        principal = conn.execute(
-            "SELECT principal_type, status FROM principals"
-        ).fetchone()
+        principal = conn.execute("SELECT principal_type, status FROM principals").fetchone()
         assert principal is not None
         assert principal["principal_type"] == "external_user"
 
@@ -148,11 +154,16 @@ class TestFirstInbound:
         assert endpoint["channel_type"] == "tg"
         assert endpoint["platform_account_id"] == "user_a"
 
-    def test_creates_conversation_and_session(self, service: InboundService, conn: sqlite3.Connection):
-        service.accept(_envelope(
-            channel_instance_id="ci1", platform_sender_id="user_a",
-            platform_conversation_id="gc1",
-        ))
+    def test_creates_conversation_and_session(
+        self, service: InboundService, conn: sqlite3.Connection
+    ):
+        service.accept(
+            _envelope(
+                channel_instance_id="ci1",
+                platform_sender_id="user_a",
+                platform_conversation_id="gc1",
+            )
+        )
 
         conv = conn.execute(
             "SELECT conversation_type, platform_conversation_id FROM conversations"
@@ -161,9 +172,7 @@ class TestFirstInbound:
         assert conv["conversation_type"] == "private"
         assert conv["platform_conversation_id"] == "gc1"
 
-        session = conn.execute(
-            "SELECT status FROM sessions"
-        ).fetchone()
+        session = conn.execute("SELECT status FROM sessions").fetchone()
         assert session is not None
         assert session["status"] == "active"
 
@@ -217,21 +226,29 @@ class TestIdempotentDedup:
 
 class TestDifferentPlatformEvents:
     def test_different_events_both_create(self, service: InboundService, conn: sqlite3.Connection):
-        r1 = service.accept(_envelope(
-            channel_instance_id="ci1", platform_message_id="pm1",
-            content_parts=[{"content_type": "text", "inline_data": "Same text"}],
-        ))
-        r2 = service.accept(_envelope(
-            channel_instance_id="ci1", platform_message_id="pm2",
-            content_parts=[{"content_type": "text", "inline_data": "Same text"}],
-        ))
+        r1 = service.accept(
+            _envelope(
+                channel_instance_id="ci1",
+                platform_message_id="pm1",
+                content_parts=[{"content_type": "text", "inline_data": "Same text"}],
+            )
+        )
+        r2 = service.accept(
+            _envelope(
+                channel_instance_id="ci1",
+                platform_message_id="pm2",
+                content_parts=[{"content_type": "text", "inline_data": "Same text"}],
+            )
+        )
 
         # Both should be new since platform_event_ids differ
         assert r1.is_new is True
         assert r2.is_new is True
         assert r1.message_id != r2.message_id
 
-    def test_different_channels_same_event_id(self, service: InboundService, conn: sqlite3.Connection):
+    def test_different_channels_same_event_id(
+        self, service: InboundService, conn: sqlite3.Connection
+    ):
         r1 = service.accept(_envelope(channel_instance_id="ci1", platform_message_id="pm1"))
         r2 = service.accept(_envelope(channel_instance_id="ci2", platform_message_id="pm1"))
 
@@ -246,14 +263,21 @@ class TestDifferentPlatformEvents:
 
 class TestConversationReuse:
     def test_reuses_conversation(self, service: InboundService, conn: sqlite3.Connection):
-        r1 = service.accept(_envelope(
-            channel_instance_id="ci1", platform_sender_id="user_a",
-            platform_conversation_id="gc1",
-        ))
-        r2 = service.accept(_envelope(
-            channel_instance_id="ci1", platform_sender_id="user_a",
-            platform_conversation_id="gc1", platform_message_id="pm2",
-        ))
+        r1 = service.accept(
+            _envelope(
+                channel_instance_id="ci1",
+                platform_sender_id="user_a",
+                platform_conversation_id="gc1",
+            )
+        )
+        r2 = service.accept(
+            _envelope(
+                channel_instance_id="ci1",
+                platform_sender_id="user_a",
+                platform_conversation_id="gc1",
+                platform_message_id="pm2",
+            )
+        )
 
         assert r1.is_new is True
         assert r2.is_new is True
@@ -409,11 +433,13 @@ class TestConcurrentDedup:
         """Two connections processing the same event concurrently produce one Turn."""
         import os
         import tempfile
+
         db_fd, db_path = tempfile.mkstemp(suffix=".db")
         os.close(db_fd)
 
         def _make_conn() -> sqlite3.Connection:
             from cogito.store.migration import migrate
+
             conn = sqlite3.connect(db_path, check_same_thread=False)
             conn.execute("PRAGMA foreign_keys=ON;")
             conn.execute("PRAGMA busy_timeout=5000;")
@@ -428,10 +454,12 @@ class TestConcurrentDedup:
             try:
                 conn = _make_conn()
                 svc = InboundService(conn)
-                r = svc.accept(_envelope(
-                    channel_instance_id="ci_conc",
-                    platform_message_id="pm_conc",
-                ))
+                r = svc.accept(
+                    _envelope(
+                        channel_instance_id="ci_conc",
+                        platform_message_id="pm_conc",
+                    )
+                )
                 results.append(r)
                 conn.close()
             except Exception as e:
@@ -464,10 +492,12 @@ class TestConcurrentDedup:
 class TestUntrustedContent:
     def test_untrusted_saved_as_data(self, service: InboundService, conn: sqlite3.Connection):
         """Untrusted content is saved, but policy fields remain default."""
-        result = service.accept(_envelope(
-            trust_label="unverified",
-            content_parts=[{"content_type": "text", "inline_data": "Suspicious content"}],
-        ))
+        result = service.accept(
+            _envelope(
+                trust_label="unverified",
+                content_parts=[{"content_type": "text", "inline_data": "Suspicious content"}],
+            )
+        )
 
         msg = conn.execute(
             "SELECT trust_label FROM messages WHERE message_id=?",

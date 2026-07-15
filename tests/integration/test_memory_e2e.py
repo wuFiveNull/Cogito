@@ -76,12 +76,15 @@ class TestManualMemoryE2E:
         tool = create_tool_def(writer=service)
 
         # ── 1. 写入 ──
-        result = tool.handler({
-            "subject": "user",
-            "predicate": "preferred_language",
-            "value": "Python",
-            "kind": "preference",
-        }, ctx)
+        result = tool.handler(
+            {
+                "subject": "user",
+                "predicate": "preferred_language",
+                "value": "Python",
+                "kind": "preference",
+            },
+            ctx,
+        )
         # 同步等待
         result_text = asyncio.run(result)
         assert "Saved memory" in result_text
@@ -133,16 +136,30 @@ class TestManualMemoryE2E:
         tool = create_tool_def(writer=service)
 
         # ── 1. 写入初始值 ──
-        r1 = asyncio.run(tool.handler({
-            "subject": "user", "predicate": "theme", "value": "dark",
-        }, ctx))
+        r1 = asyncio.run(
+            tool.handler(
+                {
+                    "subject": "user",
+                    "predicate": "theme",
+                    "value": "dark",
+                },
+                ctx,
+            )
+        )
         conn.commit()
         old_id = r1.split("memory_id=")[-1].strip(")")
 
         # ── 2. 更新为新值 ──
-        r2 = asyncio.run(tool.handler({
-            "subject": "user", "predicate": "theme", "value": "light",
-        }, ctx))
+        r2 = asyncio.run(
+            tool.handler(
+                {
+                    "subject": "user",
+                    "predicate": "theme",
+                    "value": "light",
+                },
+                ctx,
+            )
+        )
         conn.commit()
         new_id = r2.split("memory_id=")[-1].strip(")")
 
@@ -160,8 +177,7 @@ class TestManualMemoryE2E:
         repo = MemoryRepository(conn)
         relations = repo.get_relations(new_id, direction="from")
         has_supersedes = any(
-            r["relation_type"] == "supersedes" and r["to_memory_id"] == old_id
-            for r in relations
+            r["relation_type"] == "supersedes" and r["to_memory_id"] == old_id for r in relations
         )
 
         # 表不存在时跳过（新表需要迁移 0016）
@@ -200,9 +216,16 @@ class TestManualMemoryE2E:
         recall = create_recall(reader=service)
 
         # ── 1. 写入 ──
-        result = asyncio.run(remember.handler({
-            "subject": "user", "predicate": "name", "value": "Alice",
-        }, ctx))
+        result = asyncio.run(
+            remember.handler(
+                {
+                    "subject": "user",
+                    "predicate": "name",
+                    "value": "Alice",
+                },
+                ctx,
+            )
+        )
         conn.commit()
         memory_id = result.split("memory_id=")[-1].strip(")")
 
@@ -245,14 +268,22 @@ class TestManualMemoryE2E:
         service = SqliteMemoryService(conn)
 
         from cogito.tools.remember_memory import create_tool_def
+
         ctx_a = _ctx(principal_id="p_a")
 
         remember = create_tool_def(writer=service)
 
         # ── 1. A 写入记忆 ──
-        result_a = asyncio.run(remember.handler({
-            "subject": "user", "predicate": "secret", "value": "A's secret",
-        }, ctx_a))
+        result_a = asyncio.run(
+            remember.handler(
+                {
+                    "subject": "user",
+                    "predicate": "secret",
+                    "value": "A's secret",
+                },
+                ctx_a,
+            )
+        )
         conn.commit()
         mem_id = result_a.split("memory_id=")[-1].strip(")")
 
@@ -282,14 +313,28 @@ class TestManualMemoryE2E:
         remember = create_tool_def(writer=service)
 
         # ── 1. 写入几条记忆 ──
-        asyncio.run(remember.handler({
-            "subject": "user", "predicate": "lang", "value": "Python",
-            "kind": "preference",
-        }, ctx))
-        asyncio.run(remember.handler({
-            "subject": "user", "predicate": "editor", "value": "VS Code",
-            "kind": "preference",
-        }, ctx))
+        asyncio.run(
+            remember.handler(
+                {
+                    "subject": "user",
+                    "predicate": "lang",
+                    "value": "Python",
+                    "kind": "preference",
+                },
+                ctx,
+            )
+        )
+        asyncio.run(
+            remember.handler(
+                {
+                    "subject": "user",
+                    "predicate": "editor",
+                    "value": "VS Code",
+                    "kind": "preference",
+                },
+                ctx,
+            )
+        )
         conn.commit()
 
         # ── 2. 新 Session ──
@@ -299,7 +344,8 @@ class TestManualMemoryE2E:
         # 创建 Conversation 和 Session
         conn.execute(
             "INSERT INTO conversations (conversation_id, conversation_type, platform_conversation_id) "
-            "VALUES (?, 'private', ?)", (new_conv_id, new_conv_id),
+            "VALUES (?, 'private', ?)",
+            (new_conv_id, new_conv_id),
         )
         conn.execute(
             "INSERT INTO sessions (session_id, conversation_id, context_partition_key, created_at) "
@@ -332,7 +378,9 @@ class TestManualMemoryE2E:
         from cogito.runtime.context import ContextBuilder
 
         builder = ContextBuilder(
-            conn, max_input_tokens=64000, memory_reader=service,
+            conn,
+            max_input_tokens=64000,
+            memory_reader=service,
         )
         snapshot = builder.build(
             turn_id="e2e_new_turn",

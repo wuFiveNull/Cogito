@@ -125,7 +125,10 @@ def fetch_url(
         connection: http.client.HTTPConnection
         if parsed.scheme == "https":
             connection = _PinnedHTTPSConnection(
-                ip, server_name=host, port=port, timeout=timeout_s,
+                ip,
+                server_name=host,
+                port=port,
+                timeout=timeout_s,
             )
         else:
             connection = http.client.HTTPConnection(ip, port=port, timeout=timeout_s)
@@ -133,12 +136,16 @@ def fetch_url(
         if parsed.query:
             path += "?" + parsed.query
         try:
-            connection.request(method, path, headers={
-                "Host": host if port in {80, 443} else f"{host}:{port}",
-                "User-Agent": "Cogito/1.0 safe-http",
-                "Accept": "text/*,application/json,application/xml",
-                "Connection": "close",
-            })
+            connection.request(
+                method,
+                path,
+                headers={
+                    "Host": host if port in {80, 443} else f"{host}:{port}",
+                    "User-Agent": "Cogito/1.0 safe-http",
+                    "Accept": "text/*,application/json,application/xml",
+                    "Connection": "close",
+                },
+            )
             response = connection.getresponse()
             headers = {key.casefold(): value for key, value in response.getheaders()}
             if response.status in {301, 302, 303, 307, 308}:

@@ -241,10 +241,12 @@ class TestStubProvider:
 
     @pytest.mark.asyncio
     async def test_multiple_calls_cycle_scenarios(self):
-        provider = StubModelProvider([
-            StubScenario(response_text="First"),
-            StubScenario(response_text="Second"),
-        ])
+        provider = StubModelProvider(
+            [
+                StubScenario(response_text="First"),
+                StubScenario(response_text="Second"),
+            ]
+        )
 
         r1 = await provider.generate(ModelRequest())
         r2 = await provider.generate(ModelRequest())
@@ -258,13 +260,17 @@ class TestStubProvider:
     async def test_error_scenario(self):
         from cogito.model.errors import ModelProviderError
 
-        provider = StubModelProvider([
-            StubScenario(error=ErrorEnvelope(
-                category=ErrorCategory.rate_limit,
-                message="Rate limited",
-                retryable=True,
-            )),
-        ])
+        provider = StubModelProvider(
+            [
+                StubScenario(
+                    error=ErrorEnvelope(
+                        category=ErrorCategory.rate_limit,
+                        message="Rate limited",
+                        retryable=True,
+                    )
+                ),
+            ]
+        )
 
         with pytest.raises(ModelProviderError) as exc:
             await provider.generate(ModelRequest())

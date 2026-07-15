@@ -72,13 +72,15 @@ class MultimodalContextProjection:
                 result_schema_version=self._config.result_schema_version,
                 options_hash=self._options_hash,
             )
-            result.append({
-                "asset_id": asset["asset_id"],
-                "mime_type": asset["mime_type"],
-                "filename": asset["original_filename"],
-                "status": analysis.status.value if analysis else "queued",
-                "short_description": analysis.short_description if analysis else "",
-            })
+            result.append(
+                {
+                    "asset_id": asset["asset_id"],
+                    "mime_type": asset["mime_type"],
+                    "filename": asset["original_filename"],
+                    "status": analysis.status.value if analysis else "queued",
+                    "short_description": analysis.short_description if analysis else "",
+                }
+            )
         return result
 
 
@@ -196,18 +198,20 @@ class VisionAnalysisService:
             )
             request = ModelRequest(
                 model_role="vlm",
-                messages=({
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:{asset.mime_type};base64,{encoded}",
+                messages=(
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{asset.mime_type};base64,{encoded}",
+                                },
                             },
-                        },
-                    ],
-                },),
+                        ],
+                    },
+                ),
                 response_schema=VISION_RESULT_SCHEMA,
                 response_format="json",
                 max_output_tokens=2000,
@@ -233,16 +237,16 @@ class VisionAnalysisService:
             raise
         except VisionAnalysisError as exc:
             self._repo.fail_analysis(
-                analysis_id, category="capability", retryable=exc.retryable,
+                analysis_id,
+                category="capability",
+                retryable=exc.retryable,
             )
             if self._metrics is not None:
                 self._metrics.record_failed()
             raise
         except RouterError as exc:
             retryable = bool(exc.envelope and exc.envelope.retryable)
-            category = (
-                exc.envelope.category.value if exc.envelope else "provider_error"
-            )
+            category = exc.envelope.category.value if exc.envelope else "provider_error"
             self._repo.fail_analysis(analysis_id, category=category, retryable=retryable)
             if self._metrics is not None:
                 self._metrics.record_failed()
@@ -263,7 +267,9 @@ class VisionAnalysisService:
         session_id: str,
     ) -> dict[str, Any]:
         if not self._repo.is_accessible(
-            asset_id, principal_id=principal_id, session_id=session_id,
+            asset_id,
+            principal_id=principal_id,
+            session_id=session_id,
         ):
             return {
                 "vision_status": "denied",

@@ -85,11 +85,7 @@ class CapabilityDiagnosticSession:
 
     def mcp_tools(self, server_name: str = "") -> list[ToolDef]:
         prefix = f"mcp:{server_name}" if server_name else "mcp:"
-        return [
-            tool
-            for tool in self.registry.all_tools()
-            if tool.namespace.startswith(prefix)
-        ]
+        return [tool for tool in self.registry.all_tools() if tool.namespace.startswith(prefix)]
 
 
 class _UnavailableReader:

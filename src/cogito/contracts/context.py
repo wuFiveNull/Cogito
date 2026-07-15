@@ -6,6 +6,7 @@ Pure layer (no infra imports): depends only on
 
 Previous location: `cogito.runtime.context` (kept as re-export shim).
 """
+
 from __future__ import annotations
 
 import json
@@ -73,6 +74,7 @@ def recency_score(created_at: datetime | None) -> float:
         return 0.0
     # 指数衰减：0 天=1.0，半衰期后=0.5。
     import math
+
     return float(math.exp(-0.6931 * age_days / _RECENCY_HALF_LIFE_DAYS))
 
 
@@ -107,24 +109,26 @@ def normalize_scores(candidates: list[RetrievalCandidate]) -> list[RetrievalCand
         if ns is None or ns == c.final_score:
             out.append(c)
         else:
-            out.append(RetrievalCandidate(
-                candidate_type=c.candidate_type,
-                candidate_id=c.candidate_id,
-                principal_id=c.principal_id,
-                scope=c.scope,
-                content_ref=c.content_ref,
-                source_refs=c.source_refs,
-                keyword_score=c.keyword_score,
-                semantic_score=c.semantic_score,
-                recency_score=c.recency_score,
-                importance_score=c.importance_score,
-                trust_score=c.trust_score,
-                final_score=ns,
-                token_estimate=c.token_estimate,
-                retrieval_path=c.retrieval_path,
-                policy_version=c.policy_version,
-                exclusion_reason=c.exclusion_reason,
-            ))
+            out.append(
+                RetrievalCandidate(
+                    candidate_type=c.candidate_type,
+                    candidate_id=c.candidate_id,
+                    principal_id=c.principal_id,
+                    scope=c.scope,
+                    content_ref=c.content_ref,
+                    source_refs=c.source_refs,
+                    keyword_score=c.keyword_score,
+                    semantic_score=c.semantic_score,
+                    recency_score=c.recency_score,
+                    importance_score=c.importance_score,
+                    trust_score=c.trust_score,
+                    final_score=ns,
+                    token_estimate=c.token_estimate,
+                    retrieval_path=c.retrieval_path,
+                    policy_version=c.policy_version,
+                    exclusion_reason=c.exclusion_reason,
+                )
+            )
     return out
 
 
@@ -152,7 +156,8 @@ def _candidate_provenance(candidate: RetrievalCandidate, *, reason: str = "") ->
 
 
 def _hard_filter(
-    candidates: list[RetrievalCandidate], principal_id: str,
+    candidates: list[RetrievalCandidate],
+    principal_id: str,
 ) -> tuple[list[RetrievalCandidate], list[RetrievalCandidate]]:
     """硬过滤：principal/scope/trust/status/stale/superseded/duplicate（PLAN-16 完整）。
 
@@ -160,6 +165,7 @@ def _hard_filter(
     返回 (kept, excluded) —— excluded 保留完整 score 与 source refs 供 provenance 追溯。
     """
     import dataclasses
+
     seen: set[str] = set()
     kept: list[RetrievalCandidate] = []
     excluded: list[RetrievalCandidate] = []
@@ -185,6 +191,7 @@ class ContextItem:
 
     每条 item 保留 source/score/tokens/trust_label/retrieval_path (Plan 02 M5)。
     """
+
     item_type: str  # "message" | "system_policy" | "memory" | "summary" | "knowledge"
     item_id: str
     source: str  # session_id 或 "system"
@@ -215,6 +222,7 @@ class ContextSnapshot:
     - total_tokens: 条目总 Token 数
     - created_at: 创建时间
     """
+
     snapshot_id: str = ""
     turn_id: str = ""
     attempt_id: str = ""
@@ -250,7 +258,11 @@ class ContextSnapshot:
 
 class KnowledgeReader(Protocol):
     def retrieve(
-        self, *, principal_id: str, query: str, limit: int = 8,
+        self,
+        *,
+        principal_id: str,
+        query: str,
+        limit: int = 8,
         query_vector: list[float] | None = None,
     ) -> list[dict]: ...
 
@@ -348,15 +360,17 @@ class ContextBuilder:
 
         # 1. System Policy 必选（最前）
         if system_policy:
-            items.append(ContextItem(
-                item_type="system_policy",
-                item_id="system_policy",
-                source="system",
-                tokens=estimate_tokens(system_policy),
-                trust_label="internal",
-                content=system_policy,
-                role="system",
-            ))
+            items.append(
+                ContextItem(
+                    item_type="system_policy",
+                    item_id="system_policy",
+                    source="system",
+                    tokens=estimate_tokens(system_policy),
+                    trust_label="internal",
+                    content=system_policy,
+                    role="system",
+                )
+            )
 
         # ── PLAN-16 P16-14 完整：两阶段 Unified Retrieval ──────────────────────
         # 阶段 1: 各 Retriever 召回 RetrievalCandidate（不直接生成 ContextItem）
@@ -365,12 +379,19 @@ class ContextBuilder:
 
         # 召回记忆候选
         memory_candidates, memory_protected_ids, _ = self._recall_memories(
-            principal_id, session_id, query=query_text,
+            principal_id,
+            session_id,
+            query=query_text,
         )
         # 召回知识候选
-        knowledge_candidates, _ = self._recall_knowledge(
-            principal_id, query_text,
-        ) if self._knowledge_reader is not None else ([], {})
+        knowledge_candidates, _ = (
+            self._recall_knowledge(
+                principal_id,
+                query_text,
+            )
+            if self._knowledge_reader is not None
+            else ([], {})
+        )
         # 召回 TaskState 候选
         task_state_candidates, _ = self._recall_task_state(principal_id)
 
@@ -381,8 +402,7 @@ class ContextBuilder:
         history_tokens = sum(i.tokens for i in history_itemized)
         input_tokens = input_itemized.tokens if input_itemized else 0
         total_estimate = base_tokens + history_tokens + input_tokens
-        token_ratio = (total_estimate / self._max_input_tokens
-                       if self._max_input_tokens > 0 else 0)
+        token_ratio = total_estimate / self._max_input_tokens if self._max_input_tokens > 0 else 0
 
         summary_candidates: list[RetrievalCandidate] = []
         if token_ratio >= self.BACKGROUND_THRESHOLD:
@@ -399,26 +419,33 @@ class ContextBuilder:
                     else:
                         recent.append(msg)
                 if old_count > 0:
-                    summary_candidates = [RetrievalCandidate(
-                        candidate_type="session_summary",
-                        candidate_id=summary["summary_id"],
-                        principal_id=principal_id,
-                        scope=session_id,
-                        content_ref=self._format_summary(summary["content_json"]),
-                        source_refs=(session_id,),
-                        recency_score=1.0, importance_score=1.0, trust_score=1.0,
-                        final_score=1.0,
-                        token_estimate=estimate_tokens(
-                            self._format_summary(summary["content_json"])),
-                        retrieval_path="summary",
-                        policy_version=self._policy_version,
-                    )]
+                    summary_candidates = [
+                        RetrievalCandidate(
+                            candidate_type="session_summary",
+                            candidate_id=summary["summary_id"],
+                            principal_id=principal_id,
+                            scope=session_id,
+                            content_ref=self._format_summary(summary["content_json"]),
+                            source_refs=(session_id,),
+                            recency_score=1.0,
+                            importance_score=1.0,
+                            trust_score=1.0,
+                            final_score=1.0,
+                            token_estimate=estimate_tokens(
+                                self._format_summary(summary["content_json"])
+                            ),
+                            retrieval_path="summary",
+                            policy_version=self._policy_version,
+                        )
+                    ]
                     history = recent
 
         # 消息候选（recent + older）
         keep_min = min(self.KEEP_RECENT_COUNT, len(history))
         message_candidates = self._build_message_candidates(
-            history, query_text, protected_indices=set(),
+            history,
+            query_text,
+            protected_indices=set(),
             message_upper_bound=message_upper_bound,
         )
 
@@ -444,23 +471,29 @@ class ContextBuilder:
         all_candidates, hard_excluded = _hard_filter(all_candidates, principal_id)
 
         # 单次统一预算选择（PLAN-16 M6 RET-03 完整）
-        allocations = allocate_budget(total_budget=self._max_input_tokens,
-                                      config=self._budget_config)
-        selection = select_candidates(all_candidates, allocations,
-                                       protected_ids=protected_ids)
+        allocations = allocate_budget(
+            total_budget=self._max_input_tokens, config=self._budget_config
+        )
+        selection = select_candidates(all_candidates, allocations, protected_ids=protected_ids)
 
         # 按语义顺序 Emit ContextItem
-        sel_by_id = {c.candidate_id: c for c in selection.selected}
-        memory_selected = [c for c in selection.selected
-                           if c.candidate_id in {mc.candidate_id for mc in memory_candidates}]
-        knowledge_selected = [c for c in selection.selected
-                              if c.candidate_id in {kc.candidate_id for kc in knowledge_candidates}]
-        task_selected = [c for c in selection.selected
-                         if c.candidate_id in {tc.candidate_id for tc in task_state_candidates}]
-        summary_selected = [c for c in selection.selected
-                            if c.candidate_type == "session_summary"]
-        message_selected = [c for c in selection.selected
-                            if c.candidate_type == "recent_message"]
+        memory_selected = [
+            c
+            for c in selection.selected
+            if c.candidate_id in {mc.candidate_id for mc in memory_candidates}
+        ]
+        knowledge_selected = [
+            c
+            for c in selection.selected
+            if c.candidate_id in {kc.candidate_id for kc in knowledge_candidates}
+        ]
+        task_selected = [
+            c
+            for c in selection.selected
+            if c.candidate_id in {tc.candidate_id for tc in task_state_candidates}
+        ]
+        summary_selected = [c for c in selection.selected if c.candidate_type == "session_summary"]
+        message_selected = [c for c in selection.selected if c.candidate_type == "recent_message"]
 
         # 消息按 receive_sequence 排序（满足所有 ordering 测试）
         msg_order = {m["message_id"]: m["sequence"] for m in history}
@@ -507,12 +540,10 @@ class ContextBuilder:
             exclusion_counts[kind] = exclusion_counts.get(kind, 0) + 1
 
         provenance_excluded: list[dict] = [
-            _candidate_provenance(c, reason=c.exclusion_reason)
-            for c in all_excluded
+            _candidate_provenance(c, reason=c.exclusion_reason) for c in all_excluded
         ]
         provenance_excluded += [
-            {"clip": clip, "exclusion_reason": "token_budget"}
-            for clip in clip_excluded
+            {"clip": clip, "exclusion_reason": "token_budget"} for clip in clip_excluded
         ]
 
         snapshot = ContextSnapshot(
@@ -529,7 +560,8 @@ class ContextBuilder:
             items=tuple(items),
             excluded_summary=(
                 f"Excluded {len(selection_excluded) + len(clip_excluded)} items"
-                if selection_excluded or clip_excluded else ""
+                if selection_excluded or clip_excluded
+                else ""
             ),
             total_tokens=total_tokens,
             created_at=epoch_ms(self._clock.now()),
@@ -542,7 +574,8 @@ class ContextBuilder:
         return snapshot
 
     def _build_knowledge_candidates(
-        self, results: list[dict],
+        self,
+        results: list[dict],
     ) -> list[RetrievalCandidate]:
         """PLAN-13/R-12: 将 KnowledgeReader 返回的 dict 映射为 RetrievalCandidate。"""
         candidates: list[RetrievalCandidate] = []
@@ -551,29 +584,33 @@ class ContextBuilder:
             if not content:
                 continue
             segment_id = str(value.get("segment_id", ""))
-            resource_id = str(value.get("resource_id", ""))
             score = float(value.get("score", 0.0))
             retrieval_path = str(value.get("retrieval_path", "keyword"))
-            candidates.append(RetrievalCandidate(
-                candidate_type="knowledge_segment",
-                candidate_id=segment_id,
-                principal_id=str(value.get("principal_id", "")),
-                scope="",
-                content_ref=content,
-                token_estimate=int(value.get("token_count") or estimate_tokens(content)),
-                keyword_score=score if "keyword" in retrieval_path else 0.0,
-                semantic_score=score if "vector" in retrieval_path else 0.0,
-                recency_score=0.0,
-                importance_score=0.0,
-                trust_score=1.0 if value.get("trust_label") in ("internal", "verified") else 0.7,
-                final_score=score,
-                retrieval_path=retrieval_path,
-                policy_version=self._policy_version,
-            ))
+            candidates.append(
+                RetrievalCandidate(
+                    candidate_type="knowledge_segment",
+                    candidate_id=segment_id,
+                    principal_id=str(value.get("principal_id", "")),
+                    scope="",
+                    content_ref=content,
+                    token_estimate=int(value.get("token_count") or estimate_tokens(content)),
+                    keyword_score=score if "keyword" in retrieval_path else 0.0,
+                    semantic_score=score if "vector" in retrieval_path else 0.0,
+                    recency_score=0.0,
+                    importance_score=0.0,
+                    trust_score=1.0
+                    if value.get("trust_label") in ("internal", "verified")
+                    else 0.7,
+                    final_score=score,
+                    retrieval_path=retrieval_path,
+                    policy_version=self._policy_version,
+                )
+            )
         return candidates
 
     def _recall_task_state(
-        self, principal_id: str,
+        self,
+        principal_id: str,
     ) -> tuple[list[RetrievalCandidate], dict[str, str]]:
         """PLAN-16 P16-14 完整：TaskStateRetriever（RETRIEVAL-CONTEXT §4）。
 
@@ -600,23 +637,32 @@ class ContextBuilder:
                 payload = json.loads(r["payload_ref"] or "{}")
             except (json.JSONDecodeError, TypeError):
                 pass
-            explicit = str(r["task_type"]) in ("memory.extract", "knowledge.ingest",
-                                               "knowledge.sync_source")
-            task_candidates.append(RetrievalCandidate(
-                candidate_type="task_state",
-                candidate_id=str(r["task_id"]),
-                principal_id=principal_id,
-                scope="",
-                content_ref=json.dumps({"task_type": r["task_type"], "origin": r["origin"],
-                                        "payload": payload}, ensure_ascii=False),
-                token_estimate=60,
-                keyword_score=0.0, semantic_score=0.0, recency_score=0.0,
-                importance_score=float(r["priority"]) / 100.0,
-                trust_score=1.0 if explicit else 0.6,
-                final_score=float(r["priority"]) / 100.0,
-                retrieval_path="task_state",
-                policy_version=self._policy_version,
-            ))
+            explicit = str(r["task_type"]) in (
+                "memory.extract",
+                "knowledge.ingest",
+                "knowledge.sync_source",
+            )
+            task_candidates.append(
+                RetrievalCandidate(
+                    candidate_type="task_state",
+                    candidate_id=str(r["task_id"]),
+                    principal_id=principal_id,
+                    scope="",
+                    content_ref=json.dumps(
+                        {"task_type": r["task_type"], "origin": r["origin"], "payload": payload},
+                        ensure_ascii=False,
+                    ),
+                    token_estimate=60,
+                    keyword_score=0.0,
+                    semantic_score=0.0,
+                    recency_score=0.0,
+                    importance_score=float(r["priority"]) / 100.0,
+                    trust_score=1.0 if explicit else 0.6,
+                    final_score=float(r["priority"]) / 100.0,
+                    retrieval_path="task_state",
+                    policy_version=self._policy_version,
+                )
+            )
         task_candidates = normalize_scores(task_candidates)
         self._record_candidates("task_state", task_candidates, selected=False)
         return task_candidates, {}
@@ -721,9 +767,9 @@ class ContextBuilder:
         for idx, m in enumerate(merged):
             kind_label = str(m.kind)
             is_explicit = m.explicitness in (
-                "explicit_user_statement", "confirmed_inference",
+                "explicit_user_statement",
+                "confirmed_inference",
             )
-            kind_source = "goal" if kind_label in ("goal", "constraint") else "memory"
             entry_text = (
                 f"- [{kind_label}, "
                 f"{'explicit' if is_explicit else 'inferred'}, "
@@ -744,22 +790,24 @@ class ContextBuilder:
                 )
             else:
                 final = self._memory_candidate_score(m)
-            candidates.append(RetrievalCandidate(
-                candidate_type="memory",
-                candidate_id=m.memory_id,
-                principal_id=m.principal_id,
-                scope=m.scope_type,
-                content_ref=entry_text,
-                token_estimate=estimate_tokens(entry_text),
-                keyword_score=kw,
-                semantic_score=0.0,
-                recency_score=rec,
-                importance_score=m.importance,
-                trust_score=trust,
-                final_score=final,
-                retrieval_path="list",
-                policy_version=self._policy_version,
-            ))
+            candidates.append(
+                RetrievalCandidate(
+                    candidate_type="memory",
+                    candidate_id=m.memory_id,
+                    principal_id=m.principal_id,
+                    scope=m.scope_type,
+                    content_ref=entry_text,
+                    token_estimate=estimate_tokens(entry_text),
+                    keyword_score=kw,
+                    semantic_score=0.0,
+                    recency_score=rec,
+                    importance_score=m.importance,
+                    trust_score=trust,
+                    final_score=final,
+                    retrieval_path="list",
+                    policy_version=self._policy_version,
+                )
+            )
             # RET-03: active goal / constraint 标记为 protected
             is_active_goal = (
                 kind_label == "goal"
@@ -778,7 +826,8 @@ class ContextBuilder:
         query 为空时复用原公式，保持现有排序行为不变。
         """
         is_explicit = m.explicitness in (
-            "explicit_user_statement", "confirmed_inference",
+            "explicit_user_statement",
+            "confirmed_inference",
         )
         trust = 1.0 if is_explicit else 0.7
         return m.importance * 0.5 + m.confidence * 0.3 + trust * 0.2
@@ -814,24 +863,26 @@ class ContextBuilder:
             denom = max(1, message_upper_bound)
             rec = seq / denom
             final = _KW_WEIGHT * kw_score + _RECENCY_WEIGHT * rec + _IMPORTANCE_WEIGHT * 0.5
-            candidates.append(RetrievalCandidate(
-                candidate_type="recent_message",
-                candidate_id=m["message_id"],
-                principal_id=m.get("sender_principal_id", ""),
-                scope=m.get("session_id", ""),
-                content_ref=content,
-                source_refs=(m.get("session_id", ""), m["message_id"]),
-                keyword_score=kw_score,
-                semantic_score=0.0,
-                recency_score=rec,
-                importance_score=0.5,
-                trust_score=1.0 if m.get("trust_label") == "verified" else 0.7,
-                final_score=final,
-                token_estimate=estimate_tokens(content),
-                retrieval_path="list",
-                policy_version=self._policy_version,
-                exclusion_reason="" if idx not in protected_indices else "",
-            ))
+            candidates.append(
+                RetrievalCandidate(
+                    candidate_type="recent_message",
+                    candidate_id=m["message_id"],
+                    principal_id=m.get("sender_principal_id", ""),
+                    scope=m.get("session_id", ""),
+                    content_ref=content,
+                    source_refs=(m.get("session_id", ""), m["message_id"]),
+                    keyword_score=kw_score,
+                    semantic_score=0.0,
+                    recency_score=rec,
+                    importance_score=0.5,
+                    trust_score=1.0 if m.get("trust_label") == "verified" else 0.7,
+                    final_score=final,
+                    token_estimate=estimate_tokens(content),
+                    retrieval_path="list",
+                    policy_version=self._policy_version,
+                    exclusion_reason="" if idx not in protected_indices else "",
+                )
+            )
         return candidates
 
     def _recall_memories(
@@ -857,7 +908,10 @@ class ContextBuilder:
 
         conversation_id = self._get_session_conversation(session_id)
         candidates, protected_indices = self._build_memory_candidates(
-            all_memories, session_id, conversation_id, query=query,
+            all_memories,
+            session_id,
+            conversation_id,
+            query=query,
         )
 
         # PLAN-16 M6 RET-04: 组内标准化，使 memory 分数可与其他源比较
@@ -880,7 +934,9 @@ class ContextBuilder:
             return [], {}
         try:
             results = self._knowledge_reader.retrieve(
-                principal_id=principal_id, query=query, limit=self._knowledge_top_k,
+                principal_id=principal_id,
+                query=query,
+                limit=self._knowledge_top_k,
             )
         except Exception:
             return [], {}
@@ -897,6 +953,7 @@ class ContextBuilder:
         """记录某来源的候选/选中计数。"""
         try:
             from cogito.infrastructure.metrics_access import _metrics
+
             for _ in candidates:
                 _metrics().record_context_candidate(source, selected)
         except Exception:
@@ -907,6 +964,7 @@ class ContextBuilder:
         """记录某来源的排除原因（OPS-04）。"""
         try:
             from cogito.infrastructure.metrics_access import _metrics
+
             for reason in excluded.values():
                 _metrics().record_context_exclusion(f"{source}:{reason}")
         except Exception:
@@ -917,6 +975,7 @@ class ContextBuilder:
         """记录某来源实际 token 占用（OPS-04）。"""
         try:
             from cogito.infrastructure.metrics_access import _metrics
+
             _metrics().record_context_tokens(source, tokens)
         except Exception:
             pass
@@ -975,10 +1034,7 @@ class ContextBuilder:
                     "sender_principal_id": row["sender_principal_id"],
                     "content_parts": [],
                 }
-            if (
-                row["inline_data"]
-                and row["content_type"] in ("text", "markdown")
-            ):
+            if row["inline_data"] and row["content_type"] in ("text", "markdown"):
                 message_map[mid]["content_parts"].append(row["inline_data"])
 
         result = []
@@ -996,27 +1052,26 @@ class ContextBuilder:
                         external = "Visual analysis is pending."
                     content_parts.append(
                         "<multimodal_asset "
-                        f"asset_id=\"{asset.get('asset_id', '')}\" "
-                        f"mime_type=\"{asset.get('mime_type', '')}\" "
-                        f"status=\"{status}\">\n"
-                        "<external_data trust=\"unverified\">\n"
+                        f'asset_id="{asset.get("asset_id", "")}" '
+                        f'mime_type="{asset.get("mime_type", "")}" '
+                        f'status="{status}">\n'
+                        '<external_data trust="unverified">\n'
                         f"{external}\n"
                         "</external_data>\n"
                         "</multimodal_asset>"
                     )
-            result.append({
-                "message_id": msg["message_id"],
-                "role": msg["role"],
-                "direction": msg["direction"],
-                "sequence": msg["sequence"],
-                "trust_label": msg["trust_label"],
-                "session_id": msg["session_id"],
-                "sender_principal_id": msg.get("sender_principal_id", ""),
-                "content": (
-                    "\n".join(content_parts)
-                    if content_parts else ""
-                ),
-            })
+            result.append(
+                {
+                    "message_id": msg["message_id"],
+                    "role": msg["role"],
+                    "direction": msg["direction"],
+                    "sequence": msg["sequence"],
+                    "trust_label": msg["trust_label"],
+                    "session_id": msg["session_id"],
+                    "sender_principal_id": msg.get("sender_principal_id", ""),
+                    "content": ("\n".join(content_parts) if content_parts else ""),
+                }
+            )
         result.sort(key=lambda m: m["sequence"])
         return result
 
@@ -1038,7 +1093,7 @@ class ContextBuilder:
             role=msg.get("role", "user"),
         )
 
-    def _summary_item(self, cand: "RetrievalCandidate") -> ContextItem:
+    def _summary_item(self, cand: RetrievalCandidate) -> ContextItem:
         """SessionSummary candidate → ContextItem（PLAN-16 完整，保留角色与信任）。"""
         return ContextItem(
             item_type="summary",
@@ -1058,7 +1113,7 @@ class ContextBuilder:
             ),
         )
 
-    def _memory_items(self, cands: list["RetrievalCandidate"]) -> ContextItem:
+    def _memory_items(self, cands: list[RetrievalCandidate]) -> ContextItem:
         """Memory 候选集合 → 单个 wrapped ContextItem（PLAN-16 完整）。
 
         保持与旧版兼容的 <relevant_memories> 包装格式，供 Dashboard 与测试识别。
@@ -1089,7 +1144,7 @@ class ContextBuilder:
             ),
         )
 
-    def _knowledge_item(self, cand: "RetrievalCandidate") -> ContextItem:
+    def _knowledge_item(self, cand: RetrievalCandidate) -> ContextItem:
         """Knowledge candidate → ContextItem。"""
         return ContextItem(
             item_type="knowledge",
@@ -1111,7 +1166,7 @@ class ContextBuilder:
             ),
         )
 
-    def _task_state_item(self, cand: "RetrievalCandidate") -> ContextItem:
+    def _task_state_item(self, cand: RetrievalCandidate) -> ContextItem:
         """TaskState candidate → ContextItem。"""
         return ContextItem(
             item_type="task_state",

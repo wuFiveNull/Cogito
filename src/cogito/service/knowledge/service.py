@@ -3,6 +3,7 @@
 PLAN-13 M4 §11.3：其他模块不能直接 CRUD knowledge 表。
 首版实现 register_resource + ingest（parse + segment）。
 """
+
 from __future__ import annotations
 
 import logging
@@ -29,6 +30,7 @@ _LOGGER = logging.getLogger("cogito.knowledge")
 
 
 # ── Embedding Port（P13-09 扩展）──
+
 
 class EmbeddingPort(Protocol):
     """Embedding 提供者 Port。"""
@@ -103,19 +105,25 @@ class KnowledgeService:
     def _emit(self, event_type: str, aggregate_id: str, payload: dict | None = None) -> None:
         from cogito.domain.events import DomainEvent
         from cogito.store.repositories import OutboxRepository
+
         # 完整：复用 OutboxRepository.next_aggregate_version（同事务 MAX+1，严格单调）
-        version = OutboxRepository(self._conn).next_aggregate_version("knowledge_resource", aggregate_id)
+        version = OutboxRepository(self._conn).next_aggregate_version(
+            "knowledge_resource", aggregate_id
+        )
         data = payload or {}
         import json
-        OutboxRepository(self._conn).insert(DomainEvent(
-            event_type=event_type,
-            aggregate_type="knowledge_resource",
-            aggregate_id=aggregate_id,
-            aggregate_version=version,
-            payload=data,
-            payload_ref=json.dumps(data, ensure_ascii=False),
-            origin="knowledge_service",
-        ))
+
+        OutboxRepository(self._conn).insert(
+            DomainEvent(
+                event_type=event_type,
+                aggregate_type="knowledge_resource",
+                aggregate_id=aggregate_id,
+                aggregate_version=version,
+                payload=data,
+                payload_ref=json.dumps(data, ensure_ascii=False),
+                origin="knowledge_service",
+            )
+        )
 
     # ── Resource ──
 
@@ -169,14 +177,19 @@ class KnowledgeService:
             return None
         d = dict(row)
         return KnowledgeResource(
-            resource_id=d["resource_id"], source_uri_hash=d["source_uri_hash"],
-            content_hash=d.get("content_hash", ""), status=d.get("status", ""),
+            resource_id=d["resource_id"],
+            source_uri_hash=d["source_uri_hash"],
+            content_hash=d.get("content_hash", ""),
+            status=d.get("status", ""),
         )
 
     # ── Ingest ──
 
     def ingest(
-        self, resource_id: str, raw_text: str, payload_threshold: int = 4096,
+        self,
+        resource_id: str,
+        raw_text: str,
+        payload_threshold: int = 4096,
     ) -> tuple[KnowledgeDocument, list[KnowledgeSegment]]:
         """解析 + 切分段落地（PLAN-13 M4, PLAN-16 M4 完整 payload 边界）。
 
@@ -199,7 +212,8 @@ class KnowledgeService:
         )
         knowledge_repo.insert_document(self._conn, doc)
         self._emit(
-            "KnowledgeDocumentParsed", resource_id,
+            "KnowledgeDocumentParsed",
+            resource_id,
             {"resource_id": resource_id, "document_id": doc.document_id},
         )
         # 切分 segments（PLAN-16 完整：大正文写入 PayloadStore，仅保留 payload_ref）
@@ -219,8 +233,10 @@ class KnowledgeService:
             # PLAN-16 M4 完整 payload 边界：大正文 → PayloadStore
             # PLAN-16 P16-13：写入失败则抛异常（不降级内联），由 Command/Task 失败重试。
             # 降级会造成内容截断、source hash 与实际摄取正文不一致、Task 表无限增长。
-            if (self._payload_store_factory is not None
-                    and len(b.text.encode("utf-8")) > payload_threshold):
+            if (
+                self._payload_store_factory is not None
+                and len(b.text.encode("utf-8")) > payload_threshold
+            ):
                 store = self._payload_store_factory(self._conn)
                 obj = store.put(
                     b.text.encode("utf-8"),
@@ -235,13 +251,20 @@ class KnowledgeService:
         # 更新 resource 状态
         knowledge_repo.update_resource_status(self._conn, resource_id, ResourceStatus.active.value)
         self._emit(
-            "KnowledgeSegmentsIndexed", resource_id,
-            {"resource_id": resource_id, "document_id": doc.document_id, "segment_count": len(segs)},
+            "KnowledgeSegmentsIndexed",
+            resource_id,
+            {
+                "resource_id": resource_id,
+                "document_id": doc.document_id,
+                "segment_count": len(segs),
+            },
         )
         # PLAN-16 M2 TX-05: 不再内部 commit，由调用方统一提交。
         _LOGGER.info(
             "Ingested resource %s → document %s, %d segments",
-            resource_id, doc.document_id, len(segs),
+            resource_id,
+            doc.document_id,
+            len(segs),
         )
         return doc, segs
 
@@ -261,6 +284,7 @@ class KnowledgeService:
     @staticmethod
     def _hash_text(text: str) -> str:
         import hashlib
+
         return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
     # ── Retrieval（P13-09 扩展点）──
@@ -274,22 +298,31 @@ class KnowledgeService:
         if self._embedder is None:
             return 0
         pending = knowledge_repo.list_unembedded_segments(
-            self._conn, model=self._embedder.model_id, limit=limit,
+            self._conn,
+            model=self._embedder.model_id,
+            limit=limit,
         )
         if not pending:
             return 0
         # PLAN-16 M4 完整 payload 边界：resolver 化 payload 段落为文本
         from cogito.service.knowledge.resolver import resolve_segment_text
-        segment_rows = [knowledge_repo.get_segment_context(self._conn, segment_id) for segment_id in pending]
-        texts = [resolve_segment_text(self._conn, item, self._payload_store_factory) if item else ""
-                 for item in segment_rows]
+
+        segment_rows = [
+            knowledge_repo.get_segment_context(self._conn, segment_id) for segment_id in pending
+        ]
+        texts = [
+            resolve_segment_text(self._conn, item, self._payload_store_factory) if item else ""
+            for item in segment_rows
+        ]
         vectors = await self._embedder.embed(texts)
         written = 0
         for segment_id, vector in zip(pending, vectors, strict=False):
             if not vector:
                 continue
             knowledge_repo.write_embedding(
-                self._conn, segment_id, vector,
+                self._conn,
+                segment_id,
+                vector,
                 model=self._embedder.model_id,
                 version=self._embedder.model_version,
             )
@@ -317,7 +350,8 @@ class KnowledgeService:
         merged: dict[str, tuple[float, str]] = {}
         # PLAN-16 完整：search/resolver 化 payload 段落
         for segment_id, score in knowledge_repo.search_knowledge_fts(
-                self._conn, query, limit, make_payload_store=self._payload_store_factory):
+            self._conn, query, limit, make_payload_store=self._payload_store_factory
+        ):
             merged[segment_id] = (score, "keyword")
         # KNOW-06 完整：自动 query embedding（Adapter 现提供真正的同步实现）
         used_path = "keyword"
@@ -331,13 +365,16 @@ class KnowledgeService:
                 used_path = "keyword"
                 # OPS-04 完整：记录降级
                 from cogito.infrastructure.metrics_access import _metrics
-                _metrics().record_knowledge_retrieval_degraded(
-                    reason="embed_error")
+
+                _metrics().record_knowledge_retrieval_degraded(reason="embed_error")
         if query_vector:
             model = self._embedder.model_id if self._embedder else ""
             for segment_id, score in knowledge_repo.search_knowledge_vector(
-                self._conn, query_vector, principal_id=principal_id,
-                model=model, limit=limit,
+                self._conn,
+                query_vector,
+                principal_id=principal_id,
+                model=model,
+                limit=limit,
             ):
                 old = merged.get(segment_id)
                 merged[segment_id] = (
@@ -346,10 +383,13 @@ class KnowledgeService:
                 )
         # OPS-04 完整：记录 knowledge retrieval 路径
         from cogito.infrastructure.metrics_access import _metrics
+
         _metrics().record_knowledge_retrieval(path=used_path)
         results: list[dict] = []
         for segment_id, (score, path) in sorted(
-            merged.items(), key=lambda item: item[1][0], reverse=True,
+            merged.items(),
+            key=lambda item: item[1][0],
+            reverse=True,
         ):
             value = knowledge_repo.get_segment_context(self._conn, segment_id)
             if not value or value.get("principal_id") != principal_id:
@@ -364,19 +404,26 @@ class KnowledgeService:
     def invalidate(self, resource_id: str, reason: str = "") -> int:
         """Invalidate a resource and all derived indexes through the owning service."""
         from cogito.service.knowledge.embedding import invalidate_resource_segments
+
         count = invalidate_resource_segments(self._conn, resource_id)
         knowledge_repo.update_resource_status(self._conn, resource_id, ResourceStatus.stale.value)
         self._emit(
-            "KnowledgeResourceInvalidated", resource_id,
+            "KnowledgeResourceInvalidated",
+            resource_id,
             {"resource_id": resource_id, "reason": reason, "segment_count": count},
         )
         # PLAN-16 M2 TX-05: 不再内部 commit，由调用方统一提交。
         return count
 
     def sync_source(
-        self, *, stable_source_id: str, raw_text: str,
-        source_kind: str = "connector", content_hash: str = "",
-        principal_id: str = "", trust_label: str = "unverified",
+        self,
+        *,
+        stable_source_id: str,
+        raw_text: str,
+        source_kind: str = "connector",
+        content_hash: str = "",
+        principal_id: str = "",
+        trust_label: str = "unverified",
     ) -> str:
         existing = self._find_resource_by_uri(principal_id, stable_source_id)
         if existing and existing.content_hash == content_hash:
@@ -415,7 +462,10 @@ class KnowledgeService:
 
         # KNOW-09: 写 Erasure Receipt
         receipt_id = _write_knowledge_erasure_receipt(
-            self._conn, resource_id=resource_id, reason=reason, segment_count=count,
+            self._conn,
+            resource_id=resource_id,
+            reason=reason,
+            segment_count=count,
         )
 
         # KNOW-07: 经事件传播到 Memory（不再直写 memory 表）
@@ -424,37 +474,49 @@ class KnowledgeService:
             "WHERE source_type='knowledge_resource' AND source_id=? AND deleted_at IS NULL",
             (resource_id,),
         ).fetchall()
+        import json
+
         from cogito.domain.events import DomainEvent
         from cogito.store.repositories import OutboxRepository
-        import json
+
         outbox = OutboxRepository(self._conn)
         for row in affected:
             memory_id = row["memory_id"]
             data = {
-                "memory_id": memory_id, "resource_id": resource_id,
-                "reason": reason, "receipt_id": receipt_id,
+                "memory_id": memory_id,
+                "resource_id": resource_id,
+                "reason": reason,
+                "receipt_id": receipt_id,
             }
             # 完整：严格单调递增事件版本（同事务 MAX+1），不再是固定 1
             ver = outbox.next_aggregate_version("memory", memory_id)
-            outbox.insert(DomainEvent(
-                event_type="MemorySourceInvalidated",
-                aggregate_type="memory",
-                aggregate_id=memory_id,
-                aggregate_version=ver,
-                payload=data,
-                payload_ref=json.dumps(data, ensure_ascii=False),
-                origin="knowledge_service",
-            ))
+            outbox.insert(
+                DomainEvent(
+                    event_type="MemorySourceInvalidated",
+                    aggregate_type="memory",
+                    aggregate_id=memory_id,
+                    aggregate_version=ver,
+                    payload=data,
+                    payload_ref=json.dumps(data, ensure_ascii=False),
+                    origin="knowledge_service",
+                )
+            )
         self._emit(
-            "KnowledgeResourceDeleted", resource_id,
-            {"resource_id": resource_id, "reason": reason,
-             "segment_count": count, "receipt_id": receipt_id},
+            "KnowledgeResourceDeleted",
+            resource_id,
+            {
+                "resource_id": resource_id,
+                "reason": reason,
+                "segment_count": count,
+                "receipt_id": receipt_id,
+            },
         )
         # PLAN-16 M2 TX-05: 不再内部 commit，由调用方统一提交。
         return count
 
 
 # ── parser 选择工具 ──
+
 
 def select_parser(media_type: str) -> ContentParser:
     """按 media_type 选择解析器。"""
@@ -464,26 +526,35 @@ def select_parser(media_type: str) -> ContentParser:
 
 
 def _write_knowledge_erasure_receipt(
-    conn: sqlite3.Connection, *, resource_id: str, reason: str, segment_count: int,
+    conn: sqlite3.Connection,
+    *,
+    resource_id: str,
+    reason: str,
+    segment_count: int,
 ) -> str:
     """为 Knowledge 擦除写入一条 Erasure Receipt（PLAN-16 M5 KNOW-09）。"""
     import hashlib
     import uuid as _uuid
+
     from cogito.store.receipt_repo import ReceiptRecord, SideEffectReceiptRepository
+
     receipt_id = f"rcpt-know-erase-{resource_id[:8]}-{_uuid.uuid4().hex[:8]}"
-    request_hash = hashlib.sha256(
-        f"knowledge-erase:{resource_id}:{reason}".encode()).hexdigest()[:16]
+    request_hash = hashlib.sha256(f"knowledge-erase:{resource_id}:{reason}".encode()).hexdigest()[
+        :16
+    ]
     created_at = int(datetime.now(UTC).timestamp() * 1000)
-    SideEffectReceiptRepository(conn).insert(ReceiptRecord(
-        receipt_id=receipt_id,
-        capability_id="knowledge",
-        operation_id=resource_id,
-        request_hash=request_hash,
-        side_effect_class="non_retriable",
-        status="succeeded",
-        reconcile_status="not_needed",
-        summary=f"knowledge resource erased: {reason} ({segment_count} segments)",
-        attempt_type="run",
-        created_at=created_at,
-    ))
+    SideEffectReceiptRepository(conn).insert(
+        ReceiptRecord(
+            receipt_id=receipt_id,
+            capability_id="knowledge",
+            operation_id=resource_id,
+            request_hash=request_hash,
+            side_effect_class="non_retriable",
+            status="succeeded",
+            reconcile_status="not_needed",
+            summary=f"knowledge resource erased: {reason} ({segment_count} segments)",
+            attempt_type="run",
+            created_at=created_at,
+        )
+    )
     return receipt_id

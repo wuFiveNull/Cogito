@@ -66,6 +66,7 @@ def seed_aihot_connector(conn) -> str | None:
 
     # 1. Schedule：每 1 小时轮询一次（先建，满足 FK 引用）
     from cogito.domain.schedule import next_fire_at
+
     first_fire = next_fire_at("1h", timezone="Asia/Shanghai", after=now)
     schedule = Schedule(
         schedule_id=AIHOT_SCHEDULE_ID,
@@ -120,7 +121,8 @@ def seed_aihot_connector(conn) -> str | None:
     conn.commit()
     _LOGGER.info(
         "AIHOT connector registered: %s (schedule=%s, first_fire=%s)",
-        AIHOT_CONNECTOR_ID, AIHOT_SCHEDULE_ID,
+        AIHOT_CONNECTOR_ID,
+        AIHOT_SCHEDULE_ID,
         first_fire.isoformat() if first_fire else None,
     )
     return AIHOT_CONNECTOR_ID
@@ -129,7 +131,8 @@ def seed_aihot_connector(conn) -> str | None:
 def disable_aihot_connector(conn) -> None:
     """停用 AIHOT Connector（保留数据，仅停调度）。"""
     ConnectorRepository(conn).update_status(
-        AIHOT_CONNECTOR_ID, ConnectorStatus.disabled,
+        AIHOT_CONNECTOR_ID,
+        ConnectorStatus.disabled,
     )
     ScheduleRepository(conn).update_enabled(AIHOT_SCHEDULE_ID, False)
     conn.commit()

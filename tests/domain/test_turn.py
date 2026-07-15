@@ -13,8 +13,14 @@ class TestTurn:
         assert t.input_message_id == ""
 
     def test_create_with_values(self):
-        t = Turn(turn_id="t1", session_id="s1", input_message_id="msg1",
-                 priority=100, status=TurnStatus.running, version=3)
+        t = Turn(
+            turn_id="t1",
+            session_id="s1",
+            input_message_id="msg1",
+            priority=100,
+            status=TurnStatus.running,
+            version=3,
+        )
         assert t.turn_id == "t1"
         assert t.priority == 100
         assert t.status == TurnStatus.running
@@ -53,7 +59,9 @@ class TestRunAttempt:
 
     def test_create_with_values(self):
         ra = RunAttempt(
-            attempt_id="ra1", turn_id="t1", attempt_no=2,
+            attempt_id="ra1",
+            turn_id="t1",
+            attempt_no=2,
             status=RunAttemptStatus.running,
         )
         assert ra.attempt_no == 2

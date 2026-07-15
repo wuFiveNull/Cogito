@@ -3,6 +3,7 @@
 FTS/Embedding 为派生数据，Migration 失败可重建；
 权威来源和 tombstone 不允许通过 down migration 静默丢失。
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -26,17 +27,20 @@ def rebuild_index(
             result["fts"] = row["c"] if row else 0
     if embeddings:
         unembedded = knowledge_repo.list_unembedded_segments(
-            conn, model=embedding_model,
+            conn,
+            model=embedding_model,
         )
         result["embeddings"] = len(unembedded)  # 占位；具体嵌入由 EmbeddingPort 完成
     return result
 
 
 def invalidate_resource_segments(
-    conn: sqlite3.Connection, resource_id: str,
+    conn: sqlite3.Connection,
+    resource_id: str,
 ) -> int:
     """来源删除/失效后清理段落地（FTS 重建 + embedding 撤销）。"""
     from datetime import UTC, datetime
+
     docs = knowledge_repo.list_documents_for_resource(conn, resource_id)
     count = 0
     now = datetime.now(UTC).isoformat()

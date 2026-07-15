@@ -10,6 +10,7 @@ proactive_signals 供后续 Policy 调整引用。
 - duplicate/discarded → 更长抑制
 - alert             → 一次性消费或由来源定义
 """
+
 from __future__ import annotations
 
 import logging
@@ -20,16 +21,17 @@ from typing import Any
 _LOGGER = logging.getLogger(__name__)
 
 # ACK 窗口（秒）
-ACK_WINDOW_LONG = 7 * 86400       # cited/sent：7 天
-ACK_WINDOW_SHORT = 2 * 86400      # interesting but not sent：2 天
+ACK_WINDOW_LONG = 7 * 86400  # cited/sent：7 天
+ACK_WINDOW_SHORT = 2 * 86400  # interesting but not sent：2 天
 ACK_WINDOW_SUPPRESS = 30 * 86400  # duplicate/discarded：30 天
-ACK_WINDOW_ALERT = 0              # alert：一次性消费
+ACK_WINDOW_ALERT = 0  # alert：一次性消费
 
 
 @dataclass(frozen=True)
 class FeedbackSignal:
     """用户反馈事件（写入 Outbox / Signal）。"""
-    event_type: str     # accepted|dismissed|not_relevant|too_frequent|duplicate|wrong_time
+
+    event_type: str  # accepted|dismissed|not_relevant|too_frequent|duplicate|wrong_time
     candidate_id: str = ""
     principal_id: str = ""
     channel: str = ""
@@ -67,8 +69,9 @@ def ack_window_for(event_type: str, current_action: str | None = None) -> int:
     return ACK_WINDOW_SHORT
 
 
-def record_feedback(conn, *, event_type: str, candidate_id: str,
-                    principal_id: str = "owner") -> dict[str, Any]:
+def record_feedback(
+    conn, *, event_type: str, candidate_id: str, principal_id: str = "owner"
+) -> dict[str, Any]:
     """记录反馈 → 写入 signal + 返回分级 ACK 窗口。
 
     不直接改 Policy；仅写信号供后续分析。
@@ -93,19 +96,24 @@ def record_feedback(conn, *, event_type: str, candidate_id: str,
             "(signal_id, signal_type, source_type, source_id, "
             " principal_id, payload_json, created_at) "
             "VALUES (?,?,?,?,?,?,?)",
-            (signal_id, f"proactive_feedback_{event_type}", "feedback",
-             candidate_id, principal_id,
-             f'{{"ack_window_s":{window},"candidate_id":"{candidate_id}"}}',
-             now),
+            (
+                signal_id,
+                f"proactive_feedback_{event_type}",
+                "feedback",
+                candidate_id,
+                principal_id,
+                f'{{"ack_window_s":{window},"candidate_id":"{candidate_id}"}}',
+                now,
+            ),
         )
         conn.commit()
     except Exception:
         # proactive_signals 表若不存在，降级写到日志（不影响主路径）
-        _LOGGER.warning("record_feedback: signal write failed (signal_id=%s)",
-                        signal_id, exc_info=True)
+        _LOGGER.warning(
+            "record_feedback: signal write failed (signal_id=%s)", signal_id, exc_info=True
+        )
 
-    _LOGGER.info("feedback %s candidate=%s window=%ds",
-                 event_type, candidate_id, window)
+    _LOGGER.info("feedback %s candidate=%s window=%ds", event_type, candidate_id, window)
     return {
         "recorded": True,
         "event_type": event_type,

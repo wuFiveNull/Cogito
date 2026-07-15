@@ -6,20 +6,20 @@ PLAN-13 P13-05: 检索权重可解释、可重算、可回放。
 放在 store 层（无 service 依赖），供 MemoryRepository（store）和
 service/memory_weight.py 共同使用，避免循环导入。
 """
+
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
 
-
 # 各 kind 默认衰减速率（/天），半衰期 = ln(2)/rate
 DEFAULT_KIND_DECAY: dict[str, float] = {
-    "fact": 0.001,       # ~693 天
+    "fact": 0.001,  # ~693 天
     "preference": 0.005,  # ~139 天
-    "episode": 0.02,      # ~35 天
+    "episode": 0.02,  # ~35 天
     "goal": 0.001,
-    "constraint": 0.0,    # 不自动衰减
+    "constraint": 0.0,  # 不自动衰减
 }
 
 # source_trust 由 explicitness 映射（MEMORY-LIFECYCLE §4.2）
@@ -35,6 +35,7 @@ EXPLICITNESS_TRUST: dict[str, float] = {
 @dataclass
 class MemoryWeightPolicy:
     """版本化权重策略（PLAN-13 P13-05）。"""
+
     version: str = "2"
     kind_decay: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_KIND_DECAY))
     archive_threshold: float = 0.1
@@ -43,9 +44,14 @@ class MemoryWeightPolicy:
     emotional_bonus_cap: float = 0.2
     weight_min: float = 0.0
     weight_max: float = 2.0
-    confirmation_scores: dict[str, float] = field(default_factory=lambda: {
-        "confirmed": 1.0, "candidate": 0.5, "rejected": 0.0, "expired": 0.0,
-    })
+    confirmation_scores: dict[str, float] = field(
+        default_factory=lambda: {
+            "confirmed": 1.0,
+            "candidate": 0.5,
+            "rejected": 0.0,
+            "expired": 0.0,
+        }
+    )
 
     def kind_decay_rate(self, kind: str) -> float:
         return self.kind_decay.get(kind, 0.001)

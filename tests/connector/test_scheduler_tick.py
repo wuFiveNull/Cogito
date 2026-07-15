@@ -43,6 +43,8 @@ class TestSchedulerTick:
         assert tasks[0].task_type == "connector.poll"
         assert tasks[0].payload_ref == "c1"
         assert tasks[0].status == TaskStatus.queued
+        assert tasks[0].scheduled_at == now - timedelta(seconds=1)
+        assert TaskRepository(conn).find_queued(now=now)[0].task_id == tasks[0].task_id
 
     def test_tick_updates_next_fire_time(self, conn, scheduler, clock):
         now = clock.now()

@@ -8,6 +8,7 @@ QQ-ONEBOT-E2E-01 / PR 3:
 
 本模块不依赖 aiocqhttp SDK 类型，只依赖 LangBot 兼容层类型。
 """
+
 from __future__ import annotations
 
 import logging
@@ -23,6 +24,7 @@ _LOG = logging.getLogger("cogito.channel.onebot")
 
 
 # ── 稳定 ID 规则 ────────────────────────────────────────────────────────
+
 
 def private_channel_type() -> str:
     return "qq"
@@ -70,6 +72,7 @@ def group_target_endpoint_ref(instance_id: str, group_id: str) -> str:
 @dataclass
 class OneBotPolicy:
     """QQ 入站策略 —— allowlist、@Bot gating、bot 自消息过滤。"""
+
     owner_qq_ids: set[str] = field(default_factory=set)
     allow_private: bool = True
     allowed_group_ids: set[str,] = field(default_factory=set)  # 空 = 拒绝全部
@@ -164,46 +167,60 @@ def _extract_content(
     result: list[InboundContent] = []
     for component in message_chain:
         if isinstance(component, lb_message.Plain):
-            result.append(InboundContent(
-                type="text",
-                data=component.text or "",
-            ))
+            result.append(
+                InboundContent(
+                    type="text",
+                    data=component.text or "",
+                )
+            )
         elif isinstance(component, lb_message.Image):
-            result.append(InboundContent(
-                type="image",
-                data=component.base64 or "",
-                mime="image/jpeg",
-            ))
+            result.append(
+                InboundContent(
+                    type="image",
+                    data=component.base64 or "",
+                    mime="image/jpeg",
+                )
+            )
         elif isinstance(component, lb_message.Voice):
-            result.append(InboundContent(
-                type="voice",
-                data=component.base64 or "",
-                mime="audio/ogg",
-                size=0,
-            ))
+            result.append(
+                InboundContent(
+                    type="voice",
+                    data=component.base64 or "",
+                    mime="audio/ogg",
+                    size=0,
+                )
+            )
         elif isinstance(component, lb_message.File):
-            result.append(InboundContent(
-                type="file",
-                data=component.base64 or "",
-                mime="application/octet-stream",
-                name=component.name or "",
-                size=component.size or 0,
-            ))
+            result.append(
+                InboundContent(
+                    type="file",
+                    data=component.base64 or "",
+                    mime="application/octet-stream",
+                    name=component.name or "",
+                    size=component.size or 0,
+                )
+            )
         elif isinstance(component, lb_message.At):
-            result.append(InboundContent(
-                type="at",
-                data=component.target or "",
-            ))
+            result.append(
+                InboundContent(
+                    type="at",
+                    data=component.target or "",
+                )
+            )
         elif isinstance(component, lb_message.AtAll):
-            result.append(InboundContent(
-                type="at",
-                data="all",
-            ))
+            result.append(
+                InboundContent(
+                    type="at",
+                    data="all",
+                )
+            )
         elif isinstance(component, lb_message.Face):
-            result.append(InboundContent(
-                type="face",
-                data=str(component.face_id) if component.face_id else "",
-            ))
+            result.append(
+                InboundContent(
+                    type="face",
+                    data=str(component.face_id) if component.face_id else "",
+                )
+            )
         # Forward 和其他复杂类型暂不处理
     return result
 

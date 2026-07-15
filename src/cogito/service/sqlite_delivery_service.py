@@ -9,6 +9,7 @@
 GatewayClient 抽象：service 层通过 GatewayClient Protocol 访问平台适配器；
 LoopbackGatewayClient（合并进程）复用现有 ChannelManager + Adapter。
 """
+
 from __future__ import annotations
 
 import json
@@ -37,6 +38,7 @@ def _now_ms(clock: Clock | None = None) -> int:
     c = clock
     if c is None:
         from cogito.contracts.clock import ProductionClock
+
         c = ProductionClock()
     return epoch_ms(c.now())
 
@@ -91,15 +93,23 @@ class SqliteDeliveryService(DeliveryService):  # type: ignore[override]
             "(delivery_id, target_snapshot, content_ref, status, idempotency_key, "
             "scheduled_at, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (delivery_id, target_json, request.content_ref, initial_status,
-             idem, request.scheduled_at, now_iso),
+            (
+                delivery_id,
+                target_json,
+                request.content_ref,
+                initial_status,
+                idem,
+                request.scheduled_at,
+                now_iso,
+            ),
         )
         self._conn.commit()
         return DeliveryRef(delivery_id=delivery_id)
 
     def get(self, delivery_id: str) -> DeliveryView | None:
         row = self._conn.execute(
-            "SELECT * FROM deliveries WHERE delivery_id=?", (delivery_id,),
+            "SELECT * FROM deliveries WHERE delivery_id=?",
+            (delivery_id,),
         ).fetchone()
         if row is None:
             return None
@@ -126,7 +136,8 @@ class SqliteDeliveryService(DeliveryService):  # type: ignore[override]
     async def cancel(self, delivery_id: str, expected_version: int) -> None:
         with _uow(self._conn) as uow:
             row = self._conn.execute(
-                "SELECT status FROM deliveries WHERE delivery_id=?", (delivery_id,),
+                "SELECT status FROM deliveries WHERE delivery_id=?",
+                (delivery_id,),
             ).fetchone()
             if row is None or row["status"] in ("sent", "failed", "cancelled"):
                 return
@@ -141,7 +152,8 @@ class SqliteDeliveryService(DeliveryService):  # type: ignore[override]
         now = _now_ms(self._clock)
         with _uow(self._conn) as uow:
             row = self._conn.execute(
-                "SELECT status FROM deliveries WHERE delivery_id=?", (delivery_id,),
+                "SELECT status FROM deliveries WHERE delivery_id=?",
+                (delivery_id,),
             ).fetchone()
             if row is None or row["status"] != "retry_scheduled":
                 return
@@ -154,18 +166,21 @@ class SqliteDeliveryService(DeliveryService):  # type: ignore[override]
             uow.commit()
 
     async def reconcile(
-        self, delivery_id: str, platform_message_id: str | None = None,
+        self,
+        delivery_id: str,
+        platform_message_id: str | None = None,
     ) -> ReconcileResult:
         now = _now_ms(self._clock)
         initial = self._conn.execute(
-            "SELECT status, target_snapshot, idempotency_key FROM deliveries "
-            "WHERE delivery_id=?", (delivery_id,),
+            "SELECT status, target_snapshot, idempotency_key FROM deliveries WHERE delivery_id=?",
+            (delivery_id,),
         ).fetchone()
         if initial is None:
             return ReconcileResult(delivery_id=delivery_id, status="still_unknown")
         if initial["status"] == "sent":
             return ReconcileResult(
-                delivery_id=delivery_id, status="sent",
+                delivery_id=delivery_id,
+                status="sent",
                 platform_message_id=platform_message_id,
             )
         if initial["status"] != "unknown":
@@ -176,7 +191,8 @@ class SqliteDeliveryService(DeliveryService):  # type: ignore[override]
         if hasattr(self._gateway, "reconcile"):
             try:
                 gateway_result = self._gateway.reconcile(
-                    initial["target_snapshot"], platform_message_id,
+                    initial["target_snapshot"],
+                    platform_message_id,
                     initial["idempotency_key"] or f"reconcile:{delivery_id}",
                 )
             except Exception:
@@ -199,11 +215,13 @@ class SqliteDeliveryService(DeliveryService):  # type: ignore[override]
             ).fetchone()
             if row is None:
                 return ReconcileResult(
-                    delivery_id=delivery_id, status="still_unknown",
+                    delivery_id=delivery_id,
+                    status="still_unknown",
                 )
             if row["status"] != "unknown":
                 return ReconcileResult(
-                    delivery_id=delivery_id, status="still_unknown",
+                    delivery_id=delivery_id,
+                    status="still_unknown",
                 )
 
             updated = self._conn.execute(
@@ -231,12 +249,20 @@ class SqliteDeliveryService(DeliveryService):  # type: ignore[override]
                     "request_hash, receipt_kind, platform_message_id, safe_result, "
                     "observed_at, lease_version) "
                     "VALUES (?, ?, ?, ?, '', 'reconciled', ?, 'reconciled', ?, ?)",
-                    (uuid.uuid4().hex, delivery_id, attempt_id, op_seq,
-                     platform_message_id, now, row["lease_version"] + 1),
+                    (
+                        uuid.uuid4().hex,
+                        delivery_id,
+                        attempt_id,
+                        op_seq,
+                        platform_message_id,
+                        now,
+                        row["lease_version"] + 1,
+                    ),
                 )
             uow.commit()
             return ReconcileResult(
-                delivery_id=delivery_id, status="sent",
+                delivery_id=delivery_id,
+                status="sent",
                 platform_message_id=platform_message_id,
             )
 
@@ -257,6 +283,7 @@ class SqliteDeliveryService(DeliveryService):  # type: ignore[override]
 
 def _uow(conn: sqlite3.Connection) -> Any:
     from cogito.service.unit_of_work import UnitOfWork
+
     return UnitOfWork(conn)
 
 
@@ -305,5 +332,8 @@ class _UnavailableGateway:
 
 # Compatibility re-exports for callers that imported the Port from this module.
 __all__ = [
-    "GatewayClient", "GatewayResult", "SqliteDeliveryService", "_uow",
+    "GatewayClient",
+    "GatewayResult",
+    "SqliteDeliveryService",
+    "_uow",
 ]

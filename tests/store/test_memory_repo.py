@@ -347,8 +347,10 @@ class TestFTSIntegration:
 
         # 无 scope 过滤，但 scope 匹配的 conv1 条目应略高
         results = repo.search_scored(
-            principal_id="p1", query="config",
-            scope_type="conversation", scope_id="conv1",
+            principal_id="p1",
+            query="config",
+            scope_type="conversation",
+            scope_id="conv1",
         )
         # 只有 conv1 匹配的条目
         assert len(results) == 1

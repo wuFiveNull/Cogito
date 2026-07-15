@@ -4,6 +4,7 @@
 连续失败熔断 (3/60s)；权限映射到 Sandbox/Policy。
 第三方默认 subprocess；in_process_trusted 仅内置或用户显式批准。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -58,44 +59,32 @@ class PluginState:
 class PluginRuntime(Protocol):
     """插件生命周期管理接口（唯一写入口）。"""
 
-    def discover(self, *paths: str) -> list[PluginManifest]:
-        ...
+    def discover(self, *paths: str) -> list[PluginManifest]: ...
 
-    def validate(self, manifest: PluginManifest) -> bool:
-        ...
+    def validate(self, manifest: PluginManifest) -> bool: ...
 
-    def install(self, manifest: PluginManifest) -> PluginState:
-        ...
+    def install(self, manifest: PluginManifest) -> PluginState: ...
 
-    def enable(self, plugin_id: str) -> PluginState | None:
-        ...
+    def enable(self, plugin_id: str) -> PluginState | None: ...
 
-    def disable(self, plugin_id: str) -> PluginState | None:
-        ...
+    def disable(self, plugin_id: str) -> PluginState | None: ...
 
-    def record_failure(self, plugin_id: str) -> None:
-        ...
+    def record_failure(self, plugin_id: str) -> None: ...
 
-    def get(self, plugin_id: str) -> PluginState | None:
-        ...
+    def get(self, plugin_id: str) -> PluginState | None: ...
 
-    def list_all(self) -> list[PluginState]:
-        ...
+    def list_all(self) -> list[PluginState]: ...
 
-    def start(self, plugin_id: str) -> PluginState | None:
-        ...
+    def start(self, plugin_id: str) -> PluginState | None: ...
 
-    def stop(self, plugin_id: str) -> PluginState | None:
-        ...
+    def stop(self, plugin_id: str) -> PluginState | None: ...
 
-    def health(self, plugin_id: str) -> dict[str, Any]:
-        ...
+    def health(self, plugin_id: str) -> dict[str, Any]: ...
 
-    def rollback(self, plugin_id: str) -> PluginState | None:
-        ...
+    def rollback(self, plugin_id: str) -> PluginState | None: ...
 
-    def close(self) -> None:
-        ...
+    def close(self) -> None: ...
+
 
 # 熔断器参数
 CIRCUIT_MAX_FAILURES = 3
@@ -105,8 +94,9 @@ CIRCUIT_WINDOW_S = 60.0
 class CircuitBreaker:
     """熔断器：连续 N 次/窗口秒内触发熔断。"""
 
-    def __init__(self, max_failures: int = CIRCUIT_MAX_FAILURES,
-                 window_s: float = CIRCUIT_WINDOW_S) -> None:
+    def __init__(
+        self, max_failures: int = CIRCUIT_MAX_FAILURES, window_s: float = CIRCUIT_WINDOW_S
+    ) -> None:
         self._max = max_failures
         self._window = window_s
         self._failures: list[float] = []
@@ -169,9 +159,8 @@ class SqlitePluginRuntime:
                 api_version=r["api_version"],
                 permissions=tuple(json.loads(r["permissions"] or "[]")),
                 entry_point=r["entry_point"],
-                subprocess=(
-                    r["isolation"] if "isolation" in r.keys() else "subprocess"
-                ) != "in_process_trusted",
+                subprocess=(r["isolation"] if "isolation" in r.keys() else "subprocess")
+                != "in_process_trusted",
                 source=r["source"],
                 source_path=r["source_path"],
                 trusted=bool(r["trusted"]) if "trusted" in r.keys() else False,
@@ -220,11 +209,23 @@ class SqlitePluginRuntime:
                  trusted=excluded.trusted,
                  updated_at=excluded.updated_at""",
             (
-                state.plugin_id, state.manifest.version, state.manifest.api_version,
-                state.status, state.manifest.source, state.manifest.source_path,
-                state.manifest.entry_point, perms, state.manifest.install_hash,
-                state.error, state.fail_count, state.last_fail_at,
-                state.started_at, now, isolation, int(state.manifest.trusted), now,
+                state.plugin_id,
+                state.manifest.version,
+                state.manifest.api_version,
+                state.status,
+                state.manifest.source,
+                state.manifest.source_path,
+                state.manifest.entry_point,
+                perms,
+                state.manifest.install_hash,
+                state.error,
+                state.fail_count,
+                state.last_fail_at,
+                state.started_at,
+                now,
+                isolation,
+                int(state.manifest.trusted),
+                now,
             ),
         )
         self._conn.commit()
@@ -262,7 +263,11 @@ class SqlitePluginRuntime:
         return manifests
 
     def _scan_dir(
-        self, path: str, *, source: str = "project", trusted: bool = False,
+        self,
+        path: str,
+        *,
+        source: str = "project",
+        trusted: bool = False,
     ) -> list[PluginManifest]:
         """扫描目录下的 plugin.yaml / plugin.toml。"""
         out: list[PluginManifest] = []
@@ -274,14 +279,19 @@ class SqlitePluginRuntime:
                 continue
             yaml_path = os.path.join(sub, "plugin.yaml")
             toml_path = os.path.join(sub, "plugin.toml")
-            manifest_path = yaml_path if os.path.isfile(yaml_path) else (
-                toml_path if os.path.isfile(toml_path) else None
+            manifest_path = (
+                yaml_path
+                if os.path.isfile(yaml_path)
+                else (toml_path if os.path.isfile(toml_path) else None)
             )
             if manifest_path is None:
                 continue
             try:
                 m = self._parse_manifest(
-                    manifest_path, source_path=sub, source=source, trusted=trusted,
+                    manifest_path,
+                    source_path=sub,
+                    source=source,
+                    trusted=trusted,
                 )
                 if m is not None:
                     out.append(m)
@@ -334,7 +344,8 @@ class SqlitePluginRuntime:
             perms = [perms]
         isolation = str(data.get("isolation") or "")
         subprocess_mode = (
-            isolation != "in_process_trusted" if isolation
+            isolation != "in_process_trusted"
+            if isolation
             else str(data.get("subprocess") or "true").lower() != "false"
         )
         return PluginManifest(
@@ -374,33 +385,39 @@ class SqlitePluginRuntime:
                 source_path = str(dist.locate_file("")) if dist is not None else os.getcwd()
             except Exception:
                 source_path = os.getcwd()
-            out.append(PluginManifest(
-                plugin_id=ep.name,
-                version=str(getattr(ep, "dist", None) and getattr(ep.dist, "version", "0.0.0")) or "0.0.0",
-                api_version="1",
-                entry_point=f"{ep.value}",
-                source="pip",
-                source_path=source_path,
-                install_hash=str(getattr(ep, "value", "")),
-            ))
+            out.append(
+                PluginManifest(
+                    plugin_id=ep.name,
+                    version=str(getattr(ep, "dist", None) and getattr(ep.dist, "version", "0.0.0"))
+                    or "0.0.0",
+                    api_version="1",
+                    entry_point=f"{ep.value}",
+                    source="pip",
+                    source_path=source_path,
+                    install_hash=str(getattr(ep, "value", "")),
+                )
+            )
         return out
 
     def validate(self, manifest: PluginManifest) -> bool:
         if not manifest.plugin_id or not manifest.version:
             return False
-        if re.fullmatch(
-            r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", manifest.plugin_id,
-        ) is None:
+        if (
+            re.fullmatch(
+                r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}",
+                manifest.plugin_id,
+            )
+            is None
+        ):
             return False
         api = manifest.api_version.replace(" ", "")
         if not (api in ("1", "1.0") or (">=1" in api and "<2" in api)):
             return False
-        if not manifest.subprocess and not (
-            manifest.source == "builtin" and manifest.trusted
-        ):
+        if not manifest.subprocess and not (manifest.source == "builtin" and manifest.trusted):
             return False
         if manifest.entry_point and not re.fullmatch(
-            r"[A-Za-z_][\w.]*(:[A-Za-z_]\w*)?", manifest.entry_point,
+            r"[A-Za-z_][\w.]*(:[A-Za-z_]\w*)?",
+            manifest.entry_point,
         ):
             return False
         return True
@@ -480,9 +497,7 @@ class SqlitePluginRuntime:
         try:
             self._policy.authorize(state.manifest.permissions)
             if not state.manifest.subprocess:
-                if not (
-                    state.manifest.source == "builtin" and state.manifest.trusted
-                ):
+                if not (state.manifest.source == "builtin" and state.manifest.trusted):
                     raise PermissionError("in-process plugin is not explicitly trusted")
                 state.status = "running"
                 state.process_id = os.getpid()
@@ -493,7 +508,10 @@ class SqlitePluginRuntime:
             state.error = ""
             self._persist(state)
             self._audit(
-                plugin_id, "start", "success", f"pid={state.process_id}",
+                plugin_id,
+                "start",
+                "success",
+                f"pid={state.process_id}",
             )
         except Exception as exc:
             state.status = "degraded"
@@ -548,7 +566,8 @@ class SqlitePluginRuntime:
         self._plugins[plugin_id] = state
         self._persist(state)
         self._conn.execute(
-            "DELETE FROM plugin_snapshots WHERE snapshot_id=?", (row["snapshot_id"],),
+            "DELETE FROM plugin_snapshots WHERE snapshot_id=?",
+            (row["snapshot_id"],),
         )
         self._conn.commit()
         self._audit(plugin_id, "rollback", "success", manifest.version)
@@ -568,15 +587,21 @@ class SqlitePluginRuntime:
             "(snapshot_id, plugin_id, manifest_json, status, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
             (
-                f"psnap-{uuid.uuid4().hex}", state.plugin_id,
+                f"psnap-{uuid.uuid4().hex}",
+                state.plugin_id,
                 json.dumps(asdict(state.manifest), ensure_ascii=False),
-                state.status, datetime.now(UTC).isoformat(),
+                state.status,
+                datetime.now(UTC).isoformat(),
             ),
         )
         self._conn.commit()
 
     def _audit(
-        self, plugin_id: str, action: str, outcome: str, safe_detail: str = "",
+        self,
+        plugin_id: str,
+        action: str,
+        outcome: str,
+        safe_detail: str = "",
     ) -> None:
         if self._conn is None:
             return
@@ -585,8 +610,12 @@ class SqlitePluginRuntime:
             "(audit_id, plugin_id, action, outcome, safe_detail, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (
-                f"paudit-{uuid.uuid4().hex}", plugin_id, action, outcome,
-                safe_detail[:500], datetime.now(UTC).isoformat(),
+                f"paudit-{uuid.uuid4().hex}",
+                plugin_id,
+                action,
+                outcome,
+                safe_detail[:500],
+                datetime.now(UTC).isoformat(),
             ),
         )
         self._conn.commit()
@@ -597,5 +626,3 @@ class SqlitePluginRuntime:
         if plugin_id not in self._breakers:
             self._breakers[plugin_id] = CircuitBreaker()
         return self._breakers[plugin_id]
-
-

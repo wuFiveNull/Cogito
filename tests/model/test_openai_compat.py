@@ -34,9 +34,7 @@ def _make_provider(responses: list[httpx.Response] | None = None) -> OpenAICompa
     )
 
     if responses:
-        transport = httpx.MockTransport(
-            lambda request: responses.pop(0)
-        )
+        transport = httpx.MockTransport(lambda request: responses.pop(0))
         provider._client = httpx.AsyncClient(
             transport=transport,
             base_url=provider._base_url,
@@ -141,9 +139,11 @@ class TestSuccess:
 class TestHTTPErrors:
     @pytest.mark.asyncio
     async def test_401_maps_to_authentication(self):
-        provider = _make_provider([
-            httpx.Response(status_code=401, json={"error": {"message": "Invalid API key"}}),
-        ])
+        provider = _make_provider(
+            [
+                httpx.Response(status_code=401, json={"error": {"message": "Invalid API key"}}),
+            ]
+        )
         with pytest.raises(ModelProviderError) as exc:
             await provider.generate(_make_request())
         assert exc.value.envelope.category == ErrorCategory.authentication
@@ -151,9 +151,11 @@ class TestHTTPErrors:
 
     @pytest.mark.asyncio
     async def test_400_maps_to_invalid_request(self):
-        provider = _make_provider([
-            httpx.Response(status_code=400, json={"error": {"message": "Bad request"}}),
-        ])
+        provider = _make_provider(
+            [
+                httpx.Response(status_code=400, json={"error": {"message": "Bad request"}}),
+            ]
+        )
         with pytest.raises(ModelProviderError) as exc:
             await provider.generate(_make_request())
         assert exc.value.envelope.category == ErrorCategory.invalid_request
@@ -161,9 +163,11 @@ class TestHTTPErrors:
 
     @pytest.mark.asyncio
     async def test_429_maps_to_rate_limit(self):
-        provider = _make_provider([
-            httpx.Response(status_code=429, json={"error": {"message": "Rate limited"}}),
-        ])
+        provider = _make_provider(
+            [
+                httpx.Response(status_code=429, json={"error": {"message": "Rate limited"}}),
+            ]
+        )
         with pytest.raises(ModelProviderError) as exc:
             await provider.generate(_make_request())
         assert exc.value.envelope.category == ErrorCategory.rate_limit
@@ -171,9 +175,11 @@ class TestHTTPErrors:
 
     @pytest.mark.asyncio
     async def test_500_maps_to_provider_internal_retryable(self):
-        provider = _make_provider([
-            httpx.Response(status_code=500, text="Internal error"),
-        ])
+        provider = _make_provider(
+            [
+                httpx.Response(status_code=500, text="Internal error"),
+            ]
+        )
         with pytest.raises(ModelProviderError) as exc:
             await provider.generate(_make_request())
         assert exc.value.envelope.category == ErrorCategory.provider_internal
@@ -181,9 +187,11 @@ class TestHTTPErrors:
 
     @pytest.mark.asyncio
     async def test_404_maps_to_model_not_found(self):
-        provider = _make_provider([
-            httpx.Response(status_code=404, json={"error": {"message": "Not found"}}),
-        ])
+        provider = _make_provider(
+            [
+                httpx.Response(status_code=404, json={"error": {"message": "Not found"}}),
+            ]
+        )
         with pytest.raises(ModelProviderError) as exc:
             await provider.generate(_make_request())
         assert exc.value.envelope.category == ErrorCategory.model_not_found
@@ -203,6 +211,7 @@ class TestNetworkErrors:
 
         # Mock the client's post to raise TimeoutException
         import httpx
+
         async def raise_timeout(*args, **kwargs):
             raise httpx.TimeoutException("Request timed out", request=None)
 
@@ -285,6 +294,7 @@ class TestToolCalls:
 
     def _capture_provider(self, sent_storage: dict) -> OpenAICompatProvider:
         """创建将请求体捕获到 sent_storage 的 provider。"""
+
         def capture(request: httpx.Request) -> httpx.Response:
             sent_storage["payload"] = json.loads(request.content)
             return self._tool_response("done")
@@ -306,10 +316,16 @@ class TestToolCalls:
 
         request = ModelRequest(
             messages=({"role": "user", "content": "Hello"},),
-            tools=({"type": "function", "function": {
-                "name": "echo", "description": "Echo text",
-                "parameters": {"type": "object", "properties": {}},
-            }},),
+            tools=(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "echo",
+                        "description": "Echo text",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                },
+            ),
         )
         await provider.generate(request)
 
@@ -325,9 +341,17 @@ class TestToolCalls:
         request = ModelRequest(
             messages=(
                 {"role": "user", "content": "Use echo tool"},
-                {"role": "assistant", "content": "",
-                 "tool_calls": [{"id": "call1", "type": "function",
-                                "function": {"name": "echo", "arguments": '{"text":"hi"}'}}]},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call1",
+                            "type": "function",
+                            "function": {"name": "echo", "arguments": '{"text":"hi"}'},
+                        }
+                    ],
+                },
                 {"role": "tool", "content": "hi", "tool_call_id": "call1"},
             ),
         )
@@ -366,9 +390,17 @@ class TestToolCalls:
 
         request = ModelRequest(
             messages=(
-                {"role": "assistant", "content": "I will use a tool",
-                 "tool_calls": [{"id": "call1", "type": "function",
-                                "function": {"name": "echo", "arguments": '{}'}}]},
+                {
+                    "role": "assistant",
+                    "content": "I will use a tool",
+                    "tool_calls": [
+                        {
+                            "id": "call1",
+                            "type": "function",
+                            "function": {"name": "echo", "arguments": "{}"},
+                        }
+                    ],
+                },
             ),
         )
         await provider.generate(request)
@@ -381,12 +413,16 @@ class TestToolCalls:
     @pytest.mark.asyncio
     async def test_parse_tool_calls_response(self):
         provider = _make_provider([self._tool_response("I'll use echo")])
-        request = _make_request({
-            "tools": ({
-                "type": "function",
-                "function": {"name": "echo", "description": "", "parameters": {}},
-            },),
-        })
+        request = _make_request(
+            {
+                "tools": (
+                    {
+                        "type": "function",
+                        "function": {"name": "echo", "description": "", "parameters": {}},
+                    },
+                ),
+            }
+        )
 
         response = await provider.generate(request)
         assert response.finish_reason == FinishReason.tool_calls
@@ -413,10 +449,16 @@ class TestToolCalls:
     async def test_tool_calls_not_raises_error(self):
         """请求中带 tools 不再报错。"""
         provider = _make_provider([_success_response("OK")])
-        request = _make_request({"tools": ({
-            "type": "function",
-            "function": {"name": "test", "parameters": {}},
-        },)})
+        request = _make_request(
+            {
+                "tools": (
+                    {
+                        "type": "function",
+                        "function": {"name": "test", "parameters": {}},
+                    },
+                )
+            }
+        )
 
         # 不应抛出异常
         response = await provider.generate(request)
@@ -473,9 +515,11 @@ class TestResponseParsing:
     @pytest.mark.asyncio
     async def test_invalid_json(self):
         """非法 JSON 响应。"""
-        provider = _make_provider([
-            httpx.Response(status_code=200, text="not json"),
-        ])
+        provider = _make_provider(
+            [
+                httpx.Response(status_code=200, text="not json"),
+            ]
+        )
         with pytest.raises(ModelProviderError) as exc:
             await provider.generate(_make_request())
         assert exc.value.envelope.category == ErrorCategory.provider_internal

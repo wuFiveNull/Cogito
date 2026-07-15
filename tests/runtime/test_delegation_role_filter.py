@@ -18,12 +18,20 @@ async def _handler(_args, _context) -> str:
 async def test_read_only_child_snapshot_excludes_side_effect_tools() -> None:
     registry = CapabilityRegistry()
     read_tool = ToolDef(
-        "read_file", "read", {"type": "object"}, _handler,
-        toolset=("file",), side_effect_class="none",
+        "read_file",
+        "read",
+        {"type": "object"},
+        _handler,
+        toolset=("file",),
+        side_effect_class="none",
     )
     write_tool = ToolDef(
-        "write_file", "write", {"type": "object"}, _handler,
-        toolset=("file",), side_effect_class="reconcilable",
+        "write_file",
+        "write",
+        {"type": "object"},
+        _handler,
+        toolset=("file",),
+        side_effect_class="reconcilable",
     )
     registry.register(read_tool)
     registry.register(write_tool)
@@ -40,16 +48,16 @@ async def test_read_only_child_snapshot_excludes_side_effect_tools() -> None:
         turn_id="turn",
         items=(
             ContextItem(
-                item_type="message", item_id="message", source="test",
-                role="user", content="review",
+                item_type="message",
+                item_id="message",
+                source="test",
+                role="user",
+                content="review",
             ),
         ),
     )
 
     await loop.run(snapshot)
 
-    names = {
-        schema["function"]["name"]
-        for schema in provider.received_requests[0].tools
-    }
+    names = {schema["function"]["name"] for schema in provider.received_requests[0].tools}
     assert names == {"read_file"}

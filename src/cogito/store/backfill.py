@@ -108,17 +108,14 @@ class Backfill:
 
     def _get_progress(self, migration_version: int) -> dict[str, Any] | None:
         row = self._conn.execute(
-            "SELECT last_key, rows_processed FROM _backfill_progress "
-            "WHERE migration_version=?",
+            "SELECT last_key, rows_processed FROM _backfill_progress WHERE migration_version=?",
             (migration_version,),
         ).fetchone()
         if row is None:
             return None
         return {"last_key": row[0], "rows_processed": row[1]}
 
-    def _save_progress(
-        self, migration_version: int, last_key: str, rows_processed: int
-    ) -> None:
+    def _save_progress(self, migration_version: int, last_key: str, rows_processed: int) -> None:
         self._conn.execute(
             "INSERT INTO _backfill_progress "
             "(migration_version, last_key, rows_processed) VALUES (?, ?, ?) "

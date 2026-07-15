@@ -57,12 +57,12 @@ def parse_unified_diff(value: str) -> list[FilePatch]:
             continue
         if line.startswith("rename from "):
             current = current or FilePatch()
-            current.old_path = _clean_path(line[len("rename from "):].strip(), strip_prefix=False)
+            current.old_path = _clean_path(line[len("rename from ") :].strip(), strip_prefix=False)
             index += 1
             continue
         if line.startswith("rename to "):
             current = current or FilePatch()
-            current.new_path = _clean_path(line[len("rename to "):].strip(), strip_prefix=False)
+            current.new_path = _clean_path(line[len("rename to ") :].strip(), strip_prefix=False)
             index += 1
             continue
         if line.startswith("--- "):
@@ -93,8 +93,11 @@ def parse_unified_diff(value: str) -> list[FilePatch]:
                     break
                 index += 1
             hunk = Hunk(
-                int(match.group(1)), int(match.group(2) or "1"),
-                int(match.group(3)), int(match.group(4) or "1"), tuple(body),
+                int(match.group(1)),
+                int(match.group(2) or "1"),
+                int(match.group(3)),
+                int(match.group(4) or "1"),
+                tuple(body),
             )
             _validate_hunk_counts(hunk)
             current.hunks.append(hunk)

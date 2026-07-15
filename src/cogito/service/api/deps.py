@@ -7,6 +7,7 @@
 
 本模块 store-free：SQLite 连接由 runtime.open_conn() 在需要时打开。
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -22,11 +23,13 @@ from cogito.config import Config
 @dataclass
 class ConnProvider:
     """应用级共享：配置 + SQLite 连接工厂 + 恢复计数。"""
+
     config: Config
     recovery_counts: dict[str, int]
 
     def open_conn(self) -> sqlite3.Connection:
         from cogito.store.connection import get_connection
+
         return get_connection(self.config.resolve_db_path())
 
 

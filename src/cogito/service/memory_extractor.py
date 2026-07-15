@@ -15,11 +15,11 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Any
 
+from cogito.domain.memory import MemoryItem
 from cogito.model.contracts import (
     FinishReason,
     ModelRequest,
 )
-from cogito.domain.memory import MemoryItem
 from cogito.model.router import ModelRouter
 from cogito.service.memory_service import SqliteMemoryService
 
@@ -39,6 +39,7 @@ class MemoryExtractionWriteError(RuntimeError):
 
     整个提取窗口应视为失败：事务回滚、watermark 不推进、下次重试该窗口。
     """
+
 
 # 最小消息数阈值，低于此数量不提取
 EXTRACT_MIN_MESSAGES = 4
@@ -96,6 +97,7 @@ class ExtractMessage:
     相比旧的 {role, dict}，新版本携带 message_id 和 receive_sequence，
     使提取来源可精确追溯。
     """
+
     message_id: str
     role: str
     content: str
@@ -107,6 +109,7 @@ class ExtractMessage:
 @dataclass
 class ExtractionContext:
     """单次提取任务的上下文（PLAN-13 P13-02）。"""
+
     session_id: str
     principal_id: str
     from_sequence: int = 0
@@ -125,11 +128,16 @@ class ExtractionTriggerPolicy:
 
     替代旧的固定"至少 4 条消息"阈值。
     """
+
     min_new_messages: int = 4
     max_window_messages: int = 50
-    enabled_triggers: set[str] = field(default_factory=lambda: {
-        "explicit_remember", "turn_completed", "session_closed",
-    })
+    enabled_triggers: set[str] = field(
+        default_factory=lambda: {
+            "explicit_remember",
+            "turn_completed",
+            "session_closed",
+        }
+    )
 
     def should_trigger(
         self,
@@ -178,7 +186,9 @@ def request_extraction(
     from cogito.store.watermark_repo import PROC_MEMORY_EXTRACT, WatermarkRepository
 
     watermark = WatermarkRepository(conn).get(
-        PROC_MEMORY_EXTRACT, conversation_id, session_id,
+        PROC_MEMORY_EXTRACT,
+        conversation_id,
+        session_id,
     )
     from_seq = (watermark.processed_upto_sequence + 1) if watermark else 1
     seq_row = conn.execute(
@@ -193,7 +203,8 @@ def request_extraction(
         return True
     # 完整：显式传入 is_explicit_remember，使 explicit 触发不受消息数阈值限制
     if not ExtractionTriggerPolicy().should_trigger(
-        trigger_type=trigger_type, new_message_count=new_count,
+        trigger_type=trigger_type,
+        new_message_count=new_count,
         is_explicit_remember=is_explicit_remember,
     ):
         return True
@@ -213,7 +224,11 @@ def request_extraction(
     }
     # 完整：幂等键加入 trigger type（turn_completed / session_closed / explicit_remember 独立）
     key = make_idempotency_key(
-        "memory.extract", conversation_id, session_id, from_seq, to_seq,
+        "memory.extract",
+        conversation_id,
+        session_id,
+        from_seq,
+        to_seq,
         f"{EXTRACTOR_VERSION}:{trigger_type}",
     )
     try:
@@ -231,15 +246,17 @@ def request_extraction(
     # OPS-04 完整：记录 extraction completed（Task 已创建）
     _metrics().record_extraction_completed()
 
-    OutboxRepository(conn).insert(DomainEvent(
-        event_type="MemoryExtractionRequested",
-        aggregate_type="memory_extract",
-        aggregate_id=key,
-        aggregate_version=1,
-        payload=task_payload,
-        payload_ref=json.dumps(task_payload, ensure_ascii=False),
-        origin=f"{trigger_type}_consumer",
-    ))
+    OutboxRepository(conn).insert(
+        DomainEvent(
+            event_type="MemoryExtractionRequested",
+            aggregate_type="memory_extract",
+            aggregate_id=key,
+            aggregate_version=1,
+            payload=task_payload,
+            payload_ref=json.dumps(task_payload, ensure_ascii=False),
+            origin=f"{trigger_type}_consumer",
+        )
+    )
     return True
 
 
@@ -288,8 +305,11 @@ class MemoryExtractor:
             return []
 
         if len(messages) < EXTRACT_MIN_MESSAGES:
-            _LOGGER.debug("Too few messages (%d < %d), skipping extraction",
-                          len(messages), EXTRACT_MIN_MESSAGES)
+            _LOGGER.debug(
+                "Too few messages (%d < %d), skipping extraction",
+                len(messages),
+                EXTRACT_MIN_MESSAGES,
+            )
             return []
 
         # 构建提取上下文（PLAN-13 P13-02）
@@ -338,7 +358,8 @@ class MemoryExtractor:
         return written
 
     async def _call_extractor(
-        self, conversation_text: str,
+        self,
+        conversation_text: str,
     ) -> list[dict[str, Any]]:
         """调用模型提取候选（D1: 使用 response_schema 结构化输出）。"""
         try:
@@ -358,7 +379,13 @@ class MemoryExtractor:
                                 "properties": {
                                     "kind": {
                                         "type": "string",
-                                        "enum": ["fact", "preference", "constraint", "goal", "episode"],
+                                        "enum": [
+                                            "fact",
+                                            "preference",
+                                            "constraint",
+                                            "goal",
+                                            "episode",
+                                        ],
                                     },
                                     "subject": {"type": "string"},
                                     "predicate": {"type": "string"},
@@ -381,8 +408,12 @@ class MemoryExtractor:
                                     "scope_type": {
                                         "type": "string",
                                         "enum": [
-                                            "", "global", "user",
-                                            "conversation", "session", "task",
+                                            "",
+                                            "global",
+                                            "user",
+                                            "conversation",
+                                            "session",
+                                            "task",
                                         ],
                                     },
                                     "scope_id": {"type": "string"},
@@ -439,7 +470,7 @@ class MemoryExtractor:
             try:
                 start = text.index("{")
                 end = text.rindex("}")
-                data = json.loads(text[start:end + 1])
+                data = json.loads(text[start : end + 1])
             except (ValueError, json.JSONDecodeError) as e:
                 raise MemoryExtractionParseError(
                     f"failed to parse extraction output as JSON: {e}"
@@ -461,7 +492,9 @@ class MemoryExtractor:
         return candidates
 
     def _validate_evidence(
-        self, c: dict[str, Any], allowed_ids: set[str],
+        self,
+        c: dict[str, Any],
+        allowed_ids: set[str],
     ) -> list[dict[str, Any]]:
         """校验 evidence_message_ids 必须属于当前 session 窗口。
 
@@ -476,15 +509,15 @@ class MemoryExtractor:
             if mid in allowed_ids:
                 validated.append({"message_id": mid, "trust_label": "verified"})
             else:
-                _LOGGER.debug(
-                    "Evidence id %s not in allowed window, filtered", mid
-                )
+                _LOGGER.debug("Evidence id %s not in allowed window, filtered", mid)
         return validated
 
     def _write_candidate(
-        self, c: dict[str, Any], ctx: ExtractionContext,
+        self,
+        c: dict[str, Any],
+        ctx: ExtractionContext,
         evidence: list[dict[str, Any]] | None = None,
-    ) -> "MemoryItem | None":
+    ) -> MemoryItem | None:
         """将一条候选写入 memory_items（D4 + PLAN-13 精确来源）。
 
         - explicit_user_statement → confirmed，覆盖旧推断

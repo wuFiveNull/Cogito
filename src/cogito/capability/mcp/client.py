@@ -393,12 +393,14 @@ class MCPClient:
 
         sampling_callback = None
         if self._sampling_callback is not None and self._config.allow_sampling:
+
             async def sampling_callback(context: Any, params: Any) -> Any:
                 return await self._sampling_callback(
                     context,
                     params,
                     self._sampling_scope.get(),
                 )
+
         return session_type(
             read,
             write,
@@ -460,8 +462,11 @@ def _secure_httpx_client_factory(
     import httpx
 
     return httpx.AsyncClient(
-        headers=headers, timeout=timeout, auth=auth,
-        follow_redirects=False, trust_env=False,
+        headers=headers,
+        timeout=timeout,
+        auth=auth,
+        follow_redirects=False,
+        trust_env=False,
     )
 
 

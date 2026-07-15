@@ -23,6 +23,7 @@ def test_reject_pending(client):
     import os
     import sqlite3
     import tempfile
+
     # 直接通过一个已有 pending 测试：先验证 404
     r = client.post("/api/commands/reject", json={"approval_id": "missing"})
     assert r.status_code == 404
@@ -122,7 +123,9 @@ def test_delete_sessions_by_conversation(client):
     assert body["details"]["deleted_count"] >= 1
 
     # 再次删除应该 failed（没有活跃 session 了）
-    r2 = client.post("/api/commands/delete-sessions-by-conversation", json={"conversation_id": "c1"})
+    r2 = client.post(
+        "/api/commands/delete-sessions-by-conversation", json={"conversation_id": "c1"}
+    )
     assert r2.json()["status"] == "failed"
 
     # query 不返回
@@ -157,8 +160,6 @@ def test_fetch_proactive_data_is_fixed_to_aihot_and_idempotent(client):
     assert second_details["poll_task_id"] == first_details["poll_task_id"]
     assert second_details["idempotent"] is True
 
-    run = client.get(
-        f"/api/proactive/fetch-runs/{first_details['poll_task_id']}"
-    )
+    run = client.get(f"/api/proactive/fetch-runs/{first_details['poll_task_id']}")
     assert run.status_code == 200
     assert run.json()["poll_status"] == "queued"

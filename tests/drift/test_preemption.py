@@ -5,6 +5,7 @@
 - 安全点 write_checkpoint；恢复前版本校验
 - config/skill 版本变化 → 校验不通过
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -66,40 +67,52 @@ class TestPreemptionSignal:
 class TestShouldPreemptStep:
     def test_lease_invalid(self, memory_db):
         preempted, reason = should_preempt_step(
-            memory_db, principal_id="owner", lease_valid=False, budget_remaining=10)
+            memory_db, principal_id="owner", lease_valid=False, budget_remaining=10
+        )
         assert preempted is True
         assert "lease_lost" in reason
 
     def test_preemption_signal(self, memory_db):
         request_preemption(memory_db, "owner", "turn")
         preempted, reason = should_preempt_step(
-            memory_db, principal_id="owner", lease_valid=True, budget_remaining=10)
+            memory_db, principal_id="owner", lease_valid=True, budget_remaining=10
+        )
         assert preempted is True
         assert "preempted" in reason
 
     def test_active_turn(self, memory_db):
         preempted, reason = should_preempt_step(
-            memory_db, principal_id="owner", lease_valid=True,
-            budget_remaining=10, active_normal_turns=1)
+            memory_db,
+            principal_id="owner",
+            lease_valid=True,
+            budget_remaining=10,
+            active_normal_turns=1,
+        )
         assert preempted is True
         assert "active_turn" in reason
 
     def test_priority_backlog(self, memory_db):
         preempted, reason = should_preempt_step(
-            memory_db, principal_id="owner", lease_valid=True,
-            budget_remaining=10, priority_backlog=5)
+            memory_db,
+            principal_id="owner",
+            lease_valid=True,
+            budget_remaining=10,
+            priority_backlog=5,
+        )
         assert preempted is True
         assert "priority_backlog" in reason
 
     def test_budget_exhausted(self, memory_db):
         preempted, reason = should_preempt_step(
-            memory_db, principal_id="owner", lease_valid=True, budget_remaining=0)
+            memory_db, principal_id="owner", lease_valid=True, budget_remaining=0
+        )
         assert preempted is True
         assert "budget_exhausted" in reason
 
     def test_all_clear(self, memory_db):
         preempted, reason = should_preempt_step(
-            memory_db, principal_id="owner", lease_valid=True, budget_remaining=5)
+            memory_db, principal_id="owner", lease_valid=True, budget_remaining=5
+        )
         assert preempted is False
         assert reason == ""
 
@@ -113,30 +126,45 @@ class TestCheckpoint:
         memory_db.execute(
             "INSERT INTO tasks (task_id, task_type, status, priority, idempotency_key, created_at) "
             "VALUES (?,?,?,?,?,?)",
-            ("t-cp", "drift.run", "running", 5, "idemp-cp", int(time.time()*1000)),
+            ("t-cp", "drift.run", "running", 5, "idemp-cp", int(time.time() * 1000)),
         )
         memory_db.execute(
             "INSERT INTO drift_runs "
             "(drift_run_id, task_id, principal_id, skill_name, skill_version, "
             " status, admission_snapshot_json, created_at) "
             "VALUES (?,?,?,?,?,?,?,?)",
-            ("dr-cp", "t-cp", "owner", "s", "1.0", "running",
-             "{}", int(time.time()*1000)),
+            ("dr-cp", "t-cp", "owner", "s", "1.0", "running", "{}", int(time.time() * 1000)),
         )
         memory_db.execute(
             "INSERT INTO task_attempts "
             "(task_attempt_id, task_id, attempt_no, status, lease_owner, "
             " lease_version, lease_expires_at, started_at) "
             "VALUES (?,?,?,?,?,?,?,?)",
-            ("att-1", "t-cp", 1, "running", "wkr", 1, int(time.time()*1000),
-             int(time.time()*1000)),
+            (
+                "att-1",
+                "t-cp",
+                1,
+                "running",
+                "wkr",
+                1,
+                int(time.time() * 1000),
+                int(time.time() * 1000),
+            ),
         )
         memory_db.commit()
         ck_json = write_checkpoint(
-            memory_db, drift_run_id="dr-cp", task_id="t-cp",
-            attempt_id="att-1", skill_name="s", skill_version="1.0",
-            step_index=3, cursor={"i": 5}, completed_actions=["a", "b"],
-            budget_used={"tool_calls": 2}, config_version_id="cfg-1")
+            memory_db,
+            drift_run_id="dr-cp",
+            task_id="t-cp",
+            attempt_id="att-1",
+            skill_name="s",
+            skill_version="1.0",
+            step_index=3,
+            cursor={"i": 5},
+            completed_actions=["a", "b"],
+            budget_used={"tool_calls": 2},
+            config_version_id="cfg-1",
+        )
         data = json.loads(ck_json)
         assert data["schema_version"] == 1
         assert data["step_index"] == 3
@@ -151,10 +179,12 @@ class TestCheckpoint:
         ck_row = memory_db.execute(
             "SELECT payload_json, payload_hash "
             "FROM task_checkpoints WHERE task_id='t-cp' "
-            "ORDER BY created_at DESC LIMIT 1").fetchone()
+            "ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
         assert ck_row is not None, "必须写入 task_checkpoints 行"
         assert json.loads(ck_row["payload_json"])["step_index"] == 3
         from cogito.store.task_checkpoint_repo import _hash_json
+
         assert ck_row["payload_hash"] == _hash_json(ck_row["payload_json"])
         # 真实 attempt 被绑定：task_attempts.checkpoint_ref 指向该 checkpoint
         att_row = memory_db.execute(
@@ -168,34 +198,42 @@ class TestCheckpoint:
         assert task_row["checkpoint_ref"] == "drift-check:dr-cp:3"
 
     def test_validate_compatible(self, memory_db):
-        ck = json.dumps({
-            "schema_version": 1, "config_version_id": "cfg-1",
-            "skill_version": "1.0", "step_index": 2, "cursor": {}})
+        ck = json.dumps(
+            {
+                "schema_version": 1,
+                "config_version_id": "cfg-1",
+                "skill_version": "1.0",
+                "step_index": 2,
+                "cursor": {},
+            }
+        )
         ok, reason = validate_checkpoint_for_resume(
-            ck, current_config_version_id="cfg-1", current_skill_version="1.0")
+            ck, current_config_version_id="cfg-1", current_skill_version="1.0"
+        )
         assert ok is True
 
     def test_validate_config_changed(self, memory_db):
-        ck = json.dumps({
-            "schema_version": 1, "config_version_id": "cfg-old",
-            "skill_version": "1.0"})
+        ck = json.dumps(
+            {"schema_version": 1, "config_version_id": "cfg-old", "skill_version": "1.0"}
+        )
         ok, reason = validate_checkpoint_for_resume(
-            ck, current_config_version_id="cfg-new", current_skill_version="1.0")
+            ck, current_config_version_id="cfg-new", current_skill_version="1.0"
+        )
         assert ok is False
         assert "config_version" in reason
 
     def test_validate_skill_changed(self, memory_db):
-        ck = json.dumps({
-            "schema_version": 1, "config_version_id": "cfg-1",
-            "skill_version": "1.0"})
+        ck = json.dumps({"schema_version": 1, "config_version_id": "cfg-1", "skill_version": "1.0"})
         ok, _ = validate_checkpoint_for_resume(
-            ck, current_config_version_id="cfg-1", current_skill_version="2.0")
+            ck, current_config_version_id="cfg-1", current_skill_version="2.0"
+        )
         assert ok is False
 
     def test_validate_schema_incompatible(self, memory_db):
         ck = json.dumps({"schema_version": 99})
         ok, _ = validate_checkpoint_for_resume(
-            ck, current_config_version_id="cfg-1", current_skill_version="1.0")
+            ck, current_config_version_id="cfg-1", current_skill_version="1.0"
+        )
         assert ok is False
 
 
@@ -208,11 +246,17 @@ class TestShouldPreemptDynamicQueries:
         memory_db.execute(
             "INSERT INTO turns (turn_id,status,input_message_id,session_id,"
             " created_at) VALUES (?,?,?,?,?)",
-            ("tr-1", "running", "m-1", "s-1", int(time.time()*1000)))
+            ("tr-1", "running", "m-1", "s-1", int(time.time() * 1000)),
+        )
         memory_db.commit()
         preempted, reason = should_preempt_step(
-            memory_db, principal_id="o", lease_valid=True, budget_remaining=8,
-            active_normal_turns=None, priority_backlog=None)
+            memory_db,
+            principal_id="o",
+            lease_valid=True,
+            budget_remaining=8,
+            active_normal_turns=None,
+            priority_backlog=None,
+        )
         assert preempted is True
         assert reason == "active_turn"
 
@@ -221,27 +265,42 @@ class TestShouldPreemptDynamicQueries:
         memory_db.execute(
             "INSERT INTO tasks (task_id,task_type,status,priority,"
             " idempotency_key, created_at) VALUES (?,?,?,?,?,?)",
-            ("tk-high", "connector.poll", "queued", 80,
-             "id-hi", int(time.time()*1000)))
+            ("tk-high", "connector.poll", "queued", 80, "id-hi", int(time.time() * 1000)),
+        )
         memory_db.commit()
         preempted, reason = should_preempt_step(
-            memory_db, principal_id="o", lease_valid=True, budget_remaining=8,
-            active_normal_turns=0, priority_backlog=None)
+            memory_db,
+            principal_id="o",
+            lease_valid=True,
+            budget_remaining=8,
+            active_normal_turns=0,
+            priority_backlog=None,
+        )
         assert preempted is True
         assert reason == "priority_backlog"
 
     def test_no_preempt_when_db_empty(self, memory_db):
         """DB 无 active turns + 无 backlog + lease valid + budget > 0 → 不抢占。"""
         preempted, reason = should_preempt_step(
-            memory_db, principal_id="o", lease_valid=True, budget_remaining=8,
-            active_normal_turns=None, priority_backlog=None)
+            memory_db,
+            principal_id="o",
+            lease_valid=True,
+            budget_remaining=8,
+            active_normal_turns=None,
+            priority_backlog=None,
+        )
         assert preempted is False
         assert reason == ""
 
     def test_explicit_arguments_still_honored(self, memory_db):
         """显式传入非 None 值时覆盖 DB 查询 (测试/特殊场景仍可用)。"""
         preempted, reason = should_preempt_step(
-            memory_db, principal_id="o", lease_valid=True, budget_remaining=8,
-            active_normal_turns=3, priority_backlog=0)
+            memory_db,
+            principal_id="o",
+            lease_valid=True,
+            budget_remaining=8,
+            active_normal_turns=3,
+            priority_backlog=0,
+        )
         assert preempted is True
         assert reason == "active_turn"

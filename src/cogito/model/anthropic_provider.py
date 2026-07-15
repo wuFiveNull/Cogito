@@ -110,11 +110,13 @@ class AnthropicProvider(ModelProvider):
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
         if request.stream:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.invalid_request,
-                message="Streaming is not supported in generate(); use stream()",
-                retryable=False,
-            ))
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.invalid_request,
+                    message="Streaming is not supported in generate(); use stream()",
+                    retryable=False,
+                )
+            )
 
         payload = self._build_payload(request)
 
@@ -125,29 +127,35 @@ class AnthropicProvider(ModelProvider):
                 headers=self._auth_headers(),
             )
         except httpx.TimeoutException as e:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.timeout,
-                message="Request timed out",
-                retryable=True,
-                original_type="timeout",
-                original_message=str(e),
-            )) from e
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.timeout,
+                    message="Request timed out",
+                    retryable=True,
+                    original_type="timeout",
+                    original_message=str(e),
+                )
+            ) from e
         except httpx.ConnectError as e:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.connection,
-                message="Connection error",
-                retryable=True,
-                original_type="connection",
-                original_message=str(e),
-            )) from e
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.connection,
+                    message="Connection error",
+                    retryable=True,
+                    original_type="connection",
+                    original_message=str(e),
+                )
+            ) from e
         except httpx.RequestError as e:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.connection,
-                message="Request error",
-                retryable=True,
-                original_type="request_error",
-                original_message=str(e),
-            )) from e
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.connection,
+                    message="Request error",
+                    retryable=True,
+                    original_type="request_error",
+                    original_message=str(e),
+                )
+            ) from e
 
         if response.status_code != 200:
             raise self._map_error(response)
@@ -155,13 +163,15 @@ class AnthropicProvider(ModelProvider):
         try:
             data = response.json()
         except (json.JSONDecodeError, ValueError) as e:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.provider_internal,
-                message="Invalid response from provider",
-                retryable=False,
-                original_type="invalid_json",
-                original_message=str(e),
-            )) from e
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.provider_internal,
+                    message="Invalid response from provider",
+                    retryable=False,
+                    original_type="invalid_json",
+                    original_message=str(e),
+                )
+            ) from e
 
         return self._parse_response(request.request_id, data, request=request)
 
@@ -172,11 +182,13 @@ class AnthropicProvider(ModelProvider):
         content_block_stop → message_delta → message_stop（ping 忽略）。
         """
         if not request.stream:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.invalid_request,
-                message="stream() requires request.stream=True",
-                retryable=False,
-            ))
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.invalid_request,
+                    message="stream() requires request.stream=True",
+                    retryable=False,
+                )
+            )
 
         payload = self._build_payload(request, stream=True)
         headers = self._auth_headers()
@@ -203,7 +215,7 @@ class AnthropicProvider(ModelProvider):
                     line = line.strip()
                     if not line.startswith("data:"):
                         continue
-                    data_str = line[len("data:"):].strip()
+                    data_str = line[len("data:") :].strip()
                     if not data_str:
                         continue
                     try:
@@ -241,11 +253,13 @@ class AnthropicProvider(ModelProvider):
                                     request_id=request_id,
                                     provider_request_id="",
                                     model_id=self._model,
-                                    content_parts=(ContentPart(
-                                        part_type=ContentPartType.text,
-                                        text=text,
-                                        trust_label="internal",
-                                    ),),
+                                    content_parts=(
+                                        ContentPart(
+                                            part_type=ContentPartType.text,
+                                            text=text,
+                                            trust_label="internal",
+                                        ),
+                                    ),
                                     tool_calls=(),
                                     finish_reason=FinishReason.stop,
                                     usage=Usage(),
@@ -275,7 +289,8 @@ class AnthropicProvider(ModelProvider):
                                         "type": "function",
                                         "function": {
                                             "name": self._tool_name_map.get(
-                                                tb["name"], tb["name"],
+                                                tb["name"],
+                                                tb["name"],
                                             ),
                                             "arguments": tb["input_json"] or "{}",
                                         },
@@ -296,29 +311,35 @@ class AnthropicProvider(ModelProvider):
                         break
 
         except httpx.TimeoutException as e:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.timeout,
-                message="Stream timed out",
-                retryable=True,
-                original_type="timeout",
-                original_message=str(e),
-            )) from e
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.timeout,
+                    message="Stream timed out",
+                    retryable=True,
+                    original_type="timeout",
+                    original_message=str(e),
+                )
+            ) from e
         except httpx.ConnectError as e:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.connection,
-                message="Connection error",
-                retryable=True,
-                original_type="connection",
-                original_message=str(e),
-            )) from e
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.connection,
+                    message="Connection error",
+                    retryable=True,
+                    original_type="connection",
+                    original_message=str(e),
+                )
+            ) from e
         except httpx.RequestError as e:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.connection,
-                message="Request error",
-                retryable=True,
-                original_type="request_error",
-                original_message=str(e),
-            )) from e
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.connection,
+                    message="Request error",
+                    retryable=True,
+                    original_type="request_error",
+                    original_message=str(e),
+                )
+            ) from e
 
     def capabilities(self) -> ModelCapabilities:
         return ModelCapabilities(
@@ -334,6 +355,7 @@ class AnthropicProvider(ModelProvider):
 
     async def health(self) -> HealthStatus:
         import time
+
         now = time.monotonic()
         if self._health_cache is not None and now - self._health_cache[1] < self.HEALTH_CACHE_TTL_S:
             return self._health_cache[0]
@@ -369,6 +391,7 @@ class AnthropicProvider(ModelProvider):
 
     def close(self) -> None:
         import asyncio
+
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -412,14 +435,18 @@ class AnthropicProvider(ModelProvider):
 
             if role == "tool":
                 # OpenAI role=tool → Anthropic role=user + tool_result
-                messages.append({
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": msg.get("tool_call_id", ""),
-                        "content": content or "",
-                    }],
-                })
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": msg.get("tool_call_id", ""),
+                                "content": content or "",
+                            }
+                        ],
+                    }
+                )
                 continue
 
             # user / assistant：转换 content block
@@ -450,12 +477,14 @@ class AnthropicProvider(ModelProvider):
                         inp = json.loads(fn.get("arguments", "{}"))
                     except (json.JSONDecodeError, TypeError):
                         inp = {}
-                    blocks.append({
-                        "type": "tool_use",
-                        "id": tc.get("id", ""),
-                        "name": safe_name,
-                        "input": inp,
-                    })
+                    blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": tc.get("id", ""),
+                            "name": safe_name,
+                            "input": inp,
+                        }
+                    )
                 entry["content"] = blocks
 
             messages.append(entry)
@@ -489,7 +518,9 @@ class AnthropicProvider(ModelProvider):
         return payload
 
     def _apply_response_format(
-        self, payload: dict[str, Any], request: ModelRequest,
+        self,
+        payload: dict[str, Any],
+        request: ModelRequest,
     ) -> None:
         """将 response_schema / response_format 映射到 Anthropic 结构化输出。
 
@@ -518,29 +549,35 @@ class AnthropicProvider(ModelProvider):
         # 避免重复注入
         existing = [t.get("name") for t in tools]
         if tool_name not in existing:
-            tools.append({
-                "name": tool_name,
-                "description": "Respond with a single JSON object matching the schema.",
-                "input_schema": schema,
-            })
+            tools.append(
+                {
+                    "name": tool_name,
+                    "description": "Respond with a single JSON object matching the schema.",
+                    "input_schema": schema,
+                }
+            )
             payload["tools"] = tools
         payload["tool_choice"] = {"type": "tool", "name": tool_name}
 
     def _parse_response(
-        self, request_id: str, data: dict[str, Any],
+        self,
+        request_id: str,
+        data: dict[str, Any],
         request: ModelRequest | None = None,
     ) -> ModelResponse:
         try:
             content_blocks = data.get("content", [])
             stop_reason_str = data.get("stop_reason", "end_turn")
         except (AttributeError,) as e:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.invalid_request,
-                message="Invalid response structure",
-                retryable=False,
-                original_type="parse_error",
-                original_message=str(e),
-            )) from e
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.invalid_request,
+                    message="Invalid response structure",
+                    retryable=False,
+                    original_type="parse_error",
+                    original_message=str(e),
+                )
+            ) from e
 
         finish_reason = _normalize_stop_reason(stop_reason_str)
 
@@ -564,11 +601,13 @@ class AnthropicProvider(ModelProvider):
                     args = "{}"
                 if request and request.tools:
                     _revalidate_tool_arguments(canonical_name, args, request.tools)
-                tool_calls.append({
-                    "id": block.get("id", ""),
-                    "type": "function",
-                    "function": {"name": canonical_name, "arguments": args},
-                })
+                tool_calls.append(
+                    {
+                        "id": block.get("id", ""),
+                        "type": "function",
+                        "function": {"name": canonical_name, "arguments": args},
+                    }
+                )
 
         # Usage：含 prompt caching 字段
         usage_data = data.get("usage", {})
@@ -578,11 +617,13 @@ class AnthropicProvider(ModelProvider):
             cached_tokens=usage_data.get("cache_read_input_tokens", 0),
         )
 
-        parts = (ContentPart(
-            part_type=ContentPartType.text,
-            text="".join(text_parts),
-            trust_label="internal",
-        ),)
+        parts = (
+            ContentPart(
+                part_type=ContentPartType.text,
+                text="".join(text_parts),
+                trust_label="internal",
+            ),
+        )
 
         return ModelResponse(
             request_id=request_id,
@@ -649,14 +690,16 @@ class AnthropicProvider(ModelProvider):
         }
         message = messages.get(category, f"Anthropic error: {error_type}")
 
-        return ModelProviderError(ErrorEnvelope(
-            category=category,
-            message=message,
-            retryable=retryable,
-            retry_after=retry_after,
-            original_type=error_type or f"http_{status}",
-            original_message=body[:500],
-        ))
+        return ModelProviderError(
+            ErrorEnvelope(
+                category=category,
+                message=message,
+                retryable=retryable,
+                retry_after=retry_after,
+                original_type=error_type or f"http_{status}",
+                original_message=body[:500],
+            )
+        )
 
 
 # ── 模块级辅助函数 ──────────────────────────────────────────────────────────
@@ -719,7 +762,8 @@ def _to_anthropic_content_block(block: Any) -> dict[str, Any] | None:
 
 
 def _openai_tool_to_anthropic(
-    tool: dict[str, Any], name_map: dict[str, str],
+    tool: dict[str, Any],
+    name_map: dict[str, str],
 ) -> dict[str, Any]:
     """将 OpenAI 函数工具 Schema 转为 Anthropic 工具 Schema。
 
@@ -755,11 +799,13 @@ def _revalidate_tool_arguments(
     try:
         args = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
     except (json.JSONDecodeError, TypeError):
-        raise ModelProviderError(ErrorEnvelope(
-            category=ErrorCategory.invalid_request,
-            message=f"Tool '{tool_name}': invalid arguments JSON from provider",
-            retryable=False,
-        ))
+        raise ModelProviderError(
+            ErrorEnvelope(
+                category=ErrorCategory.invalid_request,
+                message=f"Tool '{tool_name}': invalid arguments JSON from provider",
+                retryable=False,
+            )
+        )
 
     if not isinstance(args, dict):
         return
@@ -768,16 +814,20 @@ def _revalidate_tool_arguments(
     required = schema.get("required", [])
     for field in required:
         if field not in args:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.invalid_request,
-                message=f"Tool '{tool_name}': response missing required field '{field}'",
-                retryable=False,
-            ))
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.invalid_request,
+                    message=f"Tool '{tool_name}': response missing required field '{field}'",
+                    retryable=False,
+                )
+            )
     for key, value in args.items():
         prop = properties.get(key, {})
         if "enum" in prop and value not in prop["enum"]:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.invalid_request,
-                message=f"Tool '{tool_name}': response field '{key}' has invalid enum value",
-                retryable=False,
-            ))
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.invalid_request,
+                    message=f"Tool '{tool_name}': response field '{key}' has invalid enum value",
+                    retryable=False,
+                )
+            )

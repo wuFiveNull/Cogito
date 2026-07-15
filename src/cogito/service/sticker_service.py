@@ -59,7 +59,9 @@ class SqliteStickerService:
         session_id: str,
     ) -> dict[str, Any]:
         if not self._repo.is_accessible(
-            asset_id, principal_id=principal_id, session_id=session_id,
+            asset_id,
+            principal_id=principal_id,
+            session_id=session_id,
         ):
             return {"status": "denied", "error": "asset_access_denied"}
         asset = self._repo.get_asset(asset_id)
@@ -143,8 +145,14 @@ class SqliteStickerService:
             "INSERT OR IGNORE INTO payload_objects "
             "(payload_ref,sha256,content_type,size,storage_path,created_at) "
             "VALUES (?,?,?,?,?,?)",
-            (payload.payload_id, payload.sha256, sniffed,
-             payload.size_bytes, payload.storage_uri, now_ms()),
+            (
+                payload.payload_id,
+                payload.sha256,
+                sniffed,
+                payload.size_bytes,
+                payload.storage_uri,
+                now_ms(),
+            ),
         )
         self._conn.commit()
         return asset
@@ -159,7 +167,9 @@ class SqliteStickerService:
         session_id: str,
     ) -> dict[str, Any]:
         if not self._repo.is_accessible(
-            sticker_id, principal_id=principal_id, session_id=session_id,
+            sticker_id,
+            principal_id=principal_id,
+            session_id=session_id,
         ):
             return {"status": "denied", "error": "asset_access_denied"}
         asset = self._repo.get_sticker(sticker_id)
@@ -180,28 +190,33 @@ class SqliteStickerService:
             sender_principal_id="agent",
             role=MessageRole.assistant,
             direction=MessageDirection.outbound,
-            content_parts=[ContentPart(
-                content_type="image",
-                payload_ref=asset.payload_ref,
-                size=asset.size_bytes,
-                sha256=asset.sha256,
-                metadata={"mime": asset.mime_type, "name": asset.sticker_name or "sticker"},
-                trust_label="internal",
-            )],
+            content_parts=[
+                ContentPart(
+                    content_type="image",
+                    payload_ref=asset.payload_ref,
+                    size=asset.size_bytes,
+                    sha256=asset.sha256,
+                    metadata={"mime": asset.mime_type, "name": asset.sticker_name or "sticker"},
+                    trust_label="internal",
+                )
+            ],
         )
         # Persist the outbound message directly (bypasses InboundService).
         from cogito.store.repositories import MessageRepository
+
         MessageRepository(self._conn).insert(message)
         for part in message.content_parts:
             MessageRepository(self._conn).insert_content_part(part, message.message_id)
         self._conn.commit()
 
         from cogito.service.delivery_service import DeliveryRequest
+
         req = DeliveryRequest(
             target=target["target_snapshot"],
             content_ref=message.message_id,
         )
         import asyncio
+
         try:
             asyncio.get_running_loop()
             return {"status": "error", "error": "use_async_context_for_delivery"}
@@ -247,7 +262,9 @@ class SqliteStickerService:
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         return self._repo.list_stickers(
-            principal_id=principal_id, tag=tag, limit=limit,
+            principal_id=principal_id,
+            tag=tag,
+            limit=limit,
         )
 
 

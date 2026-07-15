@@ -4,11 +4,13 @@
 Diff 分类：added、modified、unchanged、deleted。
 级联规则：modified → 旧 stale + 新 active；deleted → tombstone + 撤销检索。
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import sqlite3
+
 from cogito.service.knowledge.service import KnowledgeService
 
 _LOGGER = logging.getLogger("cogito.knowledge.sync")
@@ -70,19 +72,23 @@ def enqueue_knowledge_sync_source(
     elif make_payload_store is not None:
         # 正文 > threshold 必须写 PayloadStore；失败则抛异常不创建 Task
         store = make_payload_store(conn)
-        obj = store.put(raw_text.encode("utf-8"),
-                        content_type="text/plain; charset=utf-8",
-                        retention_class="hot")
+        obj = store.put(
+            raw_text.encode("utf-8"),
+            content_type="text/plain; charset=utf-8",
+            retention_class="hot",
+        )
         data["payload_ref"] = obj.payload_id
         data["content_length"] = len(raw_text)
     else:
         raise RuntimeError(
             f"knowledge payload store not configured but content is "
-            f"{len(raw_text.encode('utf-8'))} bytes (> {payload_threshold})")
+            f"{len(raw_text.encode('utf-8'))} bytes (> {payload_threshold})"
+        )
     # 完整：幂等键加入 content_hash，允许同一来源内容更新后重新摄取
     idem = f"knowledge.sync_source:{stable_source_id}:{content_hash or 'none'}"
     try:
         from cogito.service.task_service import SqliteTaskService
+
         task = SqliteTaskService(conn).create(
             "knowledge.sync_source",
             json.dumps(data, ensure_ascii=False),
@@ -96,13 +102,13 @@ def enqueue_knowledge_sync_source(
             return task.task_id
         return None
     except sqlite3.IntegrityError:
-        _LOGGER.debug(
-            "knowledge.sync_source already queued for %s", stable_source_id)
+        _LOGGER.debug("knowledge.sync_source already queued for %s", stable_source_id)
         return None
 
 
-def enqueue_knowledge_embed(conn: sqlite3.Connection, origin: str = "knowledge_ingest",
-                             embed_model: str = "") -> str | None:
+def enqueue_knowledge_embed(
+    conn: sqlite3.Connection, origin: str = "knowledge_ingest", embed_model: str = ""
+) -> str | None:
     """创建 durable knowledge.embed Task（PLAN-16 M4 KNOW-05 完整）。
 
     ingest 完成后调用，使 parse 后的 segment 经独立可恢复步骤进入 embedding。
@@ -112,6 +118,7 @@ def enqueue_knowledge_embed(conn: sqlite3.Connection, origin: str = "knowledge_i
     # PLAN-16 完整：去掉全局幂等键（embed_pending 天然幂等：WHERE embedding_status='pending'）
     try:
         from cogito.service.task_service import SqliteTaskService
+
         task = SqliteTaskService(conn).create(
             "knowledge.embed",
             json.dumps({"mode": "pending", "embed_model": embed_model}, ensure_ascii=False),
@@ -209,14 +216,17 @@ def delete_resource(
     - 幂等：重复删除返回 True
     """
     result = KnowledgeService(conn).delete_source(
-        stable_source_id=stable_source_id, principal_id=principal_id,
+        stable_source_id=stable_source_id,
+        principal_id=principal_id,
     )
     # PLAN-16 完整：不再内部 commit，由调用方（Task Handler）统一提交事务
     return result
 
 
 def _find_by_stable_id(
-    conn: sqlite3.Connection, stable_source_id: str, principal_id: str,
+    conn: sqlite3.Connection,
+    stable_source_id: str,
+    principal_id: str,
 ) -> dict | None:
     row = conn.execute(
         "SELECT resource_id, content_hash FROM knowledge_resources "
@@ -228,5 +238,3 @@ def _find_by_stable_id(
     if hasattr(row, "keys"):
         return dict(row)
     return {"resource_id": row[0], "content_hash": row[1]}
-
-

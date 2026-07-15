@@ -7,6 +7,7 @@
 只依赖 contracts.memory.MemoryWriter 端口。组合根负责把具体实现
 注入 writer (或 make_writer 工厂)。
 """
+
 from __future__ import annotations
 
 import logging
@@ -36,6 +37,7 @@ def _make_handler(
                     还会提交一个高优先级 context 提取 Task（PLAN-16 M1
                     explicit_remember 触发）。
     """
+
     async def handler(args: dict, ctx: ToolContext) -> str:
         """保存一个条目到长期记忆。"""
         kind = args.get("kind", "fact")
@@ -51,8 +53,7 @@ def _make_handler(
         principal_id = ctx.principal_id or ""
         if not principal_id:
             return (
-                "[remember_memory] Cannot save memory: "
-                "principal not available in current context."
+                "[remember_memory] Cannot save memory: principal not available in current context."
             )
 
         if not subject and not predicate and not value:
@@ -75,10 +76,7 @@ def _make_handler(
             w = writer
 
         if w is None:
-            return (
-                "[remember_memory] Cannot save memory: "
-                "memory writer not available."
-            )
+            return "[remember_memory] Cannot save memory: memory writer not available."
 
         try:
             memory = w.remember(
@@ -129,6 +127,7 @@ def _request_extraction_after_remember(task_svc: Any, ctx: ToolContext) -> None:
         return
     conn = task_svc.conn
     from cogito.service.memory_extractor import request_extraction
+
     try:
         request_extraction(
             conn,
@@ -224,7 +223,8 @@ def create_tool_def(
         },
         toolset=("core", "memory"),
         handler=_make_handler(
-            writer=writer, make_writer=make_writer,
+            writer=writer,
+            make_writer=make_writer,
             make_task_service=make_task_service,
         ),
         permissions=("memory.write",),

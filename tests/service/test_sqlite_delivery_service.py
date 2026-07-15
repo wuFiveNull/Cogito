@@ -3,6 +3,7 @@
 覆盖 BR-03 / BR-04 / BR-05 / BR-06 / BR-08 / BR-12 对应的本地状态机语义。
 Gateway 调用经 FakeGatewayClient 模拟。
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -15,7 +16,6 @@ from cogito.service.delivery_service import DeliveryRequest
 from cogito.service.sqlite_delivery_service import (
     GatewayClient,
     GatewayResult,
-    GatewayResult as _GR,
     SqliteDeliveryService,
     _uow,
 )
@@ -25,11 +25,15 @@ from cogito.store.migration import migrate
 class FakeGatewayClient:
     """测试用 GatewayClient：可配置 success / fail / unknown。"""
 
-    def __init__(self, *, status: str = "success",
-                 platform_message_id: str | None = None,
-                 error_code: str | None = None,
-                 retry_after_seconds: float | None = None,
-                 raises: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        status: str = "success",
+        platform_message_id: str | None = None,
+        error_code: str | None = None,
+        retry_after_seconds: float | None = None,
+        raises: bool = False,
+    ) -> None:
         self._status = status
         self._pmid = platform_message_id
         self._err = error_code
@@ -65,10 +69,12 @@ def clock() -> FakeClock:
 class TestEnqueue:
     async def test_enqueue_creates_pending(self, conn, clock) -> None:
         svc = SqliteDeliveryService(conn, FakeGatewayClient(), clock=clock)
-        ref = await svc.enqueue(DeliveryRequest(
-            target={"channel": "qq", "to": "owner"},
-            content_ref="mem://msg/1",
-        ))
+        ref = await svc.enqueue(
+            DeliveryRequest(
+                target={"channel": "qq", "to": "owner"},
+                content_ref="mem://msg/1",
+            )
+        )
         assert ref.delivery_id.startswith("del-")
         view = svc.get(ref.delivery_id)
         assert view is not None
@@ -77,12 +83,20 @@ class TestEnqueue:
     async def test_enqueue_with_idempotency_returns_existing(self, conn, clock) -> None:
         gw = FakeGatewayClient()
         svc = SqliteDeliveryService(conn, gw, clock=clock)
-        r1 = await svc.enqueue(DeliveryRequest(
-            target={}, content_ref="x", idempotency_key="idem-1",
-        ))
-        r2 = await svc.enqueue(DeliveryRequest(
-            target={}, content_ref="y", idempotency_key="idem-1",
-        ))
+        r1 = await svc.enqueue(
+            DeliveryRequest(
+                target={},
+                content_ref="x",
+                idempotency_key="idem-1",
+            )
+        )
+        r2 = await svc.enqueue(
+            DeliveryRequest(
+                target={},
+                content_ref="y",
+                idempotency_key="idem-1",
+            )
+        )
         assert r1.delivery_id == r2.delivery_id
         # 仅一条 delivery
         rows = conn.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0]
@@ -90,10 +104,13 @@ class TestEnqueue:
 
     async def test_enqueue_scheduled_status(self, conn, clock) -> None:
         svc = SqliteDeliveryService(conn, FakeGatewayClient(), clock=clock)
-        ref = await svc.enqueue(DeliveryRequest(
-            target={}, content_ref="x",
-            scheduled_at="2026-01-01T00:00:00+00:00",
-        ))
+        ref = await svc.enqueue(
+            DeliveryRequest(
+                target={},
+                content_ref="x",
+                scheduled_at="2026-01-01T00:00:00+00:00",
+            )
+        )
         view = svc.get(ref.delivery_id)
         assert view is not None and view.status == "scheduled"
 
@@ -173,9 +190,12 @@ class TestDeliverFlow:
     async def test_deliver_success_creates_confirmed_receipt(self, conn, clock) -> None:
         gw = FakeGatewayClient(status="success", platform_message_id="pmid-ok")
         svc = SqliteDeliveryService(conn, gw, clock=clock)
-        ref = await svc.enqueue(DeliveryRequest(
-            target={"channel": "qq"}, content_ref="hello",
-        ))
+        ref = await svc.enqueue(
+            DeliveryRequest(
+                target={"channel": "qq"},
+                content_ref="hello",
+            )
+        )
         lease = svc.lease_next("w1")
         assert lease is not None
         result = svc.deliver(lease, "w1")
@@ -191,9 +211,12 @@ class TestDeliverFlow:
     async def test_deliver_fail_creates_uncertain_receipt_when_unknown(self, conn, clock) -> None:
         gw = FakeGatewayClient(status="unknown")
         svc = SqliteDeliveryService(conn, gw, clock=clock)
-        ref = await svc.enqueue(DeliveryRequest(
-            target={"channel": "qq"}, content_ref="hello",
-        ))
+        ref = await svc.enqueue(
+            DeliveryRequest(
+                target={"channel": "qq"},
+                content_ref="hello",
+            )
+        )
         lease = svc.lease_next("w1")
         assert lease is not None
         result = svc.deliver(lease, "w1")

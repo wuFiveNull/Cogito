@@ -115,6 +115,7 @@ class OpenAICompatEmbeddingProvider:
     def _get_client(self):
         if self._client is None:
             from openai import OpenAI
+
             self._client = OpenAI(
                 api_key=self._api_key,
                 base_url=self._base_url,
@@ -148,7 +149,7 @@ class OpenAICompatEmbeddingProvider:
         loop = asyncio.get_event_loop()
         all_results: list[list[float]] = []
         for i in range(0, len(texts), self._max_batch_size):
-            batch = texts[i:i + self._max_batch_size]
+            batch = texts[i : i + self._max_batch_size]
             result = await loop.run_in_executor(None, self._embed_batch_sync, batch)
             all_results.extend(result)
 
@@ -169,8 +170,8 @@ class OpenAICompatEmbeddingProvider:
             return []
         # 在 executor 中运行同步 HTTP 调用，不阻塞 event loop
         try:
-            loop = asyncio.get_running_loop()
             import concurrent.futures
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 future = pool.submit(self._embed_many_sync_direct, texts)
                 return future.result()
@@ -181,7 +182,7 @@ class OpenAICompatEmbeddingProvider:
     def _embed_many_sync_direct(self, texts: list[str]) -> list[list[float]]:
         all_results: list[list[float]] = []
         for i in range(0, len(texts), self._max_batch_size):
-            batch = texts[i:i + self._max_batch_size]
+            batch = texts[i : i + self._max_batch_size]
             all_results.extend(self._embed_batch_sync(batch))
         return all_results
 
@@ -194,13 +195,16 @@ class OpenAICompatEmbeddingProvider:
         """
         try:
             resp = self._get_client().embeddings.create(
-                model=self._model, input=texts,
+                model=self._model,
+                input=texts,
             )
             vectors: list[list[float]] = []
             for item in resp.data:
                 raw = item.embedding
                 if isinstance(raw, str):
-                    import base64, struct
+                    import base64
+                    import struct
+
                     decoded = base64.b64decode(raw)
                     n = len(decoded) // 4
                     vec = list(struct.unpack(f">{n}f", decoded))
@@ -214,7 +218,8 @@ class OpenAICompatEmbeddingProvider:
             if self._dimensions and vectors and vectors[0] and len(vectors[0]) != self._dimensions:
                 _LOGGER.warning(
                     "Embedding dimension mismatch: expected %d, got %d",
-                    self._dimensions, len(vectors[0]),
+                    self._dimensions,
+                    len(vectors[0]),
                 )
 
             return vectors if vectors else [[] for _ in texts]

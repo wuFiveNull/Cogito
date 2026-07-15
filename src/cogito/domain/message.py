@@ -162,7 +162,9 @@ class Message:
             reply_route=data.get("reply_route"),
             capability_snapshot=data.get("capability_snapshot"),
             created_at=datetime.fromisoformat(data["created_at"]),
-            deleted_at=datetime.fromisoformat(data["deleted_at"]) if data.get("deleted_at") else None,
+            deleted_at=datetime.fromisoformat(data["deleted_at"])
+            if data.get("deleted_at")
+            else None,
         )
 
     def __eq__(self, other: object) -> bool:
@@ -227,11 +229,15 @@ class MessageRevision:
             platform_edit_id=data.get("platform_edit_id", ""),
             platform_revision=data.get("platform_revision", 0),
             edited_at=datetime.fromisoformat(data["edited_at"]) if data.get("edited_at") else None,
-            observed_at=datetime.fromisoformat(data["observed_at"]) if data.get("observed_at") else None,
+            observed_at=datetime.fromisoformat(data["observed_at"])
+            if data.get("observed_at")
+            else None,
             editor_endpoint_id=data.get("editor_endpoint_id", ""),
             content_parts=[ContentPart.from_dict(p) for p in data.get("content_parts", [])],
             raw_payload_ref=data.get("raw_payload_ref"),
-            created_at=datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None,
+            created_at=datetime.fromisoformat(data["created_at"])
+            if data.get("created_at")
+            else None,
         )
 
     def __repr__(self) -> str:

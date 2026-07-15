@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """进程内端到端测试：不启动 uvicorn，直接在同一个 asyncio loop 里跑流水线。"""
 
 from __future__ import annotations
@@ -66,8 +65,8 @@ async def main():
             items_received.append(item)
             kind = item.get("kind")
             text = item.get("text", "")[:40]
-            print(f"  T+{(time.perf_counter()-t0)*1000:7.1f}ms  kind={kind:6s} text={text!r}")
-        except asyncio.TimeoutError:
+            print(f"  T+{(time.perf_counter() - t0) * 1000:7.1f}ms  kind={kind:6s} text={text!r}")
+        except TimeoutError:
             continue
 
     print(f"\n--- total queue items: {len(items_received)} ---")
@@ -77,7 +76,7 @@ async def main():
     if last and last.get("available"):
         print(f"\n--- TurnTimer (turn_id={last.get('turn_id')[:16]}) ---")
         for cp in last.get("checkpoints", []):
-            print(f"  {cp['offset_ms']:8.2f} ms  {cp.get('segment_ms',0):7.2f} ms  {cp['name']}")
+            print(f"  {cp['offset_ms']:8.2f} ms  {cp.get('segment_ms', 0):7.2f} ms  {cp['name']}")
         print(f"  TOTAL: {last.get('total_ms', 0):.2f} ms")
 
     # stop worker

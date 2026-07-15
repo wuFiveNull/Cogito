@@ -83,4 +83,3 @@ class VisionAnalysis:
             "error_category": self.error_category,
             "retryable": self.retryable,
         }
-

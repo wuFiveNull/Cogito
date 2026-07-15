@@ -6,6 +6,7 @@ SYSTEM-BOUNDARIES / 4:
 聚合链：Principal → Endpoint → Conversation → Session。
 当前实现：`SqliteIdentityConversationService`（SQLite 后端）。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from cogito.domain.principal import Endpoint, Principal
 @dataclass(frozen=True)
 class IdentityResolution:
     """身份解析结果。"""
+
     principal: Principal
     endpoint: Endpoint
     created_principal: bool = False
@@ -102,7 +104,8 @@ class SqliteIdentityConversationService:
 
         # 1. 尝试按 platform 反向查找 Principal
         principal = self._principal_repo.find_by_platform(
-            channel_type, platform_account_id,
+            channel_type,
+            platform_account_id,
         )
         created_principal = False
         if principal is None:
@@ -117,7 +120,8 @@ class SqliteIdentityConversationService:
 
         # 2. 查找或创建 Endpoint
         endpoint = self._endpoint_repo.find_by_platform(
-            channel_instance_id, platform_account_id,
+            channel_instance_id,
+            platform_account_id,
         )
         created_endpoint = False
         if endpoint is None:
@@ -158,7 +162,8 @@ class SqliteIdentityConversationService:
             )
         if conversation is None:
             conversation = self._conversation_repo.find_by_platform(
-                channel_instance_id, endpoint_ref or "",
+                channel_instance_id,
+                endpoint_ref or "",
             )
         if conversation is not None:
             return conversation, False

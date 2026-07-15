@@ -10,6 +10,7 @@
 7. synonym without lexical overlap
 8. cross-language query
 """
+
 from __future__ import annotations
 
 import pytest
@@ -21,19 +22,23 @@ from cogito.service.retrieval_service import RetrievalService
 @pytest.fixture
 def db() -> Any:
     import sqlite3
+
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     from cogito.store.migration import migrate
+
     migrate(conn)
     return conn
 
 
 def _mem_db_with_approvals() -> Any:
     import sqlite3
+
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     from cogito.store.connection import _apply_pragmas
     from cogito.store.migration import migrate
+
     _apply_pragmas(conn)
     migrate(conn)
     return conn
@@ -42,6 +47,7 @@ def _mem_db_with_approvals() -> Any:
 def _insert_memory(db: Any, **kw: Any) -> str:
     import uuid
     from datetime import datetime, UTC
+
     mid = uuid.uuid4().hex
     now = datetime.now(UTC).isoformat()
     db.execute(
@@ -51,13 +57,20 @@ def _insert_memory(db: Any, **kw: Any) -> str:
         "created_at, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            mid, kw.get("kind", "fact"), kw.get("subject", ""),
-            kw.get("predicate", ""), kw.get("value", ""),
+            mid,
+            kw.get("kind", "fact"),
+            kw.get("subject", ""),
+            kw.get("predicate", ""),
+            kw.get("value", ""),
             kw.get("principal_id", "owner"),
-            kw.get("scope_type", ""), kw.get("scope_id", ""),
+            kw.get("scope_type", ""),
+            kw.get("scope_id", ""),
             kw.get("explicitness", "explicit_user_statement"),
-            kw.get("confidence", 1.0), kw.get("importance", 0.7),
-            "confirmed", now, now,
+            kw.get("confidence", 1.0),
+            kw.get("importance", 0.7),
+            "confirmed",
+            now,
+            now,
         ),
     )
     db.commit()
@@ -68,8 +81,7 @@ def _insert_memory(db: Any, **kw: Any) -> str:
         "memory_id UNINDEXED, subject, predicate, value, tokenize='unicode61')"
     )
     db.execute(
-        "INSERT INTO memory_fts (memory_id, subject, predicate, value) "
-        "VALUES (?, ?, ?, ?)",
+        "INSERT INTO memory_fts (memory_id, subject, predicate, value) VALUES (?, ?, ?, ?)",
         (mid, kw.get("subject", ""), kw.get("predicate", ""), kw.get("value", "")),
     )
     db.commit()
@@ -77,6 +89,7 @@ def _insert_memory(db: Any, **kw: Any) -> str:
 
 
 # ── 1. Fact lookup ─────────────────────────────────────────────
+
 
 def test_fact_lookup(db: Any) -> None:
     """事实查找：用精确关键词命中已确认事实。"""
@@ -88,6 +101,7 @@ def test_fact_lookup(db: Any) -> None:
 
 
 # ── 2. Temporal conflict (recency wins) ────────────────────────
+
 
 def test_temporal_conflict_recency(db: Any) -> None:
     """时间冲突：多条匹配时，更新/更近的记忆排名更高。"""
@@ -102,6 +116,7 @@ def test_temporal_conflict_recency(db: Any) -> None:
 
 
 # ── 3. Cross-session isolation ─────────────────────────────────
+
 
 def test_cross_session_isolation(db: Any) -> None:
     """跨 Session 隔离：principal 隔离（不同 principal 互不可见）。"""
@@ -120,6 +135,7 @@ def test_cross_session_isolation(db: Any) -> None:
 
 # ── 4. Preference ──────────────────────────────────────────────
 
+
 def test_preference_retrieval(db: Any) -> None:
     """偏好检索：通过 kind 过滤命中 preference。"""
     _insert_memory(db, kind="preference", subject="theme", predicate="value", value="dark")
@@ -130,6 +146,7 @@ def test_preference_retrieval(db: Any) -> None:
 
 # ── 5. Goal ────────────────────────────────────────────────────
 
+
 def test_goal_retrieval(db: Any) -> None:
     """Goal 检索：kind=goal 命中。"""
     _insert_memory(db, kind="goal", subject="project", predicate="target", value="ship v1")
@@ -139,6 +156,7 @@ def test_goal_retrieval(db: Any) -> None:
 
 
 # ── 6. No query → recency fallback list ───────────────────────
+
 
 def test_no_query_returns_recent(db: Any) -> None:
     """无 query → recency fallback：返回近期高重要性记忆列表。"""
@@ -152,6 +170,7 @@ def test_no_query_returns_recent(db: Any) -> None:
 
 # ── 7. Synonym without lexical overlap ─────────────────────────
 
+
 def test_retrieval_path_recorded(db: Any) -> None:
     """每条结果保留 retrieval_path（keyword/keyword+vector 路径）。"""
     _insert_memory(db, subject="vehicle", predicate="preference", value="car")
@@ -162,6 +181,7 @@ def test_retrieval_path_recorded(db: Any) -> None:
 
 
 # ── 8. Cross-language query ────────────────────────────────────
+
 
 def test_cross_language_query(db: Any) -> None:
     """跨语言查询：中文 memory 可被英文/中文 query 命中（trigram FTS）。"""

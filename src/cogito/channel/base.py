@@ -5,6 +5,7 @@ Phase 2: 适配器直接实现此接口，不经过 LangBot 类型。
 
 QQ-ONEBOT-E2E-01 / PR 2: 新增结构化 ChannelSendRequest/ChannelSendResult DTO。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from cogito.contracts.inbound import InboundHandler
 
 class AdapterStatus(StrEnum):
     """适配器运行状态。"""
+
     created = "created"
     starting = "starting"
     running = "running"
@@ -40,6 +42,7 @@ class ChannelAttachment:
 @dataclass(frozen=True)
 class ChannelSendRequest:
     """Delivery 发送请求 —— 从 DeliveryWorker 到 Adapter 的结构化契约。"""
+
     delivery_id: str
     attempt_id: str
     idempotency_key: str
@@ -56,6 +59,7 @@ class ChannelSendRequest:
 @dataclass(frozen=True)
 class ChannelSendResult:
     """Adapter 发送结果 —— 结构化、可区分 temporary/permanent/unknown。"""
+
     status: Literal["sent", "temporary", "permanent", "unknown"]
     platform_message_id: str | None = None
     error_code: str | None = None
@@ -69,6 +73,7 @@ class ChannelEditRequest:
     STREAMING-DELIVERY: edit 语义为 replace 全量文本（平台不可增量时由上层合并 delta）。
     每个 edit 对应 Delivery Attempt 内的一个 operation_seq。
     """
+
     delivery_id: str
     attempt_id: str
     idempotency_key: str
@@ -84,6 +89,7 @@ class ChannelEditRequest:
 @dataclass(frozen=True)
 class ChannelDeleteRequest:
     """流式投递的撤回请求 —— 删除某条已发送平台消息（取消/失败时使用）。"""
+
     delivery_id: str
     attempt_id: str
     channel_instance_id: str
@@ -95,6 +101,7 @@ class ChannelDeleteRequest:
 @dataclass(frozen=True)
 class ChannelCapabilities:
     """渠道能力声明。"""
+
     supports_streaming: bool = False
     supports_edit: bool = False
     supports_buttons: bool = False

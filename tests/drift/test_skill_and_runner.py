@@ -5,6 +5,7 @@
 - drift.run handler 执行只读 Skill + finish_drift 强制收尾
 - unknown skill → no_value/skipped
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -46,22 +47,21 @@ def _seed_drift_run(conn, run_id, task_id, skill_name="proactive-policy-view-aud
     conn.execute(
         "INSERT INTO tasks (task_id, task_type, status, priority, idempotency_key, created_at) "
         "VALUES (?,?,?,?,?,?)",
-        (task_id, "drift.run", "running", 5, f"idemp-{task_id}",
-         int(time.time()*1000)),
+        (task_id, "drift.run", "running", 5, f"idemp-{task_id}", int(time.time() * 1000)),
     )
     conn.execute(
         "INSERT INTO drift_runs "
         "(drift_run_id, task_id, principal_id, skill_name, skill_version, "
         " status, admission_snapshot_json, created_at) "
         "VALUES (?,?,?,?,?,?,?,?)",
-        (run_id, task_id, "owner", skill_name, "1.0", "running",
-         "{}", int(time.time()*1000)),
+        (run_id, task_id, "owner", skill_name, "1.0", "running", "{}", int(time.time() * 1000)),
     )
     conn.commit()
 
 
 class _Ctx:
     """TaskHandlerContext 最小测试替身。"""
+
     def __init__(self, conn):
         self.connection_factory = lambda: conn
         self.config_version_id = "cfg-test"
@@ -111,18 +111,19 @@ class TestSelector:
         skills = load_builtin_skills()
         now = int(time.time() * 1000)
         # 只选 proactive-policy-view-audit 为 candidate, 刚失败 (penalty 生效)
-        skills_one = {k: v for k, v in skills.items()
-                      if k == "proactive-policy-view-audit"}
-        states = {"proactive-policy-view-audit": {
-            "last_status": "failed", "last_run_at": now - 60_000,  # 1 分钟前
-            "run_count": 1,
-        }}
+        skills_one = {k: v for k, v in skills.items() if k == "proactive-policy-view-audit"}
+        states = {
+            "proactive-policy-view-audit": {
+                "last_status": "failed",
+                "last_run_at": now - 60_000,  # 1 分钟前
+                "run_count": 1,
+            }
+        }
         _name, scores = select_skill(skills_one, states)
         # 只有 1 个 skill，仍会被选但分数应体现惩罚
         assert _name == "proactive-policy-view-audit"
         # 分数里 recent_failure_penalty 已被扣分 (W_RECENT_FAILURE=25 已减)
-        assert scores["proactive-policy-view-audit"] < 100.0, \
-            f"失败 penalty 应降低分数: {scores}"
+        assert scores["proactive-policy-view-audit"] < 100.0, f"失败 penalty 应降低分数: {scores}"
 
     def test_empty_skills_returns_none(self):
         assert select_skill({}, {}) is None
@@ -134,11 +135,10 @@ class TestSelector:
 class TestDriftRunHandler:
     def test_known_skill_completes(self, memory_db):
         """proactive-policy-view-audit → completed，drift_runs.status 更新。"""
-        _seed_drift_run(memory_db, "dr-1", "t-1",
-                        skill_name="proactive-policy-view-audit")
+        _seed_drift_run(memory_db, "dr-1", "t-1", skill_name="proactive-policy-view-audit")
         from cogito.domain.task import Task, TaskStatus
-        task = Task(task_id="t-1", task_type="drift.run",
-                    status=TaskStatus.running)
+
+        task = Task(task_id="t-1", task_type="drift.run", status=TaskStatus.running)
         ctx = _Ctx(memory_db)
         result = handle_drift_run(task, ctx)
         assert "completed" in result
@@ -152,8 +152,8 @@ class TestDriftRunHandler:
         """未知 skill → completed + skipped_no_value。"""
         _seed_drift_run(memory_db, "dr-2", "t-2", skill_name="no-such-skill")
         from cogito.domain.task import Task, TaskStatus
-        task = Task(task_id="t-2", task_type="drift.run",
-                    status=TaskStatus.running)
+
+        task = Task(task_id="t-2", task_type="drift.run", status=TaskStatus.running)
         result = handle_drift_run(task, _Ctx(memory_db))
         assert "skipped" in result or "completed" in result
         row = memory_db.execute(
@@ -164,26 +164,24 @@ class TestDriftRunHandler:
     def test_no_drift_run_skips(self, memory_db):
         """task 无对应 drift_run → skipped。"""
         from cogito.domain.task import Task, TaskStatus
+
         # 先写入任务（不写 drift_run）
         memory_db.execute(
             "INSERT INTO tasks (task_id, task_type, status, priority, idempotency_key, created_at) "
             "VALUES (?,?,?,?,?,?)",
-            ("t-orphan", "drift.run", "running", 5, "idemp-orphan",
-             int(time.time()*1000)),
+            ("t-orphan", "drift.run", "running", 5, "idemp-orphan", int(time.time() * 1000)),
         )
         memory_db.commit()
-        task = Task(task_id="t-orphan", task_type="drift.run",
-                    status=TaskStatus.running)
+        task = Task(task_id="t-orphan", task_type="drift.run", status=TaskStatus.running)
         result = handle_drift_run(task, _Ctx(memory_db))
         assert "skipped" in result
 
     def test_skill_state_synced(self, memory_db):
         """finish_drift 同步写 drift_skill_state。"""
-        _seed_drift_run(memory_db, "dr-3", "t-3",
-                        skill_name="proactive-policy-view-audit")
+        _seed_drift_run(memory_db, "dr-3", "t-3", skill_name="proactive-policy-view-audit")
         from cogito.domain.task import Task, TaskStatus
-        task = Task(task_id="t-3", task_type="drift.run",
-                    status=TaskStatus.running)
+
+        task = Task(task_id="t-3", task_type="drift.run", status=TaskStatus.running)
         handle_drift_run(task, _Ctx(memory_db))
         row = memory_db.execute(
             "SELECT last_status, run_count FROM drift_skill_state "

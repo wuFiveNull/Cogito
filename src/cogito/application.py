@@ -38,9 +38,7 @@ from cogito.store.migration import migrate
 # ── Plan 06 M2: 配置版本持久化辅助 ──
 
 
-def _persist_config_version(
-    conn: sqlite3.Connection, config: Config
-) -> None:
+def _persist_config_version(conn: sqlite3.Connection, config: Config) -> None:
     """启动时记录配置版本（幂等：同一 content_hash 不重复插入）。"""
     try:
         from datetime import datetime
@@ -54,17 +52,20 @@ def _persist_config_version(
         cfg_repo = ConfigVersionRepository(conn)
         if cfg_repo.get_by_hash(config.content_hash) is not None:
             return
-        cfg_repo.insert(ConfigVersionRecord(
-            version_id=f"cfg-{uuid.uuid4().hex[:12]}",
-            content_hash=config.content_hash,
-            schema_version=config.schema_version,
-            source_layers=["profile"],
-            applied_at=epoch_ms(datetime.now()),
-            applied_by="startup",
-        ))
+        cfg_repo.insert(
+            ConfigVersionRecord(
+                version_id=f"cfg-{uuid.uuid4().hex[:12]}",
+                content_hash=config.content_hash,
+                schema_version=config.schema_version,
+                source_layers=["profile"],
+                applied_at=epoch_ms(datetime.now()),
+                applied_by="startup",
+            )
+        )
         conn.commit()
     except Exception as e:
         logger.warning("Config version persistence failed: %s", e)
+
 
 logger = logging.getLogger("cogito.application")
 
@@ -72,6 +73,7 @@ logger = logging.getLogger("cogito.application")
 @dataclass
 class RuntimeCycleResult:
     """一轮公平轮询的处理结果 —— 便于测试、日志和以后健康检查。"""
+
     turn: int = 0
     outbox: int = 0
     delivery: int = 0
@@ -132,6 +134,7 @@ class RuntimeApplication:
         # PR 2: 关闭/drain 状态
         self._shutdown_event: asyncio.Event | None = None
         self._drain_timeout: float = 10.0
+        self._worker_loop_task: asyncio.Task[None] | None = None
 
         # 入站唤醒事件：inbound.accept 入队新 Turn 后置位，worker 据此即时唤醒
         self._wakeup_event: asyncio.Event | None = None
@@ -162,6 +165,7 @@ class RuntimeApplication:
         # 注册 AIHOT MCP Connector（幂等）：把 aihot_items 作为主动推送数据源
         try:
             from cogito.service.aihot_connector import seed_aihot_connector
+
             seed_aihot_connector(conn)
         except Exception:
             logger.warning("AIHOT connector seed failed (non-fatal)", exc_info=True)
@@ -244,15 +248,18 @@ class RuntimeApplication:
 
             # PLAN-16 P16-13：共享 Service 也要注入 factory，供 Turn/Tool 检索时解析 payload
             knowledge_service = KnowledgeService(
-                conn, embedder=knowledge_embedder,
+                conn,
+                embedder=knowledge_embedder,
                 payload_store_factory=_make_payload_store,
             )
 
             def _make_knowledge_service(knowledge_conn):
                 return KnowledgeService(
-                    knowledge_conn, embedder=knowledge_embedder,
+                    knowledge_conn,
+                    embedder=knowledge_embedder,
                     payload_store_factory=lambda: PayloadStore(
-                        config.resolve_payload_dir(), knowledge_conn),
+                        config.resolve_payload_dir(), knowledge_conn
+                    ),
                 )
 
             knowledge_factory = _make_knowledge_service
@@ -264,15 +271,18 @@ class RuntimeApplication:
         # 额外提交高优先级 context 提取任务
         def _make_task_service():
             from cogito.service.task_service import SqliteTaskService
+
             return SqliteTaskService(get_connection(config.resolve_db_path()))
 
         # PLAN-16 M3 MEM-02: recall_memory 工具召回命中后写 exposed 信号
         def _make_memory_service():
             from cogito.service.memory_service import SqliteMemoryService
+
             return SqliteMemoryService(get_connection(config.resolve_db_path()))
 
         def _make_memory_reader() -> MemoryReader:
             from cogito.store.connection import get_connection as _gc
+
             reader_conn = _gc(config.resolve_db_path())
             return SqliteMemoryService(repo=MemoryRepository(reader_conn))
 
@@ -282,11 +292,13 @@ class RuntimeApplication:
         # Task path; exposed on the runtime so the Query API can report them.
         from cogito.infrastructure.cognition_metrics import CognitionMetrics
         from cogito.infrastructure.multimodal_metrics import MultimodalMetrics
+
         multimodal_metrics = MultimodalMetrics()
         # PLAN-16 M7 OPS-04: Memory/Knowledge 专项运行指标（进程内计数器）
         cognition_metrics = CognitionMetrics()
         # PLAN-16 完整注入：让 metrics_access._metrics() 能找到真实实例
         from cogito.infrastructure.metrics_access import set_cognition_metrics
+
         set_cognition_metrics(cognition_metrics)
 
         def _make_vision_service() -> VisionAnalysisService:
@@ -352,7 +364,9 @@ class RuntimeApplication:
                     payload_store=PayloadStore(config.resolve_payload_dir(), sticker_conn),
                     config=config.multimodal,
                     asset_service=AssetIngestionService(
-                        sticker_conn, config.resolve_payload_dir(), config.multimodal,
+                        sticker_conn,
+                        config.resolve_payload_dir(),
+                        config.multimodal,
                     ),
                     metrics=multimodal_metrics,
                 )
@@ -518,17 +532,16 @@ class RuntimeApplication:
             lease_ttl_s=self.config.worker.outbox_lease_ttl_seconds,
         )
         drift_cfg = getattr(self.config, "drift", None)
-        default_principal = getattr(getattr(self.config, "capability", None),
-                                    "proactive", None)
-        default_principal_id = getattr(default_principal, "default_principal_id",
-                                       None) or "owner"
+        default_principal = getattr(getattr(self.config, "capability", None), "proactive", None)
+        default_principal_id = getattr(default_principal, "default_principal_id", None) or "owner"
         self.event_consumer_registry = build_default_registry(
-            default_principal_id=default_principal_id,
-            drift_config=drift_cfg)
+            default_principal_id=default_principal_id, drift_config=drift_cfg
+        )
         if self.channel_gateway is None:
             self.build_channel_components()
         elif self.gateway_client is None:
             from cogito.service.loopback_gateway_client import LoopbackGatewayClient
+
             self.local_gateway_client = LoopbackGatewayClient(self.channel_gateway)
             self.gateway_client = self.local_gateway_client
         self.delivery_service = SqliteDeliveryService(
@@ -560,15 +573,17 @@ class RuntimeApplication:
         from datetime import UTC, datetime
 
         msg_id = self._next_terminal_message_id()
-        result = self.inbound.accept(ChannelEnvelope(
-            channel_type="terminal",
-            channel_instance_id="terminal",
-            platform_sender_id="owner",
-            platform_conversation_id="terminal:default",
-            platform_message_id=msg_id,
-            content_parts=[{"content_type": "text", "inline_data": text}],
-            received_at=datetime.now(UTC).isoformat(),
-        ))
+        result = self.inbound.accept(
+            ChannelEnvelope(
+                channel_type="terminal",
+                channel_instance_id="terminal",
+                platform_sender_id="owner",
+                platform_conversation_id="terminal:default",
+                platform_message_id=msg_id,
+                content_parts=[{"content_type": "text", "inline_data": text}],
+                received_at=datetime.now(UTC).isoformat(),
+            )
+        )
 
         outcome = await self.runner.run_once("terminal-worker")
         if outcome == RunOutcome.completed:
@@ -639,7 +654,9 @@ class RuntimeApplication:
                 # Consumer 内部负责幂等+事务；失败则 retry/dead_letter，不 publish
                 try:
                     ok = await asyncio.to_thread(
-                        consumer.handle, self.conn, lease,
+                        consumer.handle,
+                        self.conn,
+                        lease,
                     )
                     if ok:
                         self.outbox_worker.publish(lease, worker_id)
@@ -650,7 +667,8 @@ class RuntimeApplication:
                 except Exception:
                     logger.exception(
                         "outbox consumer failed: event=%s consumer=%s",
-                        lease.event_id, consumer.name,
+                        lease.event_id,
+                        consumer.name,
                     )
                     self.outbox_worker.retry(lease, worker_id)
             else:
@@ -724,8 +742,8 @@ class RuntimeApplication:
     def _make_payload_store_factory(self) -> Callable[[], Any] | None:
         """构造 PayloadStore 工厂（PLAN-16 完整：不依赖 multimodal 开关）。"""
         from cogito.infrastructure.payload_store import PayloadStore
-        return lambda conn=None: PayloadStore(
-            self.config.resolve_payload_dir(), conn or self.conn)
+
+        return lambda conn=None: PayloadStore(self.config.resolve_payload_dir(), conn or self.conn)
 
     # ── worker entrypoint ──────────────────────────────────────────────────
 
@@ -742,6 +760,7 @@ class RuntimeApplication:
         from cogito.service.task_worker import TaskWorker
 
         self._shutdown_event = shutdown_event or asyncio.Event()
+        self._worker_loop_task = asyncio.current_task()
 
         # 创建 workers（Outbox / Delivery / Task）
         self.build_workers()
@@ -764,8 +783,7 @@ class RuntimeApplication:
                     self.runner._router,
                 )
             except Exception:
-                logger.warning("MCP Manager startup partially failed (non-fatal)",
-                               exc_info=True)
+                logger.warning("MCP Manager startup partially failed (non-fatal)", exc_info=True)
                 self.mcp_manager = MCPServerManager(
                     mcp_registry,
                     aliases=self.config.capability.mcp_aliases,
@@ -815,6 +833,9 @@ class RuntimeApplication:
             capability_registry=self.runner._registry if self.runner else None,
             tool_executor=self.runner._executor if self.runner else None,
             parent_toolsets=set(self.runner._toolsets) if self.runner else set(),
+            shutdown_requested=lambda: bool(
+                self._shutdown_event is not None and self._shutdown_event.is_set()
+            ),
         )
         task_registry = _build_registry(task_handler_ctx)
         task_dispatcher = TaskDispatcher(self.conn)
@@ -882,14 +903,22 @@ class RuntimeApplication:
                 else:
                     logger.debug(
                         "Cycle processed: turn=%d outbox=%d delivery=%d task=%d",
-                        cycle.turn, cycle.outbox, cycle.delivery, cycle.task,
+                        cycle.turn,
+                        cycle.outbox,
+                        cycle.delivery,
+                        cycle.task,
                     )
                     if run_once:
                         return
         except asyncio.CancelledError:
-            pass
-
-        logger.info("Worker loop stopped.")
+            # Cancellation cannot stop an already-running asyncio.to_thread call.
+            # Publish the shutdown signal so cooperative handlers can stop before
+            # the application releases their shared resources.
+            self._shutdown_event.set()
+            raise
+        finally:
+            self._worker_loop_task = None
+            logger.info("Worker loop stopped.")
 
     # ── PR 2: shutdown / drain ────────────────────────────────────────────
 
@@ -910,7 +939,29 @@ class RuntimeApplication:
         if self._shutdown_event is not None:
             self._shutdown_event.set()
 
-        # 3. 停止 Channel（释放端口）
+        # 3. 等待当前 worker cycle 退出。process_background_once 中的同步 handler
+        # 通过 asyncio.to_thread 执行，取消 asyncio Task 并不会终止底层线程；必须先
+        # drain，之后才能关闭 SQLite/MCP 等共享资源。
+        worker_task = self._worker_loop_task
+        if worker_task is not None and worker_task is not asyncio.current_task():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(worker_task),
+                    timeout=self._drain_timeout,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "Worker drain timed out after %.1fs; keeping resources open "
+                    "until the in-flight operation exits",
+                    self._drain_timeout,
+                )
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Worker stopped with an error during shutdown")
+
+        # 4. 停止 Channel（释放端口）
         if self.channel_manager is not None:
             try:
                 await asyncio.wait_for(
@@ -920,7 +971,20 @@ class RuntimeApplication:
             except Exception as e:
                 logger.warning("Error stopping channels: %s", e)
 
-        # 4. 关闭 SQLite
+        # 5. MCP Manager 属于当前 event loop，优先在这里异步关闭，避免 close()
+        # 为正在运行的 loop 创建额外线程和 event loop。
+        if self.mcp_manager is not None:
+            try:
+                await asyncio.wait_for(
+                    self.mcp_manager.stop_all(),
+                    timeout=self._drain_timeout,
+                )
+            except Exception as e:
+                logger.warning("Error stopping MCP manager: %s", e)
+            finally:
+                self.mcp_manager = None
+
+        # 6. 关闭 SQLite
         self.close()
         logger.info("Shutdown complete.")
 
@@ -934,6 +998,7 @@ class RuntimeApplication:
         try:
             if self.mcp_manager is not None:
                 import asyncio
+
                 try:
                     loop = asyncio.get_running_loop()
                 except RuntimeError:
@@ -943,9 +1008,11 @@ class RuntimeApplication:
                     # 用 run_coroutine_threadsafe 把 stop_all 派回主 loop 同步等完成，
                     # 避免进程在 stdio 子进程未清理前就退出（导致 GeneratorExit 报错）。
                     import concurrent.futures
+
                     with concurrent.futures.ThreadPoolExecutor(1) as pool:
                         future = pool.submit(
-                            asyncio.run, self.mcp_manager.stop_all(),
+                            asyncio.run,
+                            self.mcp_manager.stop_all(),
                         )
                         future.result(timeout=self._drain_timeout)
                 else:

@@ -22,10 +22,9 @@ import logging
 import sqlite3
 from datetime import datetime
 
+from cogito.contracts.clock import Clock, ProductionClock, epoch_ms
 from cogito.domain.turn import RunAttemptStatus, TurnStatus
-from cogito.contracts.clock import Clock, ProductionClock
 from cogito.service.unit_of_work import UnitOfWork
-from cogito.contracts.clock import epoch_ms
 
 _LOG = logging.getLogger("cogito.recovery")
 
@@ -110,7 +109,8 @@ class RecoveryService:
         now_ms_val = epoch_ms(self._now(clock))
 
         with UnitOfWork(self._conn) as uow:
-            rows = self._conn.execute("""
+            rows = self._conn.execute(
+                """
                 SELECT t.turn_id, t.version, t.active_attempt_id,
                        a.attempt_id, a.lease_version, a.lease_expires_at
                 FROM turns t
@@ -121,7 +121,9 @@ class RecoveryService:
                       a.lease_expires_at IS NULL
                       OR a.lease_expires_at < ?
                   )
-            """, (now_ms_val,)).fetchall()
+            """,
+                (now_ms_val,),
+            ).fetchall()
 
             count = 0
             for row in rows:
@@ -131,9 +133,13 @@ class RecoveryService:
                     "WHERE attempt_id=? AND status='running' "
                     "AND lease_version=? "
                     "AND (lease_expires_at IS NULL OR lease_expires_at = ?)",
-                    (RunAttemptStatus.abandoned.value, now_ms_val,
-                     row["active_attempt_id"],
-                     row["lease_version"], row["lease_expires_at"]),
+                    (
+                        RunAttemptStatus.abandoned.value,
+                        now_ms_val,
+                        row["active_attempt_id"],
+                        row["lease_version"],
+                        row["lease_expires_at"],
+                    ),
                 )
 
                 # Step 2: 只有 Attempt 更新成功才能修改 Turn
@@ -144,8 +150,12 @@ class RecoveryService:
                 turn_updated = self._conn.execute(
                     "UPDATE turns SET status=?, active_attempt_id=NULL, version=version+1 "
                     "WHERE turn_id=? AND version=? AND status='running' AND active_attempt_id=?",
-                    (TurnStatus.queued.value,
-                     row["turn_id"], row["version"], row["active_attempt_id"]),
+                    (
+                        TurnStatus.queued.value,
+                        row["turn_id"],
+                        row["version"],
+                        row["active_attempt_id"],
+                    ),
                 )
                 if turn_updated.rowcount > 0:
                     count += 1
@@ -166,7 +176,8 @@ class RecoveryService:
 
         with UnitOfWork(self._conn) as uow:
             # 查 running Task 及其当前 running 的 Attempt
-            rows = self._conn.execute("""
+            rows = self._conn.execute(
+                """
                 SELECT t.task_id,
                        a.task_attempt_id AS attempt_id,
                        a.lease_version, a.lease_expires_at
@@ -178,7 +189,9 @@ class RecoveryService:
                       a.lease_expires_at IS NULL
                       OR a.lease_expires_at < ?
                   )
-            """, (now_ms_val,)).fetchall()
+            """,
+                (now_ms_val,),
+            ).fetchall()
 
             count = 0
             for row in rows:
@@ -189,8 +202,7 @@ class RecoveryService:
                     "WHERE task_attempt_id=? AND status='running' "
                     "AND lease_version=? "
                     "AND (lease_expires_at IS NULL OR lease_expires_at = ?)",
-                    (now_ms_val, row["attempt_id"],
-                     row["lease_version"], row["lease_expires_at"]),
+                    (now_ms_val, row["attempt_id"], row["lease_version"], row["lease_expires_at"]),
                 )
                 if attempt_updated.rowcount == 0:
                     continue  # heartbeat 续期成功，跳过
@@ -275,7 +287,8 @@ class RecoveryService:
                 count += 1
                 _LOG.info(
                     "recover_streaming_deliveries: withdrawn orphan delivery=%s (turn=%s)",
-                    row["delivery_id"], row["turn_id"],
+                    row["delivery_id"],
+                    row["turn_id"],
                 )
 
                 # Turn 名义 running 但 attempt 已死 → 重置为 queued 以便重放

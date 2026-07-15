@@ -96,22 +96,26 @@ class TestV0ToV1Upgrade:
 
     def test_decode_v0(self):
         """decode_inbound 自动检测 V0 并升级。"""
-        v0_json = json.dumps({
-            "event_id": "legacy-1",
-            "channel": "onebot",
-            "text": "legacy text",
-        })
+        v0_json = json.dumps(
+            {
+                "event_id": "legacy-1",
+                "channel": "onebot",
+                "text": "legacy text",
+            }
+        )
         msg = decode_inbound(v0_json)
         assert msg.schema_version == "1"
         assert msg.event_id == "legacy-1"
 
     def test_decode_v1(self):
         """decode_inbound 直接解析 V1。"""
-        v1_json = json.dumps({
-            "schema_version": "1",
-            "event_id": "v1-evt",
-            "content_parts": [],
-        })
+        v1_json = json.dumps(
+            {
+                "schema_version": "1",
+                "event_id": "v1-evt",
+                "content_parts": [],
+            }
+        )
         msg = decode_inbound(v1_json)
         assert msg.event_id == "v1-evt"
 

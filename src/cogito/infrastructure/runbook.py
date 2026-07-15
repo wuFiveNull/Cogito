@@ -6,6 +6,7 @@ unknown 副作用; 队列堆积。
 
 Release Gates 10 项。
 """
+
 from __future__ import annotations
 
 # Runbook: 10 故障场景 (Plan 06 M10)

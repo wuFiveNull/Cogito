@@ -728,6 +728,10 @@ class AgentRunner:
         """非流式 Turn 完成后：把最终回复文本作为 send 事件推入浏览器队列。"""
         if not text or self.channel_gateway is None:
             return
+        if (meta.reply_route or {}).get("channel_instance_id") == "terminal":
+            # process_terminal_message reads the persisted assistant message and
+            # returns it directly; there is intentionally no terminal adapter.
+            return
         target_json = self._build_target_json(meta)
         if target_json is None:
             return
@@ -745,6 +749,8 @@ class AgentRunner:
     def _push_reply_error(self, meta: Any, message: str) -> None:
         """把错误提示推入浏览器队列，让用户至少看到反馈而非无声无息。"""
         if not message or self.channel_gateway is None:
+            return
+        if (meta.reply_route or {}).get("channel_instance_id") == "terminal":
             return
         target_json = self._build_target_json(meta)
         if target_json is None:

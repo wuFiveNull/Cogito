@@ -6,6 +6,7 @@ Tools 层（tools/*.py）通过此 Protocol 消费长期记忆，
 实现：`service.memory_service.SqliteMemoryService`（现在同时实现
 MemoryReader + MemoryWriter）。
 """
+
 from __future__ import annotations
 
 from typing import Protocol
@@ -70,7 +71,10 @@ class MemoryWriter(Protocol):
         ...
 
     def forget_by_canonical_key(
-        self, principal_id: str, subject: str, predicate: str,
+        self,
+        principal_id: str,
+        subject: str,
+        predicate: str,
     ) -> bool:
         """按 canonical key 忘记一条记忆。"""
         ...

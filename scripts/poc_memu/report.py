@@ -3,6 +3,7 @@
 读取 cogito_results.json + memu_results.json，计算 §16.3 对比指标，
 输出 adopt/reject 决策报告。
 """
+
 from __future__ import annotations
 
 import json

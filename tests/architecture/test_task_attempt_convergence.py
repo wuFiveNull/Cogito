@@ -1,4 +1,5 @@
 """PR-B1: TaskAttempt lifecycle convergence — Plan 04 M1."""
+
 from __future__ import annotations
 
 import sqlite3
@@ -14,6 +15,7 @@ def db() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     from cogito.store.migration import migrate
+
     migrate(conn)
     return conn
 

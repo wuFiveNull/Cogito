@@ -13,9 +13,14 @@ def test_delegation_queues_two_children_and_resumes_any_join(in_memory_db) -> No
         "INSERT INTO turns(turn_id,status,created_at) VALUES ('parent','waiting_external',0)",
     )
     context = ToolContext(
-        attempt_id="attempt", trace_id="trace", tool_call_id="tool-call",
-        turn_id="parent", principal_id="owner", session_id="session",
-        input_message_id="message", tool_state={},
+        attempt_id="attempt",
+        trace_id="trace",
+        tool_call_id="tool-call",
+        turn_id="parent",
+        principal_id="owner",
+        session_id="session",
+        input_message_id="message",
+        tool_state={},
         resource_budget={
             "max_loop_iterations": 10,
             "max_model_calls": 20,
@@ -32,11 +37,15 @@ def test_delegation_queues_two_children_and_resumes_any_join(in_memory_db) -> No
         {
             "tasks": [
                 {
-                    "client_id": "a", "prompt": "A", "role": "researcher",
+                    "client_id": "a",
+                    "prompt": "A",
+                    "role": "researcher",
                     "toolsets": ["web"],
                 },
                 {
-                    "client_id": "b", "prompt": "B", "role": "reviewer",
+                    "client_id": "b",
+                    "prompt": "B",
+                    "role": "reviewer",
                     "toolsets": ["memory", "web"],
                 },
                 {"client_id": "c", "prompt": "C", "role": "planner", "toolsets": ["web"]},
@@ -66,12 +75,17 @@ def test_delegation_queues_two_children_and_resumes_any_join(in_memory_db) -> No
     )
     in_memory_db.commit()
     assert service.evaluate_for_task(first) is True
-    assert in_memory_db.execute(
-        "SELECT status FROM turns WHERE turn_id='parent'",
-    ).fetchone()["status"] == "queued"
-    delegation_usage = json.loads(in_memory_db.execute(
-        "SELECT usage_json FROM agent_delegations",
-    ).fetchone()["usage_json"])
+    assert (
+        in_memory_db.execute(
+            "SELECT status FROM turns WHERE turn_id='parent'",
+        ).fetchone()["status"]
+        == "queued"
+    )
+    delegation_usage = json.loads(
+        in_memory_db.execute(
+            "SELECT usage_json FROM agent_delegations",
+        ).fetchone()["usage_json"]
+    )
     assert delegation_usage == {
         "input_tokens": 11,
         "output_tokens": 4,
@@ -79,7 +93,8 @@ def test_delegation_queues_two_children_and_resumes_any_join(in_memory_db) -> No
     }
 
     sink = ToolCallRepositorySink(
-        ToolCallRepository(in_memory_db), connection=in_memory_db,
+        ToolCallRepository(in_memory_db),
+        connection=in_memory_db,
     )
     claimed = sink.claim_deferred_result("parent")
     assert claimed is not None
@@ -99,16 +114,23 @@ def test_legacy_prompt_is_normalized(in_memory_db) -> None:
         "INSERT INTO turns(turn_id,status,created_at) VALUES ('parent','running',0)",
     )
     context = ToolContext(
-        attempt_id="attempt", trace_id="trace", tool_call_id="call",
-        turn_id="parent", principal_id="owner", tool_state={},
+        attempt_id="attempt",
+        trace_id="trace",
+        tool_call_id="call",
+        turn_id="parent",
+        principal_id="owner",
+        tool_state={},
     )
     DelegationLifecycleService(in_memory_db).create(
-        {"prompt": "legacy", "toolsets": ["web"]}, context,
+        {"prompt": "legacy", "toolsets": ["web"]},
+        context,
         allowed_toolsets={"web"},
     )
-    payload = json.loads(in_memory_db.execute(
-        "SELECT payload_ref FROM tasks WHERE task_type='agent.delegate'",
-    ).fetchone()["payload_ref"])
+    payload = json.loads(
+        in_memory_db.execute(
+            "SELECT payload_ref FROM tasks WHERE task_type='agent.delegate'",
+        ).fetchone()["payload_ref"]
+    )
     assert payload["prompt"] == "legacy"
     assert payload["role"] == "general"
     assert payload["toolsets"] == ["web"]
@@ -119,22 +141,31 @@ def test_role_policy_narrows_requested_toolsets(in_memory_db) -> None:
         "INSERT INTO turns(turn_id,status,created_at) VALUES ('parent','running',0)",
     )
     context = ToolContext(
-        attempt_id="attempt", trace_id="trace", tool_call_id="call",
-        turn_id="parent", principal_id="owner", tool_state={},
+        attempt_id="attempt",
+        trace_id="trace",
+        tool_call_id="call",
+        turn_id="parent",
+        principal_id="owner",
+        tool_state={},
     )
     DelegationLifecycleService(in_memory_db).create(
         {
-            "tasks": [{
-                "prompt": "review", "role": "reviewer",
-                "toolsets": ["file", "web", "subagent"],
-            }],
+            "tasks": [
+                {
+                    "prompt": "review",
+                    "role": "reviewer",
+                    "toolsets": ["file", "web", "subagent"],
+                }
+            ],
         },
         context,
         allowed_toolsets={"file", "web", "subagent"},
     )
-    payload = json.loads(in_memory_db.execute(
-        "SELECT payload_ref FROM tasks WHERE task_type='agent.delegate'",
-    ).fetchone()["payload_ref"])
+    payload = json.loads(
+        in_memory_db.execute(
+            "SELECT payload_ref FROM tasks WHERE task_type='agent.delegate'",
+        ).fetchone()["payload_ref"]
+    )
     assert payload["role"] == "reviewer"
     assert payload["read_only"] is True
     assert payload["requested_toolsets"] == ["file", "subagent", "web"]
@@ -146,8 +177,12 @@ def test_cancel_cascades_child_task_turn_attempt_and_resumes_parent(in_memory_db
         "INSERT INTO turns(turn_id,status,created_at) VALUES ('parent','waiting_external',0)",
     )
     context = ToolContext(
-        attempt_id="attempt", trace_id="trace", tool_call_id="call",
-        turn_id="parent", principal_id="owner", tool_state={},
+        attempt_id="attempt",
+        trace_id="trace",
+        tool_call_id="call",
+        turn_id="parent",
+        principal_id="owner",
+        tool_state={},
     )
     service = DelegationLifecycleService(in_memory_db)
     service.create(
@@ -171,7 +206,8 @@ def test_cancel_cascades_child_task_turn_attempt_and_resumes_parent(in_memory_db
         (row["task_id"],),
     )
     in_memory_db.execute(
-        "UPDATE tasks SET status='running' WHERE task_id=?", (row["task_id"],),
+        "UPDATE tasks SET status='running' WHERE task_id=?",
+        (row["task_id"],),
     )
     in_memory_db.commit()
 
@@ -180,18 +216,31 @@ def test_cancel_cascades_child_task_turn_attempt_and_resumes_parent(in_memory_db
     assert before["children"][0]["attempt_id"] == "child-attempt"
     assert service.cancel(row["delegation_id"], "parent") is True
 
-    assert in_memory_db.execute(
-        "SELECT status FROM tasks WHERE task_id=?", (row["task_id"],),
-    ).fetchone()["status"] == "cancelled"
-    assert in_memory_db.execute(
-        "SELECT status FROM turns WHERE turn_id='child-turn'",
-    ).fetchone()["status"] == "cancelled"
-    assert in_memory_db.execute(
-        "SELECT status FROM run_attempts WHERE attempt_id='child-attempt'",
-    ).fetchone()["status"] == "cancelled"
-    assert in_memory_db.execute(
-        "SELECT status FROM turns WHERE turn_id='parent'",
-    ).fetchone()["status"] == "queued"
+    assert (
+        in_memory_db.execute(
+            "SELECT status FROM tasks WHERE task_id=?",
+            (row["task_id"],),
+        ).fetchone()["status"]
+        == "cancelled"
+    )
+    assert (
+        in_memory_db.execute(
+            "SELECT status FROM turns WHERE turn_id='child-turn'",
+        ).fetchone()["status"]
+        == "cancelled"
+    )
+    assert (
+        in_memory_db.execute(
+            "SELECT status FROM run_attempts WHERE attempt_id='child-attempt'",
+        ).fetchone()["status"]
+        == "cancelled"
+    )
+    assert (
+        in_memory_db.execute(
+            "SELECT status FROM turns WHERE turn_id='parent'",
+        ).fetchone()["status"]
+        == "queued"
+    )
     after = service.status(row["delegation_id"], "parent")
     assert after is not None
     assert after["status"] == "cancelled"
@@ -206,13 +255,20 @@ def test_parent_cancel_does_not_requeue_parent(in_memory_db) -> None:
     service.create(
         {"prompt": "work"},
         ToolContext(
-            attempt_id="attempt", trace_id="trace", tool_call_id="call",
-            turn_id="parent", principal_id="owner", tool_state={},
+            attempt_id="attempt",
+            trace_id="trace",
+            tool_call_id="call",
+            turn_id="parent",
+            principal_id="owner",
+            tool_state={},
         ),
         allowed_toolsets={"core"},
     )
 
     assert service.cancel_for_parent("parent") == 1
-    assert in_memory_db.execute(
-        "SELECT status FROM turns WHERE turn_id='parent'",
-    ).fetchone()["status"] == "cancelled"
+    assert (
+        in_memory_db.execute(
+            "SELECT status FROM turns WHERE turn_id='parent'",
+        ).fetchone()["status"]
+        == "cancelled"
+    )

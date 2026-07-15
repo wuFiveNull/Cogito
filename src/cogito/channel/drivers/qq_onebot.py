@@ -9,6 +9,7 @@ QQ-ONEBOT-E2E-01 / PR 3:
 
 它不读取 SQLite，不调用 AgentRunner，不处理 Memory，不直接更新 Delivery。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -110,8 +111,12 @@ class QQOneBotAdapter:
             )
             self._status = AdapterStatus.running
             self._ready = True
-            _LOG.info("QQ adapter %s started (host=%s port=%s)",
-                      self.adapter_id, self._config.host, self._config.port)
+            _LOG.info(
+                "QQ adapter %s started (host=%s port=%s)",
+                self.adapter_id,
+                self._config.host,
+                self._config.port,
+            )
         except Exception as e:
             self._status = AdapterStatus.error
             _LOG.error("QQ adapter %s failed to start: %s", self.adapter_id, e)

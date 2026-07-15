@@ -79,6 +79,7 @@ class TestMessage:
 
     def test_deleted_at_roundtrip(self):
         from datetime import datetime
+
         deleted = datetime.now(UTC)
         m1 = Message(message_id="m1", deleted_at=deleted)
         d = m1.to_dict()
@@ -109,7 +110,9 @@ class TestMessageRevision:
 
     def test_to_dict_roundtrip(self):
         rev1 = MessageRevision(
-            message_id="m1", revision_no=1, platform_edit_id="pe1",
+            message_id="m1",
+            revision_no=1,
+            platform_edit_id="pe1",
         )
         d = rev1.to_dict()
         rev2 = MessageRevision.from_dict(d)

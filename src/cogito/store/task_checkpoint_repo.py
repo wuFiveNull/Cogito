@@ -8,14 +8,12 @@
 
 带真实 task_attempt_id；缺失 / hash 不兼容 → 调用方负责路由到 needs_review。
 """
+
 from __future__ import annotations
 
 import hashlib
 import sqlite3
-import time
-import uuid
 from dataclasses import dataclass
-from typing import Any
 
 
 @dataclass
@@ -24,7 +22,7 @@ class TaskCheckpoint:
     task_id: str
     task_attempt_id: str
     drift_run_id: str | None
-    checkpoint_type: str          # 'drift-step' | 'drift-pause' | 'drift-finish'
+    checkpoint_type: str  # 'drift-step' | 'drift-pause' | 'drift-finish'
     schema_version: int
     payload_ref: str
     payload_json: str
@@ -34,8 +32,7 @@ class TaskCheckpoint:
     created_at: int
 
     def verify_hash(self) -> bool:
-        return hashlib.sha256(
-            self.payload_json.encode("utf-8")).hexdigest() == self.payload_hash
+        return hashlib.sha256(self.payload_json.encode("utf-8")).hexdigest() == self.payload_hash
 
 
 class TaskCheckpointRepository:
@@ -51,10 +48,17 @@ class TaskCheckpointRepository:
             "  created_at"
             ") VALUES (?,?,?,?,?, ?,?,?,?, ?,?,?)",
             (
-                ck.checkpoint_id, ck.task_id, ck.task_attempt_id,
-                ck.drift_run_id, ck.checkpoint_type, ck.schema_version,
-                ck.payload_ref, ck.payload_json, ck.payload_hash,
-                ck.config_version_id, ck.capability_snapshot_version,
+                ck.checkpoint_id,
+                ck.task_id,
+                ck.task_attempt_id,
+                ck.drift_run_id,
+                ck.checkpoint_type,
+                ck.schema_version,
+                ck.payload_ref,
+                ck.payload_json,
+                ck.payload_hash,
+                ck.config_version_id,
+                ck.capability_snapshot_version,
                 ck.created_at,
             ),
         )
@@ -62,22 +66,23 @@ class TaskCheckpointRepository:
 
     def latest_for_task(self, task_id: str) -> TaskCheckpoint | None:
         row = self._conn.execute(
-            "SELECT * FROM task_checkpoints WHERE task_id=? "
-            "ORDER BY created_at DESC LIMIT 1", (task_id,),
+            "SELECT * FROM task_checkpoints WHERE task_id=? ORDER BY created_at DESC LIMIT 1",
+            (task_id,),
         ).fetchone()
         return self._row_to_ck(row) if row else None
 
     def latest_for_attempt(self, attempt_id: str) -> TaskCheckpoint | None:
         row = self._conn.execute(
             "SELECT * FROM task_checkpoints WHERE task_attempt_id=? "
-            "ORDER BY created_at DESC LIMIT 1", (attempt_id,),
+            "ORDER BY created_at DESC LIMIT 1",
+            (attempt_id,),
         ).fetchone()
         return self._row_to_ck(row) if row else None
 
     def list_for_run(self, drift_run_id: str) -> list[TaskCheckpoint]:
         rows = self._conn.execute(
-            "SELECT * FROM task_checkpoints WHERE drift_run_id=? "
-            "ORDER BY created_at ASC", (drift_run_id,),
+            "SELECT * FROM task_checkpoints WHERE drift_run_id=? ORDER BY created_at ASC",
+            (drift_run_id,),
         ).fetchall()
         return [self._row_to_ck(r) for r in rows]
 

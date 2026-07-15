@@ -44,12 +44,27 @@ class CapabilityRepository:
             "risk_level, side_effect_class, resource_requirements, health, disabled, deprecated, "
             "discovered_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (record.capability_id, record.kind, record.version, record.owner, record.provider,
-             record.plugin_id, json.dumps(record.toolsets), json.dumps(record.supported_modes),
-             record.input_schema, record.output_schema, json.dumps(record.permissions),
-             record.risk_level, record.side_effect_class, json.dumps(record.resource_requirements),
-             record.health, int(record.disabled), int(record.deprecated),
-             record.discovered_at, record.updated_at),
+            (
+                record.capability_id,
+                record.kind,
+                record.version,
+                record.owner,
+                record.provider,
+                record.plugin_id,
+                json.dumps(record.toolsets),
+                json.dumps(record.supported_modes),
+                record.input_schema,
+                record.output_schema,
+                json.dumps(record.permissions),
+                record.risk_level,
+                record.side_effect_class,
+                json.dumps(record.resource_requirements),
+                record.health,
+                int(record.disabled),
+                int(record.deprecated),
+                record.discovered_at,
+                record.updated_at,
+            ),
         )
 
     def upsert(self, record: CapabilityRecord) -> None:
@@ -65,21 +80,33 @@ class CapabilityRepository:
             "kind=excluded.kind, version=excluded.version, "
             "health=excluded.health, disabled=excluded.disabled, "
             "deprecated=excluded.deprecated, updated_at=excluded.updated_at",
-            (record.capability_id, record.kind, record.version,
-             record.owner, record.provider,
-             record.plugin_id, json.dumps(record.toolsets),
-             json.dumps(record.supported_modes),
-             record.input_schema, record.output_schema,
-             json.dumps(record.permissions),
-             record.risk_level, record.side_effect_class,
-             json.dumps(record.resource_requirements),
-             record.health, int(record.disabled), int(record.deprecated),
-             record.discovered_at, record.updated_at),
+            (
+                record.capability_id,
+                record.kind,
+                record.version,
+                record.owner,
+                record.provider,
+                record.plugin_id,
+                json.dumps(record.toolsets),
+                json.dumps(record.supported_modes),
+                record.input_schema,
+                record.output_schema,
+                json.dumps(record.permissions),
+                record.risk_level,
+                record.side_effect_class,
+                json.dumps(record.resource_requirements),
+                record.health,
+                int(record.disabled),
+                int(record.deprecated),
+                record.discovered_at,
+                record.updated_at,
+            ),
         )
 
     def get(self, capability_id: str) -> CapabilityRecord | None:
         row = self._conn.execute(
-            "SELECT * FROM capabilities WHERE capability_id=?", (capability_id,),
+            "SELECT * FROM capabilities WHERE capability_id=?",
+            (capability_id,),
         ).fetchone()
         return self._row_to_record(row) if row else None
 
@@ -93,7 +120,8 @@ class CapabilityRepository:
 
     def list_by_plugin(self, plugin_id: str) -> list[CapabilityRecord]:
         rows = self._conn.execute(
-            "SELECT * FROM capabilities WHERE plugin_id=?", (plugin_id,),
+            "SELECT * FROM capabilities WHERE plugin_id=?",
+            (plugin_id,),
         ).fetchall()
         return [self._row_to_record(r) for r in rows]
 
@@ -105,7 +133,8 @@ class CapabilityRepository:
 
     def delete(self, capability_id: str) -> None:
         self._conn.execute(
-            "DELETE FROM capabilities WHERE capability_id=?", (capability_id,),
+            "DELETE FROM capabilities WHERE capability_id=?",
+            (capability_id,),
         )
 
     @staticmethod
@@ -125,9 +154,7 @@ class CapabilityRepository:
             risk_level=row["risk_level"],
             side_effect_class=row["side_effect_class"],
             resource_requirements=(
-                json.loads(row["resource_requirements"])
-                if row["resource_requirements"]
-                else {}
+                json.loads(row["resource_requirements"]) if row["resource_requirements"] else {}
             ),
             health=row["health"],
             disabled=bool(row["disabled"]),

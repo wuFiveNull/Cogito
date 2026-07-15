@@ -2,6 +2,7 @@
 
 recall@k / MRR / source_traceability / latency。
 """
+
 from __future__ import annotations
 
 import time
@@ -36,7 +37,10 @@ def source_traceability_rate(
 
 
 def retrieval_latency(
-    fn, query: str, top_k: int = 8, repeats: int = 10,
+    fn,
+    query: str,
+    top_k: int = 8,
+    repeats: int = 10,
 ) -> dict[str, float]:
     """检索延迟 p50/p95（ms）。"""
     times: list[float] = []
@@ -103,9 +107,7 @@ def evaluate_backend(
     return {
         "recall@k": round(sum(recalls) / len(recalls), 4) if recalls else 0,
         "mrr": round(sum(mrrs) / len(mrrs), 4) if mrrs else 0,
-        "source_traceability": round(
-            source_traceability_rate(backend, all_retrieved_segs), 4
-        ),
+        "source_traceability": round(source_traceability_rate(backend, all_retrieved_segs), 4),
         "delete_no_resurrect": not (delete_recall or False),
         "num_docs": len(dataset),
         "num_segments": sum(len(s) for s in doc_segment_map.values()),

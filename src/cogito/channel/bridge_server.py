@@ -21,8 +21,8 @@
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
 import sqlite3
 import time
 import uuid
@@ -46,6 +46,7 @@ _LOGGER = logging.getLogger("cogito.bridge_server")
 @dataclass
 class InstanceHealth:
     """单个 Instance 的健康快照。"""
+
     instance_id: str
     channel_type: str
     connected: bool = False
@@ -133,15 +134,17 @@ class BridgeServer:
                     return gateway_health
             instances = []
             for inst in self.instance_health.values():
-                instances.append({
-                    "instance_id": inst.instance_id,
-                    "channel_type": inst.channel_type,
-                    "connected": inst.connected,
-                    "auth_ok": inst.auth_ok,
-                    "rate_limited": inst.rate_limited,
-                    "last_event_at": inst.last_event_at,
-                    "last_error": inst.last_error,
-                })
+                instances.append(
+                    {
+                        "instance_id": inst.instance_id,
+                        "channel_type": inst.channel_type,
+                        "connected": inst.connected,
+                        "auth_ok": inst.auth_ok,
+                        "rate_limited": inst.rate_limited,
+                        "last_event_at": inst.last_event_at,
+                        "last_error": inst.last_error,
+                    }
+                )
             values = list(self.instance_health.values())
             overall_healthy = all(i.connected and i.auth_ok for i in values) if values else True
             return {
@@ -161,8 +164,14 @@ class BridgeServer:
 
         # 检查 reply route 过期
         # （简化：此处仅校验 action 合法性，实际路由过期检查在 Core 侧）
-        if op.action not in ("send", "start_placeholder", "append_or_replace",
-                             "finish", "delete", "reconcile"):
+        if op.action not in (
+            "send",
+            "start_placeholder",
+            "append_or_replace",
+            "finish",
+            "delete",
+            "reconcile",
+        ):
             error = BridgeError(error_code="unsupported", message=f"unknown action: {op.action}")
             raise HTTPException(status_code=400, detail=error.to_json())
 
@@ -173,8 +182,10 @@ class BridgeServer:
             )
             raise HTTPException(status_code=503, detail=error.to_json())
 
-        operation_key = op.idempotency_key or op.operation_id or (
-            f"{op.delivery_id}:{op.attempt_id}:{op.operation_seq}:{op.action}"
+        operation_key = (
+            op.idempotency_key
+            or op.operation_id
+            or (f"{op.delivery_id}:{op.attempt_id}:{op.operation_seq}:{op.action}")
         )
         cached = self._get_operation_receipt(operation_key)
         if cached is not None:
@@ -190,7 +201,9 @@ class BridgeServer:
 
         _LOGGER.info(
             "Bridge delivery: action=%s delivery_id=%s attempt_id=%s",
-            op.action, op.delivery_id, op.attempt_id,
+            op.action,
+            op.delivery_id,
+            op.attempt_id,
         )
         result = self._execute_delivery(op, operation_key)
         response = {
@@ -213,28 +226,37 @@ class BridgeServer:
             return self.delivery_handler.start_placeholder(target, text, operation_key)
         if op.action == "append_or_replace":
             return self.delivery_handler.edit(
-                target, op.platform_message_id or "", text, op.operation_seq,
+                target,
+                op.platform_message_id or "",
+                text,
+                op.operation_seq,
                 operation_key,
             )
         if op.action == "finish":
             return self.delivery_handler.finish(
-                target, op.platform_message_id or "", text, op.operation_seq,
+                target,
+                op.platform_message_id or "",
+                text,
+                op.operation_seq,
                 operation_key,
             )
         if op.action == "delete":
             return self.delivery_handler.delete(
-                target, op.platform_message_id or "", op.operation_seq,
+                target,
+                op.platform_message_id or "",
+                op.operation_seq,
                 operation_key,
             )
         return self.delivery_handler.reconcile(
-            target, op.platform_message_id, operation_key,
+            target,
+            op.platform_message_id,
+            operation_key,
         )
 
     def _get_operation_receipt(self, operation_key: str) -> dict[str, Any] | None:
         try:
             row = self.conn.execute(
-                "SELECT response_json FROM gateway_operation_receipts "
-                "WHERE operation_key=?",
+                "SELECT response_json FROM gateway_operation_receipts WHERE operation_key=?",
                 (operation_key,),
             ).fetchone()
             return json.loads(row[0]) if row is not None else None
@@ -242,21 +264,25 @@ class BridgeServer:
             return None
 
     def _save_operation_receipt(
-        self, operation_key: str, action: str, response: dict[str, Any],
+        self,
+        operation_key: str,
+        action: str,
+        response: dict[str, Any],
     ) -> None:
         self.conn.execute(
-            "UPDATE gateway_operation_receipts SET response_json=? "
-            "WHERE operation_key=?",
+            "UPDATE gateway_operation_receipts SET response_json=? WHERE operation_key=?",
             (json.dumps(response), operation_key),
         )
         self.conn.commit()
 
     def _claim_operation(self, operation_key: str, action: str) -> bool:
-        pending = json.dumps({
-            "status": "unknown",
-            "error_code": "operation_in_progress",
-            "action": action,
-        })
+        pending = json.dumps(
+            {
+                "status": "unknown",
+                "error_code": "operation_in_progress",
+                "action": action,
+            }
+        )
         cursor = self.conn.execute(
             "INSERT OR IGNORE INTO gateway_operation_receipts "
             "(operation_key, action, response_json, created_at) VALUES (?, ?, ?, ?)",

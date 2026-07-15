@@ -13,6 +13,7 @@ from cogito.contracts.trace_context import TraceContext
 
 class ReplyMode(StrEnum):
     """Agent 回复模式。"""
+
     normal = "normal"
     placeholder = "placeholder"
     streaming = "streaming"
@@ -45,11 +46,19 @@ class ErrorCategory(StrEnum):
 
 # ─── Protected fields that cannot be modified by middleware ───
 
-PROTECTED_FIELDS = frozenset({
-    "trace_id", "principal_id", "conversation_id", "turn_id",
-    "attempt_id", "origin", "reply_route", "schema_version",
-    "idempotency_key",
-})
+PROTECTED_FIELDS = frozenset(
+    {
+        "trace_id",
+        "principal_id",
+        "conversation_id",
+        "turn_id",
+        "attempt_id",
+        "origin",
+        "reply_route",
+        "schema_version",
+        "idempotency_key",
+    }
+)
 
 
 # ─── ReplyRoute ───
@@ -58,6 +67,7 @@ PROTECTED_FIELDS = frozenset({
 @dataclass
 class ReplyRoute:
     """回复路由快照。"""
+
     channel_instance_id: str = ""
     platform_conversation_id: str = ""
     thread_id: str | None = None
@@ -74,8 +84,7 @@ class ReplyRoute:
             "reply_to_platform_message_id": self.reply_to_platform_message_id,
             "reply_token": self.reply_token,
             "reply_token_expires_at": (
-                self.reply_token_expires_at.isoformat()
-                if self.reply_token_expires_at else None
+                self.reply_token_expires_at.isoformat() if self.reply_token_expires_at else None
             ),
             "target_endpoint_ref": self.target_endpoint_ref,
         }
@@ -90,7 +99,8 @@ class ReplyRoute:
             reply_token=data.get("reply_token", ""),
             reply_token_expires_at=(
                 datetime.fromisoformat(data["reply_token_expires_at"])
-                if data.get("reply_token_expires_at") else None
+                if data.get("reply_token_expires_at")
+                else None
             ),
             target_endpoint_ref=data.get("target_endpoint_ref"),
         )
@@ -102,6 +112,7 @@ class ReplyRoute:
 @dataclass
 class ErrorEnvelope:
     """标准错误响应。"""
+
     error_code: str = "internal_error"
     category: ErrorCategory = ErrorCategory.internal
     message: str = ""
@@ -149,6 +160,7 @@ class ErrorEnvelope:
 @dataclass
 class ChannelEnvelope:
     """Gateway 入站消息信封。"""
+
     schema_version: str = "1.0"
     message_id: str = ""
     channel_type: str = ""
@@ -211,16 +223,14 @@ class ChannelEnvelope:
             content_parts=data.get("content_parts", []),
             platform_message_id=data.get("platform_message_id", ""),
             reply_route=(
-                ReplyRoute.from_dict(data["reply_route"])
-                if data.get("reply_route") else None
+                ReplyRoute.from_dict(data["reply_route"]) if data.get("reply_route") else None
             ),
             received_at=data.get("received_at", ""),
             trust_label=data.get("trust_label", "unverified"),
             capability_snapshot=data.get("capability_snapshot", {}),
             raw_payload=data.get("raw_payload"),
             trace_context=(
-                TraceContext.from_dict(data["trace_context"])
-                if data.get("trace_context") else None
+                TraceContext.from_dict(data["trace_context"]) if data.get("trace_context") else None
             ),
             metadata=data.get("metadata", {}),
         )
@@ -232,6 +242,7 @@ class ChannelEnvelope:
 @dataclass
 class AgentRequest:
     """Agent 运行时输入。"""
+
     schema_version: str = "1.0"
     turn_id: str = ""
     principal: dict[str, Any] = field(default_factory=dict)
@@ -267,8 +278,7 @@ class AgentRequest:
             capability_policy=data.get("capability_policy", {}),
             resource_budget=data.get("resource_budget", {}),
             trace_context=(
-                TraceContext.from_dict(data["trace_context"])
-                if data.get("trace_context") else None
+                TraceContext.from_dict(data["trace_context"]) if data.get("trace_context") else None
             ),
         )
 
@@ -276,6 +286,7 @@ class AgentRequest:
 @dataclass
 class AgentReply:
     """Agent 运行时输出。"""
+
     schema_version: str = "1.0"
     turn_id: str = ""
     content_parts: list[dict[str, Any]] = field(default_factory=list)
@@ -311,8 +322,7 @@ class AgentReply:
             suggested_tasks=data.get("suggested_tasks", []),
             status_summary=data.get("status_summary", ""),
             trace_context=(
-                TraceContext.from_dict(data["trace_context"])
-                if data.get("trace_context") else None
+                TraceContext.from_dict(data["trace_context"]) if data.get("trace_context") else None
             ),
         )
 
@@ -323,6 +333,7 @@ class AgentReply:
 @dataclass(frozen=True)
 class ToolRequest:
     """Tool 执行请求。"""
+
     schema_version: str = "1.0"
     tool_call_id: str = ""
     tool_name: str = ""
@@ -365,8 +376,7 @@ class ToolRequest:
             timeout=float(data.get("timeout", 30.0)),
             risk_context=data.get("risk_context", "none"),
             trace_context=(
-                TraceContext.from_dict(data["trace_context"])
-                if data.get("trace_context") else None
+                TraceContext.from_dict(data["trace_context"]) if data.get("trace_context") else None
             ),
         )
 
@@ -374,6 +384,7 @@ class ToolRequest:
 @dataclass(frozen=True)
 class ToolResult:
     """Tool 执行结果。"""
+
     schema_version: str = "1.0"
     tool_call_id: str = ""
     status: ToolStatus = ToolStatus.succeeded
@@ -418,6 +429,7 @@ class ToolResult:
 @dataclass
 class CommandEnvelope:
     """命令契约信封。"""
+
     schema_version: str = "1.0"
     command_id: str = ""
     command_type: str = ""
@@ -462,8 +474,7 @@ class CommandEnvelope:
             idempotency_key=data.get("idempotency_key", ""),
             principal_id=data.get("principal_id", ""),
             trace_context=(
-                TraceContext.from_dict(data["trace_context"])
-                if data.get("trace_context") else None
+                TraceContext.from_dict(data["trace_context"]) if data.get("trace_context") else None
             ),
             metadata=data.get("metadata", {}),
         )
@@ -475,6 +486,7 @@ class CommandEnvelope:
 @dataclass
 class EventEnvelope:
     """事件信封。"""
+
     schema_version: str = "1.0"
     event_id: str = ""
     event_type: str = ""
@@ -537,7 +549,6 @@ class EventEnvelope:
             correlation_id=data.get("correlation_id", ""),
             causation_id=data.get("causation_id", ""),
             trace_context=(
-                TraceContext.from_dict(data["trace_context"])
-                if data.get("trace_context") else None
+                TraceContext.from_dict(data["trace_context"]) if data.get("trace_context") else None
             ),
         )

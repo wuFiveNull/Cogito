@@ -6,6 +6,7 @@ knowledge_segment / task_state）统一映射为只读 RetrievalCandidate，
 
 禁止把 Store Entity 直接作为跨层返回类型。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class RetrievalCandidate:
     """统一检索候选（PLAN-13 §5.4，不可变只读）。"""
+
     # recent_message | session_summary | memory | goal | knowledge_segment | task_state
     candidate_type: str = ""
     candidate_id: str = ""
@@ -39,6 +41,7 @@ class RetrievalCandidate:
 @dataclass(frozen=True)
 class RetrievalResult:
     """检索结果（PLAN-13 §13）。"""
+
     candidates: tuple[RetrievalCandidate, ...] = ()
     excluded: tuple[RetrievalCandidate, ...] = ()
     total_hits: int = 0

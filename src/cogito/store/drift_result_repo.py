@@ -3,12 +3,11 @@
 在 Drift Handler 完成事务中写 DriftResult + Outbox DriftResultCommitted;
 Consumer 校验后调 DriftProjectionService, 成功后回写 candidate_id/emitted。
 """
+
 from __future__ import annotations
 
 import json
 import sqlite3
-import time
-import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,7 +17,7 @@ class DriftResult:
     drift_result_id: str
     drift_run_id: str
     task_attempt_id: str
-    result_kind: str                   # 'internal_only' | 'candidate_emission' | 'skipped_no_value'
+    result_kind: str  # 'internal_only' | 'candidate_emission' | 'skipped_no_value'
     result_ref: str
     summary: str = ""
     items: list[dict[str, Any]] | None = None
@@ -40,13 +39,18 @@ class DriftResultRepository:
             "  candidate_id, emitted, created_at"
             ") VALUES (?,?,?,?,?, ?,?,?,?, ?,?)",
             (
-                result.drift_result_id, result.drift_run_id,
-                result.task_attempt_id, result.result_kind, result.result_ref,
+                result.drift_result_id,
+                result.drift_run_id,
+                result.task_attempt_id,
+                result.result_kind,
+                result.result_ref,
                 result.summary,
                 json.dumps(result.items or [], ensure_ascii=False),
                 json.dumps(result.candidate_draft, ensure_ascii=False)
-                if result.candidate_draft else None,
-                result.candidate_id, 1 if result.emitted else 0,
+                if result.candidate_draft
+                else None,
+                result.candidate_id,
+                1 if result.emitted else 0,
                 result.created_at,
             ),
         )
@@ -54,8 +58,7 @@ class DriftResultRepository:
 
     def mark_emitted(self, drift_result_id: str, candidate_id: str) -> None:
         self._conn.execute(
-            "UPDATE drift_results SET candidate_id=?, emitted=1 "
-            "WHERE drift_result_id=?",
+            "UPDATE drift_results SET candidate_id=?, emitted=1 WHERE drift_result_id=?",
             (candidate_id, drift_result_id),
         )
         self._conn.commit()
@@ -69,8 +72,8 @@ class DriftResultRepository:
 
     def latest_for_run(self, drift_run_id: str) -> DriftResult | None:
         row = self._conn.execute(
-            "SELECT * FROM drift_results WHERE drift_run_id=? "
-            "ORDER BY created_at DESC LIMIT 1", (drift_run_id,),
+            "SELECT * FROM drift_results WHERE drift_run_id=? ORDER BY created_at DESC LIMIT 1",
+            (drift_run_id,),
         ).fetchone()
         return self._row_to_result(row) if row else None
 

@@ -6,6 +6,7 @@
 边界（PLAN-09 M4a）：工具文件不直接依赖 SqliteMemoryService 或
 MemoryRepository，只依赖 contracts.memory.MemoryReader 端口。
 """
+
 from __future__ import annotations
 
 import logging
@@ -30,6 +31,7 @@ def _make_handler(
         on_exposed: 命中记忆后回调，接收命中的 memory_id 列表（PLAN-16 M3
             MEM-02：工具召回写 exposed 信号）。由组合根注入带独立连接的工厂。
     """
+
     async def handler(args: dict, ctx: ToolContext) -> str:
         """搜索记忆存储中的条目，返回带评分的结果。"""
         query = args.get("query", "")
@@ -43,10 +45,7 @@ def _make_handler(
             return f"[recall_memory] Search for '{query}': principal not available."
 
         if reader is None:
-            return (
-                f"[recall_memory] Search for '{query}': "
-                "memory reader not available."
-            )
+            return f"[recall_memory] Search for '{query}': memory reader not available."
 
         try:
             items = reader.retrieve(

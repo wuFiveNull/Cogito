@@ -1,4 +1,5 @@
 """PR-B3: Event/Outbox/Inbox reliability — Plan 04 M3."""
+
 from __future__ import annotations
 
 import pytest

@@ -2,6 +2,7 @@
 
 复用 domain/knowledge.py + store/knowledge_repo.py + service/knowledge/*.py。
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -24,6 +25,7 @@ class CogitoBackend:
         migrate(self._conn)
         # 延迟导入（避免 top-level 循环）
         from cogito.service.knowledge.service import KnowledgeService
+
         self._svc = KnowledgeService(self._conn)
 
     def close(self) -> None:

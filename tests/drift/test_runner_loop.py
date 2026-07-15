@@ -9,6 +9,7 @@
 - Lease 续租失败 → 零新副作用
 - config_version/skill_version 变化 → resume 校验拒绝 → needs_review
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -46,16 +47,23 @@ def _seed_run(conn, run_id, task_id):
     conn.execute(
         "INSERT INTO tasks (task_id, task_type, status, priority, idempotency_key, created_at) "
         "VALUES (?,?,?,?,?,?)",
-        (task_id, "drift.run", "running", 5, f"idemp-{task_id}",
-         int(time.time() * 1000)),
+        (task_id, "drift.run", "running", 5, f"idemp-{task_id}", int(time.time() * 1000)),
     )
     conn.execute(
         "INSERT INTO drift_runs "
         "(drift_run_id, task_id, principal_id, skill_name, skill_version, "
         " status, admission_snapshot_json, created_at) "
         "VALUES (?,?,?,?,?,?,?,?)",
-        (run_id, task_id, "owner", "proactive-policy-view-audit", "1.0",
-         "admitted", "{}", int(time.time() * 1000)),
+        (
+            run_id,
+            task_id,
+            "owner",
+            "proactive-policy-view-audit",
+            "1.0",
+            "admitted",
+            "{}",
+            int(time.time() * 1000),
+        ),
     )
     conn.commit()
 
@@ -90,6 +98,7 @@ class TestMultiStepLoop:
             "SELECT budget_used_json FROM drift_runs WHERE drift_run_id='dr-2'"
         ).fetchone()
         import json
+
         budget = json.loads(row["budget_used_json"])
         assert budget.get("tool_calls", 0) >= 2  # 2 步各 1 次 tool_call
 
@@ -149,8 +158,7 @@ class TestResume:
             "INSERT INTO drift_runs (drift_run_id, task_id, principal_id, "
             "skill_name, skill_version, status, admission_snapshot_json, created_at) "
             "VALUES (?,?,?,?,?,?,?,?)",
-            ("dr-6", "t-6", "owner", "proactive-policy-view-audit",
-             "1.0", "running", "{}", now),
+            ("dr-6", "t-6", "owner", "proactive-policy-view-audit", "1.0", "running", "{}", now),
         )
         # seed TaskAttempt（被 write_checkpoint 用于绑定真实 attempt_id）
         memory_db.execute(
@@ -168,10 +176,8 @@ class TestResume:
         assert "paused" in first
 
         # 真实 resume：再次调用，必须解析 follow-up payload 真正续跑
-        resume_task = Task(task_id="t-6", task_type="drift.run",
-                           status=TaskStatus.running)
-        second = handle_drift_run(resume_task,
-                                  _Ctx(memory_db, config_version_id="cfg-X"))
+        resume_task = Task(task_id="t-6", task_type="drift.run", status=TaskStatus.running)
+        second = handle_drift_run(resume_task, _Ctx(memory_db, config_version_id="cfg-X"))
         # 严格断言：必须标注 [resumed] 且最终 completed（不接受任意非空字符串）
         assert "resumed" in second.lower(), f"resume 必须标注 [resumed]：{second}"
         assert "completed" in second.lower(), f"resume 后应完成：{second}"
@@ -180,11 +186,10 @@ class TestResume:
             "SELECT budget_used_json, steps_taken FROM drift_runs WHERE drift_run_id='dr-6'"
         ).fetchone()
         import json
+
         budget = json.loads(row["budget_used_json"])
-        assert budget.get("tool_calls", 0) == 2, \
-            f"跨 Attempt 预算应精确为 2 步：{budget}"
-        assert row["steps_taken"] == 2, \
-            f"跨 Attempt 步数应精确为 2：{row['steps_taken']}"
+        assert budget.get("tool_calls", 0) == 2, f"跨 Attempt 预算应精确为 2 步：{budget}"
+        assert row["steps_taken"] == 2, f"跨 Attempt 步数应精确为 2：{row['steps_taken']}"
 
     def test_needs_review_on_version_mismatch(self, memory_db):
         """config_version 变化 → resume 校验严格拒绝 → needs_review + waiting Task。"""
@@ -198,8 +203,7 @@ class TestResume:
             "INSERT INTO drift_runs (drift_run_id, task_id, principal_id, "
             "skill_name, skill_version, status, admission_snapshot_json, created_at) "
             "VALUES (?,?,?,?,?,?,?,?)",
-            ("dr-7", "t-7", "owner", "proactive-policy-view-audit",
-             "1.0", "running", "{}", now),
+            ("dr-7", "t-7", "owner", "proactive-policy-view-audit", "1.0", "running", "{}", now),
         )
         memory_db.execute(
             "INSERT INTO task_attempts "
@@ -215,13 +219,10 @@ class TestResume:
         assert "paused" in first
 
         # 用不同 config_version_id resume → 真实 JSON 校验拒绝
-        resume_task = Task(task_id="t-7", task_type="drift.run",
-                           status=TaskStatus.running)
-        result = handle_drift_run(resume_task,
-                                  _Ctx(memory_db, config_version_id="cfg-new"))
+        resume_task = Task(task_id="t-7", task_type="drift.run", status=TaskStatus.running)
+        result = handle_drift_run(resume_task, _Ctx(memory_db, config_version_id="cfg-new"))
         # 严格断言：必须明确返回 needs_review + 说明 config_version changed
-        assert "needs_review" in result, \
-            f"config 版本变化必须进入 needs_review：{result}"
+        assert "needs_review" in result, f"config 版本变化必须进入 needs_review：{result}"
         assert "config_version" in result, f"必须说明原因：{result}"
         # drift_run 投影必须同步 needs_review
         row = memory_db.execute(
@@ -240,10 +241,10 @@ class TestResume:
             "SELECT budget_used_json FROM drift_runs WHERE drift_run_id='dr-8'"
         ).fetchone()
         import json
+
         budget1 = json.loads(row1["budget_used_json"]).get("tool_calls", 0)
         # 同一 run 再跑一次模拟 resume → budget 应累加
-        resume_task = Task(task_id="t-8", task_type="drift.run",
-                           status=TaskStatus.running)
+        resume_task = Task(task_id="t-8", task_type="drift.run", status=TaskStatus.running)
         handle_drift_run(resume_task, _Ctx(memory_db))
         row2 = memory_db.execute(
             "SELECT budget_used_json FROM drift_runs WHERE drift_run_id='dr-8'"
@@ -263,4 +264,5 @@ class TestLeaseLostZeroNewSideEffects:
         ).fetchone()
         assert row["steps_taken"] == 0
         import json
+
         assert json.loads(row["budget_used_json"]) == {}

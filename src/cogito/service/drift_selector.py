@@ -11,13 +11,11 @@ score = due_score
       - recent_run_penalty
       - recent_failure_penalty
 """
+
 from __future__ import annotations
 
 import time
 from typing import Any
-
-from cogito.domain.drift import DriftSkillManifest
-
 
 # 评分权重版本 (bumping 可使 selection trace 跨版本可比较)
 WEIGHTS_VERSION = "1"
@@ -28,9 +26,9 @@ W_STALENESS = 10.0
 W_COST = 1.0
 W_RECENT_RUN = 8.0
 W_RECENT_FAILURE = 25.0
-RECENCY_PENALTY_WINDOW_S = 1800   # 30 分钟内最近运行 → 惩罚
-FAILURE_BACKOFF_S = 600           # 失败后至少 10 分钟不选
-MAX_STALENESS_S = 86400           # 24h 未运行 → 最大 stale bonus
+RECENCY_PENALTY_WINDOW_S = 1800  # 30 分钟内最近运行 → 惩罚
+FAILURE_BACKOFF_S = 600  # 失败后至少 10 分钟不选
+MAX_STALENESS_S = 86400  # 24h 未运行 → 最大 stale bonus
 
 
 def select_skill(
@@ -73,19 +71,32 @@ def select_skill(
         cost = W_COST * (manifest.max_tool_calls + manifest.max_steps)
 
         # recent_run_penalty (30m 内运行过)
-        recent_run = (W_RECENT_RUN
-                      if last_run_at and (now - last_run_at) < RECENCY_PENALTY_WINDOW_S * 1000
-                      else 0.0)
+        recent_run = (
+            W_RECENT_RUN
+            if last_run_at and (now - last_run_at) < RECENCY_PENALTY_WINDOW_S * 1000
+            else 0.0
+        )
 
         # recent_failure_penalty (失败退避)
-        recent_failure = (W_RECENT_FAILURE
-                          if (last_status == "failed"
-                              and last_run_at
-                              and (now - last_run_at) < FAILURE_BACKOFF_S * 1000)
-                          else 0.0)
+        recent_failure = (
+            W_RECENT_FAILURE
+            if (
+                last_status == "failed"
+                and last_run_at
+                and (now - last_run_at) < FAILURE_BACKOFF_S * 1000
+            )
+            else 0.0
+        )
 
-        total = (due_score + expected_value + continuation + staleness
-                 - cost - recent_run - recent_failure)
+        total = (
+            due_score
+            + expected_value
+            + continuation
+            + staleness
+            - cost
+            - recent_run
+            - recent_failure
+        )
         scores[name] = total
 
     if not scores:

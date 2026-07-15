@@ -94,21 +94,15 @@ def test_agent_runner_streams_to_web_adapter() -> None:
     assert msg_id, "placeholder should carry a platform_message_id"
     for it in items:
         if it.get("kind") in ("send", "edit"):
-            assert it.get("platform_message_id") == msg_id, (
-                f"platform_message_id mismatch: {it}"
-            )
+            assert it.get("platform_message_id") == msg_id, f"platform_message_id mismatch: {it}"
 
     # DB：Turn 完成 + 存在 assistant 消息（内部 conversation_id 为 UUID，按 role 统计）
     turn = conn.execute("SELECT status FROM turns").fetchone()
     assert turn["status"] == "completed"
-    msg = conn.execute(
-        "SELECT COUNT(*) AS c FROM messages WHERE role='assistant'"
-    ).fetchone()
+    msg = conn.execute("SELECT COUNT(*) AS c FROM messages WHERE role='assistant'").fetchone()
     assert msg["c"] >= 1, "assistant message should be persisted"
 
-    delivery = conn.execute(
-        "SELECT content_mode, stream_status, status FROM deliveries"
-    ).fetchone()
+    delivery = conn.execute("SELECT content_mode, stream_status, status FROM deliveries").fetchone()
     assert delivery is not None, "streaming delivery should be persisted"
     assert delivery["content_mode"] == "final", delivery
     assert delivery["stream_status"] == "done", delivery

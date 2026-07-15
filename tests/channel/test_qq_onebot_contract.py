@@ -11,6 +11,7 @@
 
 注意：这些测试不启动真实 aiocqhttp server，只验证 LangBot Event → Inbound 转换。
 """
+
 from __future__ import annotations
 
 import json
@@ -72,7 +73,9 @@ def _make_group_event(
 ):
     """创建 GroupMessage LangBot Event。"""
     group = lb_entities.Group(
-        id=str(group_id), name="TestGroup", permission=lb_entities.Permission.Member,
+        id=str(group_id),
+        name="TestGroup",
+        permission=lb_entities.Permission.Member,
     )
     member = lb_entities.GroupMember(
         id=str(user_id),
@@ -150,7 +153,10 @@ class TestPrivateAllowlist:
             allow_private=True,
         )
         inbound, reason = friend_event_to_inbound(
-            event, instance_id="qq-main", policy=policy, bot_ids={BOT_QQ},
+            event,
+            instance_id="qq-main",
+            policy=policy,
+            bot_ids={BOT_QQ},
         )
         assert inbound is not None
         assert reason == "accepted"
@@ -172,7 +178,10 @@ class TestPrivateAllowlist:
             allow_private=True,
         )
         inbound, reason = friend_event_to_inbound(
-            event, instance_id="qq-main", policy=policy, bot_ids={BOT_QQ},
+            event,
+            instance_id="qq-main",
+            policy=policy,
+            bot_ids={BOT_QQ},
         )
         assert inbound is None
         assert reason == "not_owner"
@@ -187,7 +196,10 @@ class TestPrivateAllowlist:
             bot_self_ids={BOT_QQ},
         )
         inbound, reason = friend_event_to_inbound(
-            event, instance_id="qq-main", policy=policy, bot_ids={BOT_QQ},
+            event,
+            instance_id="qq-main",
+            policy=policy,
+            bot_ids={BOT_QQ},
         )
         assert inbound is None
         assert reason == "bot_self"
@@ -204,7 +216,10 @@ class TestGroupGating:
             require_mention_in_group=True,
         )
         inbound, reason = group_event_to_inbound(
-            event, instance_id="qq-main", policy=policy, bot_ids={BOT_QQ},
+            event,
+            instance_id="qq-main",
+            policy=policy,
+            bot_ids={BOT_QQ},
         )
         assert inbound is not None
         assert reason == "accepted"
@@ -222,7 +237,10 @@ class TestGroupGating:
             require_mention_in_group=True,
         )
         inbound, reason = group_event_to_inbound(
-            event, instance_id="qq-main", policy=policy, bot_ids={BOT_QQ},
+            event,
+            instance_id="qq-main",
+            policy=policy,
+            bot_ids={BOT_QQ},
         )
         assert inbound is None
         assert reason == "group_not_allowed"
@@ -231,7 +249,10 @@ class TestGroupGating:
     async def test_group_not_at_bot_ignored(self) -> None:
         """QQ-A12: 群内未 @Bot 被忽略。"""
         event = _make_group_event(
-            100006, int(ALLOWED_GROUP), int(OWNER_QQ), at_bot=False,
+            100006,
+            int(ALLOWED_GROUP),
+            int(OWNER_QQ),
+            at_bot=False,
         )
         policy = OneBotPolicy(
             owner_qq_ids={OWNER_QQ},
@@ -239,7 +260,10 @@ class TestGroupGating:
             require_mention_in_group=True,
         )
         inbound, reason = group_event_to_inbound(
-            event, instance_id="qq-main", policy=policy, bot_ids={BOT_QQ},
+            event,
+            instance_id="qq-main",
+            policy=policy,
+            bot_ids={BOT_QQ},
         )
         assert inbound is None
         assert reason == "not_at_bot"
@@ -248,7 +272,10 @@ class TestGroupGating:
     async def test_group_bot_self_rejected(self) -> None:
         """QQ-A13: bot 自己发送的群消息被忽略。"""
         event = _make_group_event(
-            100007, int(ALLOWED_GROUP), int(BOT_QQ), at_bot=False,
+            100007,
+            int(ALLOWED_GROUP),
+            int(BOT_QQ),
+            at_bot=False,
         )
         policy = OneBotPolicy(
             owner_qq_ids={OWNER_QQ},
@@ -257,7 +284,10 @@ class TestGroupGating:
             bot_self_ids={BOT_QQ},
         )
         inbound, reason = group_event_to_inbound(
-            event, instance_id="qq-main", policy=policy, bot_ids={BOT_QQ},
+            event,
+            instance_id="qq-main",
+            policy=policy,
+            bot_ids={BOT_QQ},
         )
         assert inbound is None
         assert reason == "bot_self"
@@ -272,7 +302,10 @@ class TestCanonicalFields:
         event = _make_friend_event(200001, int(OWNER_QQ), "test")
         policy = OneBotPolicy(owner_qq_ids={OWNER_QQ})
         inbound, _ = friend_event_to_inbound(
-            event, instance_id="qq-main", policy=policy, bot_ids={BOT_QQ},
+            event,
+            instance_id="qq-main",
+            policy=policy,
+            bot_ids={BOT_QQ},
         )
         assert inbound is not None
         assert inbound.metadata["sender_endpoint_ref"] == f"qq:qq-main:user:{OWNER_QQ}"
@@ -283,10 +316,14 @@ class TestCanonicalFields:
         """plan §8.4: 群聊稳定 ID 规则。"""
         event = _make_group_event(200002, int(ALLOWED_GROUP), int(OWNER_QQ))
         policy = OneBotPolicy(
-            owner_qq_ids={OWNER_QQ}, allowed_group_ids={ALLOWED_GROUP},
+            owner_qq_ids={OWNER_QQ},
+            allowed_group_ids={ALLOWED_GROUP},
         )
         inbound, _ = group_event_to_inbound(
-            event, instance_id="qq-main", policy=policy, bot_ids={BOT_QQ},
+            event,
+            instance_id="qq-main",
+            policy=policy,
+            bot_ids={BOT_QQ},
         )
         assert inbound is not None
         assert inbound.metadata["sender_endpoint_ref"] == f"qq:qq-main:user:{OWNER_QQ}"

@@ -11,6 +11,7 @@
 8. 成功后 CAS 推进 Cursor
 9. 完成 IngestionBatch
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -25,6 +26,7 @@ from cogito.capability.mcp.client import (
     MCPCallResult,
     MCPResultError,
 )
+from cogito.contracts.clock import now_ms
 from cogito.domain.connector import (
     ConnectorCursor,
     ConnectorItem,
@@ -47,7 +49,6 @@ from cogito.store.connector_repo import (
 )
 from cogito.store.mcp_connector_repo import MCPConnectorConfigRepository
 from cogito.store.repositories import OutboxRepository
-from cogito.contracts.clock import now_ms
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -126,8 +127,9 @@ def _normalize_dt(value: Any) -> datetime | None:
 
 def _build_source_metadata(item: Any) -> str:
     """把 MCP 整条 item 存为 source_metadata_json（用于回放 / 审计）。"""
-    return json.dumps(item if isinstance(item, dict) else {"_raw": str(item)},
-                      ensure_ascii=False)[:65536]
+    return json.dumps(item if isinstance(item, dict) else {"_raw": str(item)}, ensure_ascii=False)[
+        :65536
+    ]
 
 
 # ── 主流程 ───────────────────────────────────────────────────────────────────
@@ -192,8 +194,9 @@ def _poll_mcp_connector(
     next_cursor: str | None = _resolve_cursor(cursor, mapping)
 
     try:
-        while (pages < mapping.max_pages_per_poll
-               and len(fetched_items) < mapping.max_items_per_poll):
+        while (
+            pages < mapping.max_pages_per_poll and len(fetched_items) < mapping.max_items_per_poll
+        ):
             args = dict(mapping.arguments_template)
             if next_cursor:
                 args["cursor"] = next_cursor
@@ -232,7 +235,9 @@ def _poll_mcp_connector(
         ConnectorRepository(conn).update_failure(connector_id)
         raise
 
-    # 4. 归档 Raw
+    # 4. Normalize / score / summarize outside any write transaction.
+    # MODEL-ADAPTER and RUNTIME-FLOWS explicitly forbid holding SQLite writes
+    # while calling a model or an external service.
     raw = ConnectorRawItem(
         connector_id=connector_id,
         source_item_id=f"mcp-{now_ms()}",
@@ -241,14 +246,68 @@ def _poll_mcp_connector(
         http_etag="",
         http_last_modified="",
     )
-    ConnectorRawRepository(conn).insert(raw)
-
-    # 5. 逐条 Normalize / Deduplicate + 决策
     new_count = 0
     dup_count = 0
     quarantined_count = 0
+    prepared_items: list[dict[str, Any]] = []
 
+    for item in fetched_items:
+        shutdown_requested = getattr(ctx, "shutdown_requested", None)
+        if shutdown_requested is not None and shutdown_requested():
+            raise RuntimeError("shutdown requested during MCP connector enrichment")
+
+        external_id = mapping.extract_item_field(item, mapping.stable_id_path)
+        if not external_id:
+            quarantined_count += 1
+            continue
+
+        # Avoid model work for items already known before entering the write UoW.
+        if ConnectorItemRepository(conn).find_by_source_id(connector_id, external_id):
+            dup_count += 1
+            continue
+
+        title = mapping.extract_item_field(item, mapping.title_path)
+        body = mapping.extract_item_field(item, mapping.body_path)
+        url = mapping.extract_item_field(item, mapping.url_path)
+        topic = mapping.extract_item_field(item, mapping.topic_path)
+        occurred_at = _normalize_dt(mapping.resolve_path(item, mapping.updated_at_path))
+        content_hash = _content_hash(external_id, title, body, url)
+        if ConnectorItemRepository(conn).find_by_content_hash(connector_id, content_hash):
+            dup_count += 1
+            continue
+
+        # Deterministic relevance is independent from optional LLM summarization.
+        relevance = score_relevance(title, body, occurred_at, interests=[])
+        decision = decide(relevance, threshold=0.4)
+        item_status = ItemStatus.digest if decision == "digest" else ItemStatus.silent
+        summary_text = ""
+        model_router = getattr(ctx, "model_router", None)
+        if model_router is not None and (title or body):
+            try:
+                summary_text = asyncio.run(summarize_item(title, body, model_router))
+            except Exception:
+                _LOGGER.warning("summary failed for %s", external_id)
+
+        prepared_items.append(
+            {
+                "item": item,
+                "external_id": external_id,
+                "title": title,
+                "body": body,
+                "url": url,
+                "topic": topic,
+                "occurred_at": occurred_at,
+                "content_hash": content_hash,
+                "relevance": relevance,
+                "summary_text": summary_text,
+                "item_status": item_status,
+            }
+        )
+
+    # 5. Persist Raw + normalized items + Outbox + Cursor in one short UoW.
     with UnitOfWork(conn) as uow:
+        ConnectorRawRepository(conn).insert(raw)
+
         # Cursor 准备
         next_cursor_json = dict(cursor.cursor_json) if cursor else {}
         if next_cursor:
@@ -261,44 +320,15 @@ def _poll_mcp_connector(
         next_cursor_json["items_count"] = len(fetched_items)
         next_cursor_json["pages"] = pages
 
-        for item in fetched_items:
-            external_id = mapping.extract_item_field(item, mapping.stable_id_path)
-            if not external_id:
-                quarantined_count += 1
-                continue
+        for prepared in prepared_items:
+            item = prepared["item"]
+            external_id = prepared["external_id"]
+            content_hash = prepared["content_hash"]
 
-            # 幂等：重复 external_id 不建第二条
-            existing = ConnectorItemRepository(conn).find_by_source_id(connector_id, external_id)
-            if existing is not None:
+            # Re-check under the write transaction to close the concurrent poll race.
+            if ConnectorItemRepository(conn).find_by_source_id(connector_id, external_id):
                 dup_count += 1
                 continue
-
-            title = mapping.extract_item_field(item, mapping.title_path)
-            body = mapping.extract_item_field(item, mapping.body_path)
-            url = mapping.extract_item_field(item, mapping.url_path)
-            topic = mapping.extract_item_field(item, mapping.topic_path)
-            occurred_at = _normalize_dt(mapping.resolve_path(item, mapping.updated_at_path))
-
-            summary_text = ""
-            relevance = 0.0
-            item_status = ItemStatus.new
-            decision = "silent"
-
-            model_router = getattr(ctx, "model_router", None)
-            if model_router is not None and (title or body):
-                try:
-                    summary_text = asyncio.run(summarize_item(title, body, model_router))
-                except Exception:
-                    _LOGGER.warning("summary failed for %s", external_id)
-                try:
-                    relevance = score_relevance(title, body, occurred_at)
-                    decision = decide(relevance, threshold=0.4)
-                    item_status = ItemStatus.digest if decision == "digest" else ItemStatus.silent
-                except Exception:
-                    _LOGGER.warning("relevance failed for %s", external_id)
-
-            content_hash = _content_hash(external_id, title, body, url)
-            # 同 content_hash 也跳过
             if ConnectorItemRepository(conn).find_by_content_hash(connector_id, content_hash):
                 dup_count += 1
                 continue
@@ -307,30 +337,32 @@ def _poll_mcp_connector(
                 connector_id=connector_id,
                 raw_item_id=raw.raw_item_id,
                 source_item_id=external_id,
-                title=title[:1000],
-                link=url[:2000],
-                summary=body[:8000],
+                title=prepared["title"][:1000],
+                link=prepared["url"][:2000],
+                summary=prepared["body"][:8000],
                 author="",
-                published_at=occurred_at,
+                published_at=prepared["occurred_at"],
                 content_hash=content_hash,
-                relevance=relevance,
-                summary_text=summary_text[:4000],
-                status=item_status,
-                topic=topic[:200] if topic else "general",
+                relevance=prepared["relevance"],
+                summary_text=prepared["summary_text"][:4000],
+                status=prepared["item_status"],
+                topic=prepared["topic"][:200] if prepared["topic"] else "general",
             )
             ConnectorItemRepository(conn).insert(
                 connector_item, source_metadata=_build_source_metadata(item)
             )
 
             # PLAN-16 M4 KNOW-02: MCP 新 digest 内容经 durable Task 进入 Knowledge
-            if item_status == ItemStatus.digest:
+            if prepared["item_status"] == ItemStatus.digest:
                 from cogito.service.knowledge.sync import enqueue_connector_knowledge_sync
+
                 enqueue_connector_knowledge_sync(
-                    conn, connector_id=connector_id,
+                    conn,
+                    connector_id=connector_id,
                     item={
                         "source_item_id": external_id,
-                        "title": title or "",
-                        "body": body or "",
+                        "title": prepared["title"] or "",
+                        "body": prepared["body"] or "",
                         "content_hash": content_hash,
                     },
                     principal_id="owner",
@@ -356,14 +388,16 @@ def _poll_mcp_connector(
             new_count += 1
 
         # 7. 成功后推进 cursor
-        ConnectorCursorRepository(conn).upsert(ConnectorCursor(
-            connector_id=connector_id,
-            etag="",
-            last_modified="",
-            last_item_ids=next_cursor_json.get("last_item_ids", []),
-            last_polled_at=now,
-            cursor_json=next_cursor_json,
-        ))
+        ConnectorCursorRepository(conn).upsert(
+            ConnectorCursor(
+                connector_id=connector_id,
+                etag="",
+                last_modified="",
+                last_item_ids=next_cursor_json.get("last_item_ids", []),
+                last_polled_at=now,
+                cursor_json=next_cursor_json,
+            )
+        )
         ConnectorRepository(conn).update_success(connector_id)
 
         uow.commit()
@@ -380,7 +414,12 @@ def _poll_mcp_connector(
 
     _LOGGER.info(
         "mcp_connector.poll: %s pages=%d fetched=%d new=%d dup=%d q=%d",
-        connector_id, pages, len(fetched_items), new_count, dup_count, quarantined_count,
+        connector_id,
+        pages,
+        len(fetched_items),
+        new_count,
+        dup_count,
+        quarantined_count,
     )
     return (
         f"pages={pages} fetched={len(fetched_items)} "
@@ -393,6 +432,7 @@ def _poll_mcp_connector(
 
 def _content_hash(external_id: str, title: str, body: str, url: str) -> str:
     import hashlib
+
     raw = "\n".join([external_id, title, url, body[:500]])
     return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
 
@@ -439,8 +479,14 @@ class IngestionBatchRepository:
                  cursor_before_json, started_at)
             VALUES (?, ?, ?, ?, 'started', ?, ?)
             """,
-            (batch_id, connector_id, task_id, attempt_id,
-             json.dumps(cursor_before, ensure_ascii=False), now_ms()),
+            (
+                batch_id,
+                connector_id,
+                task_id,
+                attempt_id,
+                json.dumps(cursor_before, ensure_ascii=False),
+                now_ms(),
+            ),
         )
         self._conn.commit()
 
@@ -465,7 +511,10 @@ class IngestionBatchRepository:
             """,
             (
                 json.dumps(cursor_after, ensure_ascii=False),
-                fetched, accepted, duplicate, quarantined,
+                fetched,
+                accepted,
+                duplicate,
+                quarantined,
                 now_ms(),
                 batch_id,
             ),

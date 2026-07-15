@@ -22,21 +22,52 @@ DEFAULT_CONFIG_PATH = Path("config.toml")
 
 # ── 已知顶层 key —— 之外的视为未知 ──
 KNOWN_TOP_KEYS = frozenset({"workspace_path"})
-KNOWN_SECTIONS = frozenset({
-    "runtime", "storage", "interaction",
-    "channel", "channels", "conversation", "agent", "model", "llm", "memory",
-    "capability", "sandbox", "worker", "scheduler",
-    "connector", "proactive", "drift", "security",
-    "observability", "retention", "backup", "plugins",
-    "embedding", "multimodal", "knowledge",
-})
+KNOWN_SECTIONS = frozenset(
+    {
+        "runtime",
+        "storage",
+        "interaction",
+        "channel",
+        "channels",
+        "conversation",
+        "agent",
+        "model",
+        "llm",
+        "memory",
+        "capability",
+        "sandbox",
+        "worker",
+        "scheduler",
+        "connector",
+        "proactive",
+        "drift",
+        "security",
+        "observability",
+        "retention",
+        "backup",
+        "plugins",
+        "embedding",
+        "multimodal",
+        "knowledge",
+    }
+)
 
 # ── Channel 子节已知字段（[channel.*] 定型节） ──
-CHANNEL_QQ_FIELDS = frozenset({
-    "enabled", "driver", "instance_id", "host", "port", "access_token",
-    "owner_qq_ids", "allow_private", "allowed_group_ids",
-    "require_mention_in_group", "startup_timeout_seconds",
-})
+CHANNEL_QQ_FIELDS = frozenset(
+    {
+        "enabled",
+        "driver",
+        "instance_id",
+        "host",
+        "port",
+        "access_token",
+        "owner_qq_ids",
+        "allow_private",
+        "allowed_group_ids",
+        "require_mention_in_group",
+        "startup_timeout_seconds",
+    }
+)
 CHANNEL_TOP_FIELDS = frozenset({"gateway_url"})
 
 # 兼容别名映射：旧名 → 新名
@@ -49,31 +80,60 @@ COMPAT_ALIASES: dict[str, str] = {
 STORAGE_FIELDS = frozenset({"db_path", "enable_wal", "busy_timeout", "payload_dir", "profile_name"})
 RUNTIME_FIELDS = frozenset({"profile", "timezone", "instance_id"})
 INTERACTION_FIELDS = frozenset({"bind_host", "allow_remote", "validate_origin", "port"})
-WORKER_FIELDS = frozenset({
-    "concurrency", "poll_interval_seconds", "lease_duration_seconds", "heartbeat_interval_seconds",
-    "outbox_lease_ttl_seconds", "delivery_lease_ttl_seconds",
-    "recovery_grace_period_seconds",
-})
+WORKER_FIELDS = frozenset(
+    {
+        "concurrency",
+        "poll_interval_seconds",
+        "lease_duration_seconds",
+        "heartbeat_interval_seconds",
+        "outbox_lease_ttl_seconds",
+        "delivery_lease_ttl_seconds",
+        "recovery_grace_period_seconds",
+    }
+)
 
 MODEL_TOP_FIELDS = frozenset({"provider", "main", "providers", "roles"})
-MODEL_FIELDS = frozenset({
-    "model", "provider", "api_key", "base_url", "timeout_seconds", "modalities",
-})
+MODEL_FIELDS = frozenset(
+    {
+        "model",
+        "provider",
+        "api_key",
+        "base_url",
+        "timeout_seconds",
+        "modalities",
+    }
+)
 ROLE_FIELDS = frozenset({"provider", "model"})
 
-MULTIMODAL_FIELDS = frozenset({
-    "enabled", "auto_analyze", "inline_wait_seconds", "tool_timeout_seconds",
-    "max_file_bytes", "max_image_pixels", "max_assets_per_message",
-    "allowed_mime_types", "prompt_version", "result_schema_version",
-    "allowed_sticker_hosts",
-})
+MULTIMODAL_FIELDS = frozenset(
+    {
+        "enabled",
+        "auto_analyze",
+        "inline_wait_seconds",
+        "tool_timeout_seconds",
+        "max_file_bytes",
+        "max_image_pixels",
+        "max_assets_per_message",
+        "allowed_mime_types",
+        "prompt_version",
+        "result_schema_version",
+        "allowed_sticker_hosts",
+    }
+)
 
-AGENT_FIELDS = frozenset({
-    "system_prompt", "system_prompt_mode", "max_output_tokens",
-    "context_memory_window", "tools",
-    "enabled_toolsets", "disabled_toolsets", "mode",
-    "streaming_enabled",
-})
+AGENT_FIELDS = frozenset(
+    {
+        "system_prompt",
+        "system_prompt_mode",
+        "max_output_tokens",
+        "context_memory_window",
+        "tools",
+        "enabled_toolsets",
+        "disabled_toolsets",
+        "mode",
+        "streaming_enabled",
+    }
+)
 
 # ── 默认 System Prompt ──
 DEFAULT_SYSTEM_PROMPT = (
@@ -93,19 +153,40 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 # ── 已声明但尚未定型节（内容暂不校验，仅允许存在）──
-_TOLERATED_SECTIONS = frozenset({
-    "channel", "channels", "conversation", "agent", "model", "llm", "memory",
-    "capability", "sandbox", "scheduler",
-    "connector", "proactive", "drift", "security",
-    "observability", "retention", "backup", "plugins",
-    "capability",
-})
+_TOLERATED_SECTIONS = frozenset(
+    {
+        "channel",
+        "channels",
+        "conversation",
+        "agent",
+        "model",
+        "llm",
+        "memory",
+        "capability",
+        "sandbox",
+        "scheduler",
+        "connector",
+        "proactive",
+        "drift",
+        "security",
+        "observability",
+        "retention",
+        "backup",
+        "plugins",
+        "capability",
+    }
+)
 
 
 # ── 需要脱敏的字段 ──
-SENSITIVE_FIELDS = frozenset({
-    "api_key", "token", "secret", "access_token",
-})
+SENSITIVE_FIELDS = frozenset(
+    {
+        "api_key",
+        "token",
+        "secret",
+        "access_token",
+    }
+)
 
 
 class ConfigError(ValueError):
@@ -277,7 +358,8 @@ class WorkerConfig:
     def _validate(self) -> None:
         if self.poll_interval_seconds <= 0:
             raise ConfigError(
-                section="worker", field="poll_interval_seconds",
+                section="worker",
+                field="poll_interval_seconds",
                 reason="poll_interval_seconds must be > 0",
             )
         if self.lease_duration_seconds <= self.heartbeat_interval_seconds:
@@ -344,6 +426,7 @@ class ModelEndpointConfig:
     provider 字段声明适配器类型（openai_compat / anthropic / echo）；
     未声明时由上层注入默认值。
     """
+
     model: str = ""
     provider: str = ""
     api_key: str = ""
@@ -383,8 +466,9 @@ class RoleConfig:
 
     例：main/fast/vlm → 引用 providers 中的某个 Provider + 可选 model 覆盖。
     """
+
     provider: str = ""  # 引用 ModelConfig.providers 的 key
-    model: str = ""     # 可选：覆盖 Provider 默认 model
+    model: str = ""  # 可选：覆盖 Provider 默认 model
 
     def __repr__(self) -> str:
         return f"RoleConfig(provider={self.provider!r}, model={self.model!r})"
@@ -407,6 +491,7 @@ class ModelConfig:
     - 多 provider + 角色路由：[model.providers.<name>] + [model.roles.<name>]
     当配置了 roles 时，按角色路由优先；否则退化到单 provider 行为。
     """
+
     provider: str = "openai_compat"
     main: ModelEndpointConfig = field(default_factory=ModelEndpointConfig)
     providers: dict[str, ModelEndpointConfig] = field(default_factory=dict)
@@ -464,14 +549,17 @@ class ModelConfig:
 
         # role 覆盖 model 时，构造新 endpoint 避免修改共享配置
         if role_cfg.model and role_cfg.model != base.model:
-            return (provider_key, ModelEndpointConfig(
-                model=role_cfg.model,
-                provider=base.provider,
-                api_key=base.api_key,
-                base_url=base.base_url,
-                timeout_seconds=base.timeout_seconds,
-                modalities=base.modalities,
-            ))
+            return (
+                provider_key,
+                ModelEndpointConfig(
+                    model=role_cfg.model,
+                    provider=base.provider,
+                    api_key=base.api_key,
+                    base_url=base.base_url,
+                    timeout_seconds=base.timeout_seconds,
+                    modalities=base.modalities,
+                ),
+            )
 
         return (provider_key, base)
 
@@ -493,6 +581,7 @@ class AgentConfig:
     - system_prompt_mode: "replace" 完全替换默认提示词
                           "append"  在默认提示词后追加用户内容
     """
+
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     system_prompt_mode: str = "append"
     max_output_tokens: int = 4096
@@ -529,9 +618,7 @@ class AgentConfig:
         max_tokens = raw.get("max_output_tokens") or raw.get("max_tokens")
         context_raw = raw.get("context", {})
         memory_window = (
-            context_raw.get("memory_window")
-            if isinstance(context_raw, dict)
-            else None
+            context_raw.get("memory_window") if isinstance(context_raw, dict) else None
         ) or raw.get("context_memory_window", 50)
 
         user_prompt = raw.get("system_prompt")
@@ -560,15 +647,25 @@ class AgentConfig:
 
 # ── F1: Embedding 配置 ──
 
-EMBEDDING_FIELDS = frozenset({
-    "enabled", "provider", "model", "api_key", "base_url",
-    "dimensions", "version", "timeout", "max_batch_size",
-})
+EMBEDDING_FIELDS = frozenset(
+    {
+        "enabled",
+        "provider",
+        "model",
+        "api_key",
+        "base_url",
+        "dimensions",
+        "version",
+        "timeout",
+        "max_batch_size",
+    }
+)
 
 
 @dataclass
 class EmbeddingConfig:
     """Embedding 配置（F1：默认关闭）。"""
+
     enabled: bool = False
     provider: str = "openai_compat"
     model: str = ""
@@ -608,6 +705,7 @@ class EmbeddingConfig:
 @dataclass
 class MCPServerEntry:
     """MCP Server 配置项。"""
+
     name: str = ""
     transport: str = "stdio"
     command: str = ""
@@ -641,25 +739,41 @@ class MCPServerEntry:
 KNOWN_QUIET_HOURS_FIELDS = frozenset({"enabled", "start", "end", "timezone"})
 PROACTIVE_QUIET_HOURS_FIELDS = KNOWN_QUIET_HOURS_FIELDS
 
-KNOWN_PROACTIVE_FIELDS = frozenset({
-    "enabled", "dry_run", "default_principal_id",
-    "minimum_relevance", "minimum_novelty",
-    "same_topic_cooldown_minutes",
-    "max_pushes_per_hour", "max_pushes_per_day", "alert_max_per_hour",
-    "digest_max_delay_minutes", "candidate_ttl_hours",
-    "quiet_hours", "cadence",
-})
+KNOWN_PROACTIVE_FIELDS = frozenset(
+    {
+        "enabled",
+        "dry_run",
+        "default_principal_id",
+        "minimum_relevance",
+        "minimum_novelty",
+        "same_topic_cooldown_minutes",
+        "max_pushes_per_hour",
+        "max_pushes_per_day",
+        "alert_max_per_hour",
+        "digest_max_delay_minutes",
+        "candidate_ttl_hours",
+        "quiet_hours",
+        "cadence",
+    }
+)
 
-KNOWN_PROACTIVE_CADENCE_FIELDS = frozenset({
-    "min_interval_seconds", "max_interval_seconds",
-    "high_energy_interval_seconds", "medium_energy_interval_seconds",
-    "low_energy_interval_seconds", "jitter_ratio", "misfire_policy",
-})
+KNOWN_PROACTIVE_CADENCE_FIELDS = frozenset(
+    {
+        "min_interval_seconds",
+        "max_interval_seconds",
+        "high_energy_interval_seconds",
+        "medium_energy_interval_seconds",
+        "low_energy_interval_seconds",
+        "jitter_ratio",
+        "misfire_policy",
+    }
+)
 
 
 @dataclass
 class ProactiveQuietHours:
     """Quiet Hours 子配置。"""
+
     enabled: bool = True
     start: str = "23:00"
     end: str = "08:00"
@@ -688,6 +802,7 @@ class ProactiveCadenceConfig:
 
     高能量 (用户活跃) → 更长间隔保持安静；低能量 → 缩短间隔提高主动性。
     """
+
     min_interval_seconds: int = 60
     max_interval_seconds: int = 1800
     high_energy_interval_seconds: int = 480
@@ -726,6 +841,7 @@ class ProactiveConfig:
 
     默认 dry_run=True + enabled=False：用户必须显式翻转才会进入真实发送。
     """
+
     enabled: bool = False
     dry_run: bool = True
     default_principal_id: str = "owner"
@@ -780,23 +896,37 @@ class ProactiveConfig:
 
 # ── Drift 配置 ────────────────────────────────────────────────────────────────
 
-_KNOWN_DRIFT_FIELDS = frozenset({
-    "enabled", "dry_run", "default_principal_id",
-    "idle_after_minutes", "max_runs_per_day", "max_concurrent",
-    "max_runtime_seconds", "max_steps",
-    "allow_workspace_skills", "allow_candidate_emission",
-    "allow_candidate_projection", "workspace_path", "preemption",
-})
+_KNOWN_DRIFT_FIELDS = frozenset(
+    {
+        "enabled",
+        "dry_run",
+        "default_principal_id",
+        "idle_after_minutes",
+        "max_runs_per_day",
+        "max_concurrent",
+        "max_runtime_seconds",
+        "max_steps",
+        "allow_workspace_skills",
+        "allow_candidate_emission",
+        "allow_candidate_projection",
+        "workspace_path",
+        "preemption",
+    }
+)
 
-_KNOWN_DRIFT_PREEMPTION_FIELDS = frozenset({
-    "check_interval_seconds", "turn_priority_threshold",
-    "high_priority_backlog_threshold",
-})
+_KNOWN_DRIFT_PREEMPTION_FIELDS = frozenset(
+    {
+        "check_interval_seconds",
+        "turn_priority_threshold",
+        "high_priority_backlog_threshold",
+    }
+)
 
 
 @dataclass
 class DriftPreemptionConfig:
     """Drift 抢占相关配置。"""
+
     check_interval_seconds: int = 1
     turn_priority_threshold: int = 50
     high_priority_backlog_threshold: int = 1
@@ -807,14 +937,14 @@ class DriftPreemptionConfig:
         return cls(
             check_interval_seconds=int(raw.get("check_interval_seconds", 1)),
             turn_priority_threshold=int(raw.get("turn_priority_threshold", 50)),
-            high_priority_backlog_threshold=int(
-                raw.get("high_priority_backlog_threshold", 1)),
+            high_priority_backlog_threshold=int(raw.get("high_priority_backlog_threshold", 1)),
         )
 
 
 @dataclass
 class DriftConfig:
     """Drift 配置：默认关闭 + dry_run，所有外部副作用 opt-in。"""
+
     enabled: bool = False
     dry_run: bool = True
     default_principal_id: str = "owner"
@@ -899,10 +1029,16 @@ class AutoModeConfig:
 
     @classmethod
     def _from_raw(cls, raw: dict[str, Any]) -> AutoModeConfig:
-        known = frozenset({
-            "enabled", "model_role", "stage1_timeout_seconds",
-            "stage2_timeout_seconds", "max_argument_chars", "safe_tools",
-        })
+        known = frozenset(
+            {
+                "enabled",
+                "model_role",
+                "stage1_timeout_seconds",
+                "stage2_timeout_seconds",
+                "max_argument_chars",
+                "safe_tools",
+            }
+        )
         _check_unknown(raw, known, "capability.auto_mode")
         cfg = cls(
             enabled=bool(raw.get("enabled", False)),
@@ -916,7 +1052,9 @@ class AutoModeConfig:
             raise ConfigError("capability.auto_mode", "timeout", "timeouts must be positive")
         if cfg.max_argument_chars < 256:
             raise ConfigError(
-                "capability.auto_mode", "max_argument_chars", "must be at least 256",
+                "capability.auto_mode",
+                "max_argument_chars",
+                "must be at least 256",
             )
         if not cfg.model_role:
             raise ConfigError("capability.auto_mode", "model_role", "must not be empty")
@@ -926,9 +1064,14 @@ class AutoModeConfig:
 @dataclass
 class WorkspaceToolConfig:
     root: str = ""
-    protected_paths: list[str] = field(default_factory=lambda: [
-        ".git", ".env", ".workspace", "config.toml",
-    ])
+    protected_paths: list[str] = field(
+        default_factory=lambda: [
+            ".git",
+            ".env",
+            ".workspace",
+            "config.toml",
+        ]
+    )
     max_read_bytes: int = 1_000_000
     max_write_bytes: int = 1_000_000
 
@@ -941,9 +1084,13 @@ class WorkspaceToolConfig:
         )
         cfg = cls(
             root=str(raw.get("root", "")),
-            protected_paths=[str(v) for v in raw.get(
-                "protected_paths", cls().protected_paths,
-            )],
+            protected_paths=[
+                str(v)
+                for v in raw.get(
+                    "protected_paths",
+                    cls().protected_paths,
+                )
+            ],
             max_read_bytes=int(raw.get("max_read_bytes", 1_000_000)),
             max_write_bytes=int(raw.get("max_write_bytes", 1_000_000)),
         )
@@ -984,6 +1131,7 @@ class ReadOnlyMCPConfig:
 @dataclass
 class CapabilityConfig:
     """Capability 配置（MCP servers + proactive 等）。"""
+
     mcp_servers: list[MCPServerEntry] = field(default_factory=list)
     proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
     plugins: PluginConfig = field(default_factory=PluginConfig)
@@ -1016,39 +1164,44 @@ class CapabilityConfig:
                     isolation,
                     "stdio MCP requires an explicit host_trusted declaration",
                 )
-            servers.append(MCPServerEntry(
-                name=str(name),
-                transport=transport,
-                command=str(cfg.get("command", "")),
-                args=list(cfg.get("args", [])),
-                url=str(cfg.get("url", "")),
-                enabled=bool(cfg.get("enabled", True)),
-                toolset=str(cfg.get("toolset", "mcp")),
-                cwd=str(cfg.get("cwd", "")),
-                include_tools=[str(v) for v in cfg.get("include_tools", [])],
-                exclude_tools=[str(v) for v in cfg.get("exclude_tools", [])],
-                timeout_seconds=float(cfg.get("timeout_seconds", 30)),
-                max_output_chars=int(cfg.get("max_output_chars", 50_000)),
-                allow_resources=bool(cfg.get("allow_resources", False)),
-                allow_prompts=bool(cfg.get("allow_prompts", False)),
-                allow_roots=bool(cfg.get("allow_roots", False)),
-                allow_sampling=bool(cfg.get("allow_sampling", False)),
-                isolation=isolation,
-                env={str(k): str(v) for k, v in cfg.get("env", {}).items()},
-                headers={str(k): str(v) for k, v in cfg.get("headers", {}).items()},
-                oauth_enabled=bool(cfg.get("oauth_enabled", False)),
-                oauth_token_file=str(cfg.get("oauth_token_file", "")),
-                oauth_redirect_uri=str(cfg.get(
-                    "oauth_redirect_uri", "http://127.0.0.1:33418/callback",
-                )),
-                oauth_scope=str(cfg.get("oauth_scope", "")),
-                secret_root=str(cfg.get("secret_root", "")),
-                tool_policy={
-                    str(tool): dict(policy)
-                    for tool, policy in dict(cfg.get("tool_policy", {})).items()
-                },
-                roots=[str(value) for value in cfg.get("roots", [])],
-            ))
+            servers.append(
+                MCPServerEntry(
+                    name=str(name),
+                    transport=transport,
+                    command=str(cfg.get("command", "")),
+                    args=list(cfg.get("args", [])),
+                    url=str(cfg.get("url", "")),
+                    enabled=bool(cfg.get("enabled", True)),
+                    toolset=str(cfg.get("toolset", "mcp")),
+                    cwd=str(cfg.get("cwd", "")),
+                    include_tools=[str(v) for v in cfg.get("include_tools", [])],
+                    exclude_tools=[str(v) for v in cfg.get("exclude_tools", [])],
+                    timeout_seconds=float(cfg.get("timeout_seconds", 30)),
+                    max_output_chars=int(cfg.get("max_output_chars", 50_000)),
+                    allow_resources=bool(cfg.get("allow_resources", False)),
+                    allow_prompts=bool(cfg.get("allow_prompts", False)),
+                    allow_roots=bool(cfg.get("allow_roots", False)),
+                    allow_sampling=bool(cfg.get("allow_sampling", False)),
+                    isolation=isolation,
+                    env={str(k): str(v) for k, v in cfg.get("env", {}).items()},
+                    headers={str(k): str(v) for k, v in cfg.get("headers", {}).items()},
+                    oauth_enabled=bool(cfg.get("oauth_enabled", False)),
+                    oauth_token_file=str(cfg.get("oauth_token_file", "")),
+                    oauth_redirect_uri=str(
+                        cfg.get(
+                            "oauth_redirect_uri",
+                            "http://127.0.0.1:33418/callback",
+                        )
+                    ),
+                    oauth_scope=str(cfg.get("oauth_scope", "")),
+                    secret_root=str(cfg.get("secret_root", "")),
+                    tool_policy={
+                        str(tool): dict(policy)
+                        for tool, policy in dict(cfg.get("tool_policy", {})).items()
+                    },
+                    roots=[str(value) for value in cfg.get("roots", [])],
+                )
+            )
         proactive_raw = raw.get("proactive")
         proactive = (
             ProactiveConfig._from_raw(proactive_raw)
@@ -1057,9 +1210,7 @@ class CapabilityConfig:
         )
         plugins_raw = raw.get("plugins")
         plugins = (
-            PluginConfig._from_raw(plugins_raw)
-            if isinstance(plugins_raw, dict)
-            else PluginConfig()
+            PluginConfig._from_raw(plugins_raw) if isinstance(plugins_raw, dict) else PluginConfig()
         )
         auto_mode_raw = raw.get("auto_mode")
         auto_mode = (
@@ -1071,13 +1222,12 @@ class CapabilityConfig:
         skills = SkillToolConfig._from_raw(dict(raw.get("skills", {})))
         if "shell" in raw:
             raise ConfigError(
-                "capability.shell", "", "Shell and process tools have been removed",
+                "capability.shell",
+                "",
+                "Shell and process tools have been removed",
             )
         read_only_mcp = ReadOnlyMCPConfig._from_raw(dict(raw.get("read_only_mcp", {})))
-        mcp_aliases = {
-            str(k): str(v)
-            for k, v in raw.get("mcp", {}).get("aliases", {}).items()
-        }
+        mcp_aliases = {str(k): str(v) for k, v in raw.get("mcp", {}).get("aliases", {}).items()}
         return cls(
             mcp_servers=servers,
             proactive=proactive,
@@ -1088,7 +1238,6 @@ class CapabilityConfig:
             mcp_aliases=mcp_aliases,
             read_only_mcp=read_only_mcp,
         )
-
 
 
 # =============================================================================
@@ -1102,6 +1251,7 @@ class QQOneBotConfig:
 
     仅第一版：loopback only，allowlist 控制，不泄漏 token/QQ ID。
     """
+
     enabled: bool = False
     driver: str = "aiocqhttp"
     instance_id: str = "qq-main"
@@ -1183,6 +1333,7 @@ class ChannelConfig:
 
     第一版只声明 [channel.qq]，未来增加其他 Channel。
     """
+
     qq: QQOneBotConfig = field(default_factory=QQOneBotConfig)
     gateway_url: str = ""
 
@@ -1244,9 +1395,7 @@ class MultimodalConfig:
             ),
             prompt_version=str(raw.get("prompt_version", "1")),
             result_schema_version=str(raw.get("result_schema_version", "1")),
-            allowed_sticker_hosts=tuple(
-                str(v) for v in raw.get("allowed_sticker_hosts", ())
-            ),
+            allowed_sticker_hosts=tuple(str(v) for v in raw.get("allowed_sticker_hosts", ())),
         )
         if cfg.inline_wait_seconds < 0 or cfg.tool_timeout_seconds <= 0:
             raise ConfigError("multimodal", "timeout", "timeouts must be positive")
@@ -1254,7 +1403,9 @@ class MultimodalConfig:
             raise ConfigError("multimodal", "limits", "file and pixel limits must be positive")
         if cfg.max_assets_per_message <= 0:
             raise ConfigError(
-                "multimodal", "max_assets_per_message", "must be greater than zero",
+                "multimodal",
+                "max_assets_per_message",
+                "must be greater than zero",
             )
         return cfg
 
@@ -1275,8 +1426,11 @@ class MemoryExtractionConfig:
     @classmethod
     def _from_raw(cls, raw: dict[str, Any]) -> MemoryExtractionConfig:
         known = {
-            "enabled", "min_new_messages", "max_window_messages",
-            "on_session_close", "on_explicit_remember",
+            "enabled",
+            "min_new_messages",
+            "max_window_messages",
+            "on_session_close",
+            "on_explicit_remember",
         }
         _check_unknown(raw, frozenset(known), "memory.extraction")
         cfg = cls(**raw)
@@ -1298,11 +1452,16 @@ class MemoryWeightConfig:
     def _from_raw(cls, raw: dict[str, Any]) -> MemoryWeightConfig:
         _check_unknown(
             raw,
-            frozenset({
-                "policy_version", "recompute_interval_seconds",
-                "consolidate_interval_seconds", "candidate_ttl_days",
-                "batch_size", "algorithm_version",
-            }),
+            frozenset(
+                {
+                    "policy_version",
+                    "recompute_interval_seconds",
+                    "consolidate_interval_seconds",
+                    "candidate_ttl_days",
+                    "batch_size",
+                    "algorithm_version",
+                }
+            ),
             "memory.weight",
         )
         return cls(**raw)
@@ -1357,10 +1516,16 @@ class KnowledgeConfig:
     def _from_raw(cls, raw: dict[str, Any]) -> KnowledgeConfig:
         _check_unknown(
             raw,
-            frozenset({
-                "enabled", "allowed_source_kinds", "max_resource_bytes",
-                "parser_version", "segmenter_version", "retrieval",
-            }),
+            frozenset(
+                {
+                    "enabled",
+                    "allowed_source_kinds",
+                    "max_resource_bytes",
+                    "parser_version",
+                    "segmenter_version",
+                    "retrieval",
+                }
+            ),
             "knowledge",
         )
         data = dict(raw)
@@ -1506,9 +1671,7 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
             raise ConfigError(
                 section="(top-level)",
                 field="",
-                reason=(
-                    f"unknown sections/keys: {', '.join(sorted(unknown_keys))}"
-                ),
+                reason=(f"unknown sections/keys: {', '.join(sorted(unknown_keys))}"),
                 source_path=str(cfg_path),
             )
 
@@ -1557,8 +1720,7 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
 
         multimodal_raw = resolved.get("multimodal", {})
         multimodal = (
-            MultimodalConfig._from_raw(multimodal_raw)
-            if multimodal_raw else MultimodalConfig()
+            MultimodalConfig._from_raw(multimodal_raw) if multimodal_raw else MultimodalConfig()
         )
         memory_raw = resolved.get("memory", {})
         memory = MemoryConfig._from_raw(memory_raw) if memory_raw else MemoryConfig()
@@ -1569,6 +1731,7 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
 
         # Plan 06 M2: 跨字段校验（在构建前执行，失败则 ConfigError）
         from cogito.infrastructure.config_version import validate_cross_fields
+
         cross_errors = validate_cross_fields(resolved)
         if cross_errors:
             raise ConfigError(
@@ -1580,6 +1743,7 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
 
         # Plan 06 M2: 计算配置版本元数据（hash 基于解析后的内容）
         from cogito.infrastructure.config_version import normalize_config
+
         version_meta = normalize_config(resolved)
 
         return cls(
@@ -1612,7 +1776,7 @@ recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
         非 secret_ref 形式的值直接返回。
         """
         if value.startswith("env://"):
-            ref = value[len("env://"):]
+            ref = value[len("env://") :]
             return os.environ.get(ref, "")
         if value.startswith("${") and value.endswith("}"):
             # 复用 _resolve_env 的 ${VAR} 语法

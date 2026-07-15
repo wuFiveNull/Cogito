@@ -1,4 +1,5 @@
 """PR-C4: Sandbox profiles — Plan 03 M4."""
+
 from __future__ import annotations
 
 import pytest

@@ -37,9 +37,7 @@ class TestOnlineSafe:
         by_ver = {s["version"]: s for s in status}
         for v in range(29, 37):
             assert v in by_ver, f"migration {v} missing"
-            assert by_ver[v]["status"] == "completed", (
-                f"migration {v} status={by_ver[v]['status']}"
-            )
+            assert by_ver[v]["status"] == "completed", f"migration {v} status={by_ver[v]['status']}"
 
     def test_status_shows_applied(self, conn):
         status = mig.get_migration_status(conn)
@@ -58,9 +56,7 @@ class TestUpgradePath:
     """
 
     def test_empty_db_migrates_to_latest(self, conn):
-        row = conn.execute(
-            "SELECT MAX(version) FROM _schema_version"
-        ).fetchone()
+        row = conn.execute("SELECT MAX(version) FROM _schema_version").fetchone()
         assert row[0] >= 36
 
     def test_idempotent_reapply(self, conn):
@@ -103,9 +99,7 @@ class TestBackfill:
     def test_backfill_batches(self, conn):
         """插入测试数据，分批回填。"""
         # 创建测试表
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS _test_bf (id INTEGER PRIMARY KEY, val TEXT)"
-        )
+        conn.execute("CREATE TABLE IF NOT EXISTS _test_bf (id INTEGER PRIMARY KEY, val TEXT)")
         for i in range(25):
             conn.execute(
                 "INSERT INTO _test_bf (id, val) VALUES (?, ?)",
@@ -128,16 +122,12 @@ class TestBackfill:
         )
         assert processed == 25
         # 验证数据已更新
-        row = conn.execute(
-            "SELECT val FROM _test_bf WHERE id = 0"
-        ).fetchone()
+        row = conn.execute("SELECT val FROM _test_bf WHERE id = 0").fetchone()
         assert row[0] == "new-0"
 
     def test_backfill_resumable(self, conn):
         """中断后从 Checkpoint 继续。"""
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS _test_bf2 (id INTEGER PRIMARY KEY, val TEXT)"
-        )
+        conn.execute("CREATE TABLE IF NOT EXISTS _test_bf2 (id INTEGER PRIMARY KEY, val TEXT)")
         for i in range(20):
             conn.execute(
                 "INSERT INTO _test_bf2 (id, val) VALUES (?, ?)",
@@ -203,10 +193,11 @@ class TestConfigLayerOverride:
     def test_config_cross_fields_wired_in_load(self, tmp_path):
         """cfg: Config.load() 实际调用 validate_cross_fields。"""
         from cogito.config import Config, ConfigError
+
         # 非法 heartbeat vs lease
         cfg_file = tmp_path / "bad.toml"
         cfg_file.write_text(
-            '[worker]\nheartbeat_interval_seconds = 200\nlease_duration_seconds = 300\n',
+            "[worker]\nheartbeat_interval_seconds = 200\nlease_duration_seconds = 300\n",
             encoding="utf-8",
         )
         with pytest.raises(ConfigError):
@@ -220,7 +211,9 @@ class TestContractPhase:
     def test_contract_phase_cleanup(self, conn):
         """mg-07: contract 阶段清理临时结构。"""
         # 创建带 CONTRACT 段的迁移
-        import tempfile, os
+        import tempfile
+        import os
+
         mig_dir = Path(mig.MIGRATIONS_DIR)
         # 添加一个 CONTRACT 标记的测试 migration
         test_file = mig_dir / "0099_test_contract.sql"

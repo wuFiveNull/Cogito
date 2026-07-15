@@ -16,11 +16,13 @@ def create_tool_def(
 ) -> ToolDef:
     async def handler(args: dict, context: ToolContext) -> str:
         if make_service is None:
-            return json.dumps({
-                "vision_status": "unavailable",
-                "asset_id": args.get("asset_id", ""),
-                "error_category": "vision_service_not_configured",
-            })
+            return json.dumps(
+                {
+                    "vision_status": "unavailable",
+                    "asset_id": args.get("asset_id", ""),
+                    "error_category": "vision_service_not_configured",
+                }
+            )
         service = make_service()
         result = await service.analyze_for_tool(
             str(args.get("asset_id", "")),
@@ -56,4 +58,3 @@ def create_tool_def(
         result_trust_label="external_untrusted",
         output_schema={"type": "object"},
     )
-

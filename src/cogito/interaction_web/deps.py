@@ -3,6 +3,7 @@
 保持向后兼容：外部代码 `from cogito.interaction_web.deps import CommandDeps`
 继续可用。
 """
+
 from __future__ import annotations
 
 from cogito.service.api.deps import (  # noqa: F401

@@ -82,6 +82,7 @@ def _intersect_scopes(left: tuple[str, ...], right: tuple[str, ...]) -> tuple[st
         return left
     return tuple(sorted(set(left) & set(right)))
 
+
 # ── Tool 定义（注册后不可变）──
 
 

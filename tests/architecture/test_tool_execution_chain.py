@@ -2,6 +2,7 @@
 
 Intent → Policy → Budget → Execute → Receipt + idempotency key hash.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -14,8 +15,11 @@ from cogito.capability.registry import CapabilityRegistry
 
 def _make_tool(name: str = "echo", **kw: Any) -> ToolDef:
     return ToolDef(
-        name=name, description=f"tool {name}", input_schema={"type": "object"},
-        handler=_echo_handler, **kw,
+        name=name,
+        description=f"tool {name}",
+        input_schema={"type": "object"},
+        handler=_echo_handler,
+        **kw,
     )
 
 

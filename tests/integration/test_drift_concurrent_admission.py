@@ -6,6 +6,7 @@ tick_drift_admit() → 数据库 partial unique index (uq_drift_one_active_per_p
 
 (审计证据: '单连接串行 20 次不创建 Run' 的弱测试已被本测试替代。)
 """
+
 from __future__ import annotations
 
 import os
@@ -37,7 +38,8 @@ def _make_scheduler(path):
     conn.execute("PRAGMA busy_timeout=10000;")
     conn.row_factory = sqlite3.Row
     dr = DriftConfig(
-        enabled=True, dry_run=False,
+        enabled=True,
+        dry_run=False,
         default_principal_id="owner",
         idle_after_minutes=30,
         max_runs_per_day=100,
@@ -54,8 +56,8 @@ class TestConcurrentAdmission:
         db_path = str(tmp_path / "drift_concurrent.db")
         _prepare_db(db_path)
 
-        N = 100
-        barrier = threading.Barrier(N)
+        worker_count = 100
+        barrier = threading.Barrier(worker_count)
         results = []
         errors = []
 
@@ -68,7 +70,7 @@ class TestConcurrentAdmission:
             except Exception as e:
                 errors.append(str(e))
 
-        threads = [threading.Thread(target=worker) for _ in range(N)]
+        threads = [threading.Thread(target=worker) for _ in range(worker_count)]
         for t in threads:
             t.start()
         for t in threads:
@@ -82,7 +84,10 @@ class TestConcurrentAdmission:
 
         # 最终: 应恰好 1 个授权
         admitted = [r for r in results if r is not None]
-        assert len(admitted) == 1, f"并发 {N} 连接应只授权 1 次, got {len(admitted)}; errors: {errors[:5]}"
+        assert len(admitted) == 1, (
+            f"并发 {worker_count} 连接应只授权 1 次, "
+            f"got {len(admitted)}; errors: {errors[:5]}"
+        )
 
     def test_active_count_respects_max_concurrent(self, tmp_path):
         """当存在 1 个 active run 时, 第二次 tick 应被拒 (max_concurrent=1)。"""
@@ -96,13 +101,23 @@ class TestConcurrentAdmission:
         conn.execute(
             "INSERT INTO tasks (task_id, task_type, status, priority, idempotency_key, created_at) "
             "VALUES (?,?,?,?,?,?)",
-            ("t-seed", "drift.run", "running", 5, "id-seed", now))
+            ("t-seed", "drift.run", "running", 5, "id-seed", now),
+        )
         conn.execute(
             "INSERT INTO drift_runs (drift_run_id, task_id, principal_id, "
             "skill_name, skill_version, status, admission_snapshot_json, created_at) "
             "VALUES (?,?,?,?,?,?,?,?)",
-            ("dr-seed", "t-seed", "owner", "proactive-policy-view-audit",
-             "1.0", "running", "{}", now))
+            (
+                "dr-seed",
+                "t-seed",
+                "owner",
+                "proactive-policy-view-audit",
+                "1.0",
+                "running",
+                "{}",
+                now,
+            ),
+        )
         conn.commit()
         conn.close()
 

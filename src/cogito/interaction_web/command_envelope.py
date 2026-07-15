@@ -9,6 +9,7 @@
 - 所有 Command 写 Audit 和 Event Outbox
 - loopback 默认；远程 bind 显式拒绝；写请求校验 Origin
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ from typing import Any
 @dataclass(frozen=True)
 class CommandEnvelope:
     """统一命令信封 (Plan 05 M4)。"""
+
     command_id: str = ""
     command_type: str = ""
     actor: str = ""
@@ -33,12 +35,14 @@ class CommandEnvelope:
     def __post_init__(self) -> None:
         if not self.command_id:
             import uuid
+
             object.__setattr__(self, "command_id", uuid.uuid4().hex)
 
 
 @dataclass(frozen=True)
 class CommandResult:
     """命令执行结果。"""
+
     command_id: str
     status: str  # "ok" | "idempotent" | "conflict" | "error"
     target_id: str = ""
@@ -48,16 +52,19 @@ class CommandResult:
 
 class CommandError(ValueError):
     """命令错误分类 (Plan 05 M4)."""
+
     pass
 
 
 class IdempotencyConflictError(CommandError):
     """相同键不同 payload。"""
+
     pass
 
 
 class VersionConflictError(CommandError):
     """expected_version 不匹配。"""
+
     pass
 
 

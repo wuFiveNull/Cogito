@@ -57,7 +57,10 @@ class TestRecoverStaleTasks:
         now = clock.now()
         # 已过期的 task
         self._make_running_task(
-            conn, "t1", lease_expires=now - timedelta(minutes=1), clock=clock,
+            conn,
+            "t1",
+            lease_expires=now - timedelta(minutes=1),
+            clock=clock,
         )
 
         svc = RecoveryService(conn, clock=clock)
@@ -80,7 +83,10 @@ class TestRecoverStaleTasks:
         now = clock.now()
         # 未过期的 task
         self._make_running_task(
-            conn, "t1", lease_expires=now + timedelta(minutes=5), clock=clock,
+            conn,
+            "t1",
+            lease_expires=now + timedelta(minutes=5),
+            clock=clock,
         )
 
         svc = RecoveryService(conn, clock=clock)
@@ -93,7 +99,10 @@ class TestRecoverStaleTasks:
     def test_recover_all_includes_stale_tasks(self, conn, clock):
         now = clock.now()
         self._make_running_task(
-            conn, "t1", lease_expires=now - timedelta(minutes=1), clock=clock,
+            conn,
+            "t1",
+            lease_expires=now - timedelta(minutes=1),
+            clock=clock,
         )
         svc = RecoveryService(conn, clock=clock)
         result = svc.recover_all()
@@ -113,8 +122,13 @@ class TestRecoverStreamingDeliveries:
         return FakeClock(start=datetime(2026, 7, 7, 12, 0, 0, tzinfo=UTC))
 
     def _make_turn(
-        self, conn, clock, turn_id="turn-1", turn_status="running",
-        attempt_status="running", lease_expires=None,
+        self,
+        conn,
+        clock,
+        turn_id="turn-1",
+        turn_status="running",
+        attempt_status="running",
+        lease_expires=None,
     ):
         from cogito.store.time_utils import epoch_ms
 
@@ -135,8 +149,13 @@ class TestRecoverStreamingDeliveries:
         conn.commit()
 
     def _make_streaming_delivery(
-        self, conn, clock, delivery_id="d1", turn_id="turn-1",
-        platform_message_id="pm-1", conversation_id="web:dbg",
+        self,
+        conn,
+        clock,
+        delivery_id="d1",
+        turn_id="turn-1",
+        platform_message_id="pm-1",
+        conversation_id="web:dbg",
     ):
         import json
 
@@ -148,8 +167,14 @@ class TestRecoverStreamingDeliveries:
             "INSERT INTO deliveries (delivery_id, target_snapshot, status, "
             "idempotency_key, created_at, content_mode, turn_id, platform_message_id) "
             "VALUES (?, ?, 'streaming', ?, ?, 'provisional', ?, ?)",
-            (delivery_id, json.dumps(target), f"idk_{delivery_id}", now,
-             turn_id, platform_message_id),
+            (
+                delivery_id,
+                json.dumps(target),
+                f"idk_{delivery_id}",
+                now,
+                turn_id,
+                platform_message_id,
+            ),
         )
         conn.commit()
 
@@ -192,7 +217,10 @@ class TestRecoverStreamingDeliveries:
         now_ms = epoch_ms(clock.now())
         # attempt 直接标记为 abandoned（模拟 stale_turns 已跑但 Turn 仍 running 的边界）
         self._make_turn(
-            conn, clock, "turn-1", attempt_status="abandoned",
+            conn,
+            clock,
+            "turn-1",
+            attempt_status="abandoned",
             lease_expires=now_ms - 60_000,
         )
         self._make_streaming_delivery(conn, clock, "d1", "turn-1")

@@ -22,6 +22,7 @@ from cogito.store.schedule_repo import ScheduleRepository, ScheduledFireReposito
 
 # ── 领域实体 ──
 
+
 class TestScheduleEntity:
     def test_round_trip(self):
         now = datetime.now(UTC)
@@ -50,6 +51,7 @@ class TestScheduledFire:
 
 
 # ── 表达式解析 ──
+
 
 class TestParseDuration:
     def test_seconds(self):
@@ -134,6 +136,7 @@ class TestNextFireAt:
 
 
 # ── Repository ──
+
 
 class TestScheduleRepository:
     @pytest.fixture

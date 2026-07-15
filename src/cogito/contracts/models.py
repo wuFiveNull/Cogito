@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 class CommandResponse(BaseModel):
     """命令统一响应。"""
+
     command_id: str
     status: str
     message: str = ""
@@ -43,6 +44,7 @@ class ApprovalPayload(BaseModel):
 
 class MemoryCorrectPayload(BaseModel):
     """提交对记忆的修正（创建新记忆 + 标 old 为 superseded）。"""
+
     memory_id: str
     idempotency_key: str = ""
     kind: str = "fact"
@@ -63,6 +65,7 @@ class MemoryDeletePayload(BaseModel):
 
 class ProactiveNegativeFeedbackPayload(BaseModel):
     """主动推送导致的负反馈入口（PLAN-14 R-05）。"""
+
     idempotency_key: str = ""
     candidate_id: str = ""
     reason: str = "not_relevant"
@@ -104,6 +107,7 @@ class Pagination(BaseModel):
 
 class DashboardSummary(BaseModel):
     """GET /api/dashboard/summary 响应。"""
+
     schema_version: str = "1"
     generated_at: str = ""
     profile: str = ""
@@ -118,6 +122,7 @@ class DashboardSummary(BaseModel):
 
 class AttentionItem(BaseModel):
     """单个待办事项。"""
+
     kind: str
     severity: str = "info"
     label: str
@@ -128,6 +133,7 @@ class AttentionItem(BaseModel):
 
 class ComponentHealth(BaseModel):
     """单个组件健康状态。"""
+
     name: str
     status: str = "ok"
     detail: str | None = None
@@ -136,6 +142,7 @@ class ComponentHealth(BaseModel):
 
 class HealthComponents(BaseModel):
     """GET /api/health/components 响应。"""
+
     schema_version: str = "1"
     generated_at: str = ""
     overall: str = "healthy"
@@ -147,22 +154,26 @@ class HealthComponents(BaseModel):
 
 class BaseCommandPayload(BaseModel):
     """命令基类：统一幂等键 + 预期版本（APPROVAL-COMMANDS §2）。"""
+
     idempotency_key: str = ""
     expected_version: int | None = None
 
 
 class MemoryConfirmPayload(BaseCommandPayload):
     """确认记忆候选（PLAN-16 MEM-06：统一 expected_version 乐观锁）。"""
+
     memory_id: str
 
 
 class MemoryRejectPayload(BaseCommandPayload):
     """拒绝记忆候选（PLAN-16 MEM-06：统一 expected_version 乐观锁）。"""
+
     memory_id: str
 
 
 class MemoryErasePayload(BaseCommandPayload):
     """擦除记忆（PLAN-16 M3 MEM-05）：最小 tombstone + Receipt + Audit。"""
+
     memory_id: str
     reason: str = "user_request"
 
@@ -229,6 +240,7 @@ class ForceConnectorPollPayload(BaseCommandPayload):
 
 class FetchProactiveDataPayload(BaseCommandPayload):
     """手动触发固定 AIHOT 主动数据源；不允许前端指定任意 Connector。"""
+
     pass
 
 
@@ -254,6 +266,7 @@ class PayloadGcDryRunPayload(BaseCommandPayload):
 
 class KnowledgeRegisterPayload(BaseCommandPayload):
     """注册知识资源并可选立即摄入。"""
+
     source_uri_hash: str = ""
     source_kind: str = "explicit_local_file"
     media_type: str = "text/markdown"
@@ -265,6 +278,7 @@ class KnowledgeRegisterPayload(BaseCommandPayload):
 
 class KnowledgeRefreshPayload(BaseCommandPayload):
     """刷新知识来源（重新 ingest，content_hash 变化才执行）。"""
+
     source_uri_hash: str = ""
     principal_id: str = "owner"
     content: str = ""  # 最新文本
@@ -272,11 +286,13 @@ class KnowledgeRefreshPayload(BaseCommandPayload):
 
 class KnowledgeInvalidatePayload(BaseCommandPayload):
     """失效知识资源（撤销检索，重置为 stale）。"""
+
     resource_id: str
     reason: str = "manual_invalidate"
 
 
 class KnowledgeErasePayload(BaseCommandPayload):
     """擦除知识资源（撤销检索 + 清理 MemorySource）。"""
+
     resource_id: str
     reason: str = "manual_erase"

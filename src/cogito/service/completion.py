@@ -14,13 +14,12 @@ import json
 import sqlite3
 from typing import Any
 
+from cogito.contracts.clock import Clock, ProductionClock, epoch_ms
 from cogito.domain.events import DomainEvent
 from cogito.domain.message import ContentPart, Message, MessageDirection, MessageRole
 from cogito.domain.turn import RunAttempt, Turn
-from cogito.contracts.clock import Clock, ProductionClock
 from cogito.service.dispatcher import Dispatcher
 from cogito.service.unit_of_work import UnitOfWork
-from cogito.contracts.clock import epoch_ms
 
 
 class TurnCompletionService:
@@ -66,8 +65,14 @@ class TurnCompletionService:
         reply_route_json = input_row["reply_route_json"] if input_row else "{}"
         capability_snapshot_json = input_row["capability_snapshot_json"] if input_row else "{}"
 
-        reply_route = json.loads(reply_route_json) if isinstance(reply_route_json, str) else reply_route_json
-        capability_snapshot = json.loads(capability_snapshot_json) if isinstance(capability_snapshot_json, str) else capability_snapshot_json
+        reply_route = (
+            json.loads(reply_route_json) if isinstance(reply_route_json, str) else reply_route_json
+        )
+        capability_snapshot = (
+            json.loads(capability_snapshot_json)
+            if isinstance(capability_snapshot_json, str)
+            else capability_snapshot_json
+        )
 
         # 构建 Assistant Message
         parts = [
@@ -165,7 +170,9 @@ class TurnCompletionService:
         with UnitOfWork(self._conn) as uow:
             # 为 outbound 消息分配 receive_sequence
             if message.receive_sequence == 0:
-                message.receive_sequence = uow.message.next_receive_sequence(message.conversation_id)
+                message.receive_sequence = uow.message.next_receive_sequence(
+                    message.conversation_id
+                )
 
             # 1. 写入 Assistant Message
             uow.message.insert(message)
@@ -176,6 +183,7 @@ class TurnCompletionService:
             delivery_id = ""
             if delivery_target or reply_route:
                 import uuid
+
                 delivery_id = uuid.uuid4().hex
                 now_int = epoch_ms(self._clock.now())
                 target: dict[str, Any] = {"target": delivery_target} if delivery_target else {}
@@ -195,21 +203,31 @@ class TurnCompletionService:
                 target["adapter_id"] = adapter_id
                 # target_endpoint_ref
                 target_endpoint_ref = (
-                    reply_route.get("target_endpoint_ref")
-                    if isinstance(reply_route, dict)
-                    else None
-                ) or (reply_route.get("channel_instance_id") if isinstance(reply_route, dict) else None) or ""
+                    (
+                        reply_route.get("target_endpoint_ref")
+                        if isinstance(reply_route, dict)
+                        else None
+                    )
+                    or (
+                        reply_route.get("channel_instance_id")
+                        if isinstance(reply_route, dict)
+                        else None
+                    )
+                    or ""
+                )
                 target["target_endpoint_ref"] = target_endpoint_ref
                 self._conn.execute(
                     "INSERT INTO deliveries (delivery_id, target_snapshot, content_ref, "
                     "status, idempotency_key, created_at) "
                     "VALUES (?, ?, ?, ?, ?, ?)",
-                    (delivery_id,
-                     json.dumps(target),
-                     message.message_id,
-                     "pending",
-                     f"delivery_{message.message_id}",
-                     now_int),
+                    (
+                        delivery_id,
+                        json.dumps(target),
+                        message.message_id,
+                        "pending",
+                        f"delivery_{message.message_id}",
+                        now_int,
+                    ),
                 )
 
             # 3. 写入 TurnCompleted Event Outbox
@@ -223,18 +241,20 @@ class TurnCompletionService:
                 "principal_id": principal_id,
                 "input_message_id": turn.input_message_id,
             }
-            uow.outbox.insert(DomainEvent(
-                event_type="TurnCompleted",
-                aggregate_type="turn",
-                aggregate_id=turn.turn_id,
-                aggregate_version=turn.version + 1,
-                payload_ref=json.dumps(turn_completed_payload, ensure_ascii=False),
-                payload=turn_completed_payload,
-                occurred_at=now,
-                correlation_id=turn.turn_id,
-                causation_id=turn.turn_id,
-                origin="agent",
-            ))
+            uow.outbox.insert(
+                DomainEvent(
+                    event_type="TurnCompleted",
+                    aggregate_type="turn",
+                    aggregate_id=turn.turn_id,
+                    aggregate_version=turn.version + 1,
+                    payload_ref=json.dumps(turn_completed_payload, ensure_ascii=False),
+                    payload=turn_completed_payload,
+                    occurred_at=now,
+                    correlation_id=turn.turn_id,
+                    causation_id=turn.turn_id,
+                    origin="agent",
+                )
+            )
 
             # 4. 完成 Turn + Attempt（在同一 UoW 中，不自成事务）
             ok = self._dispatcher.complete(

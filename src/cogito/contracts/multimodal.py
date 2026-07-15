@@ -65,4 +65,3 @@ class StickerService(Protocol):
         tag: str | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]: ...
-

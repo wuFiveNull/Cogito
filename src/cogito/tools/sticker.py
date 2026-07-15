@@ -28,13 +28,15 @@ def create_save_sticker_def(
         if make_service is None:
             return _dumps({"status": "unavailable", "error": "sticker_service_not_configured"})
         svc = make_service()
-        return _dumps(svc.save_sticker(
-            str(args.get("asset_id", "")),
-            name=str(args.get("name", "sticker")),
-            tags=tuple(str(t) for t in args.get("tags", ())),
-            principal_id=context.principal_id,
-            session_id=context.session_id,
-        ))
+        return _dumps(
+            svc.save_sticker(
+                str(args.get("asset_id", "")),
+                name=str(args.get("name", "sticker")),
+                tags=tuple(str(t) for t in args.get("tags", ())),
+                principal_id=context.principal_id,
+                session_id=context.session_id,
+            )
+        )
 
     return ToolDef(
         name="save_sticker",
@@ -47,9 +49,19 @@ def create_save_sticker_def(
         input_schema={
             "type": "object",
             "properties": {
-                "asset_id": {"type": "string", "description": "asset_id of an image in the current conversation."},
-                "name": {"type": "string", "description": "Short display name for the sticker (max 200 chars)."},
-                "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags for later retrieval."},
+                "asset_id": {
+                    "type": "string",
+                    "description": "asset_id of an image in the current conversation.",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Short display name for the sticker (max 200 chars).",
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional tags for later retrieval.",
+                },
             },
             "required": ["asset_id", "name"],
             "additionalProperties": False,
@@ -71,13 +83,15 @@ def create_save_sticker_from_url_def(
         if make_service is None:
             return _dumps({"status": "unavailable", "error": "sticker_service_not_configured"})
         svc = make_service()
-        return _dumps(svc.save_sticker_from_url(
-            str(args.get("url", "")),
-            name=str(args.get("name", "sticker")),
-            tags=tuple(str(t) for t in args.get("tags", ())),
-            principal_id=context.principal_id,
-            session_id=context.session_id,
-        ))
+        return _dumps(
+            svc.save_sticker_from_url(
+                str(args.get("url", "")),
+                name=str(args.get("name", "sticker")),
+                tags=tuple(str(t) for t in args.get("tags", ())),
+                principal_id=context.principal_id,
+                session_id=context.session_id,
+            )
+        )
 
     return ToolDef(
         name="save_sticker_from_url",
@@ -92,7 +106,11 @@ def create_save_sticker_from_url_def(
             "properties": {
                 "url": {"type": "string", "description": "Public image URL to fetch."},
                 "name": {"type": "string", "description": "Short display name for the sticker."},
-                "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags."},
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional tags.",
+                },
             },
             "required": ["url", "name"],
             "additionalProperties": False,
@@ -114,11 +132,13 @@ def create_send_sticker_def(
         if make_service is None:
             return _dumps({"status": "unavailable", "error": "sticker_service_not_configured"})
         svc = make_service()
-        return _dumps(svc.send_sticker(
-            str(args.get("sticker_id", "")),
-            principal_id=context.principal_id,
-            session_id=context.session_id,
-        ))
+        return _dumps(
+            svc.send_sticker(
+                str(args.get("sticker_id", "")),
+                principal_id=context.principal_id,
+                session_id=context.session_id,
+            )
+        )
 
     return ToolDef(
         name="send_sticker",
@@ -131,7 +151,10 @@ def create_send_sticker_def(
         input_schema={
             "type": "object",
             "properties": {
-                "sticker_id": {"type": "string", "description": "sticker_id returned by save_sticker."},
+                "sticker_id": {
+                    "type": "string",
+                    "description": "sticker_id returned by save_sticker.",
+                },
             },
             "required": ["sticker_id"],
             "additionalProperties": False,

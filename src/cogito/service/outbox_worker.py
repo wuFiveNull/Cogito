@@ -22,9 +22,8 @@ import sqlite3
 from datetime import UTC, datetime
 from typing import NamedTuple
 
-from cogito.contracts.clock import Clock, ProductionClock
+from cogito.contracts.clock import Clock, ProductionClock, epoch_ms
 from cogito.service.unit_of_work import UnitOfWork
-from cogito.contracts.clock import epoch_ms
 
 # ── 重试策略 ──
 
@@ -65,8 +64,12 @@ def compute_backoff(attempt_count: int) -> float:
 class OutboxWorker:
     """Outbox 发布 Worker。"""
 
-    def __init__(self, conn: sqlite3.Connection, lease_ttl_s: int = OUTBOX_LEASE_TTL_S,
-                 clock: Clock | None = None) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        lease_ttl_s: int = OUTBOX_LEASE_TTL_S,
+        clock: Clock | None = None,
+    ) -> None:
         self._conn = conn
         self._lease_ttl_s = lease_ttl_s
         self._clock = clock or ProductionClock()
@@ -81,7 +84,8 @@ class OutboxWorker:
         lease_expires = now_int + self._lease_ttl_s * 1000
 
         with UnitOfWork(self._conn) as uow:
-            row = self._conn.execute("""
+            row = self._conn.execute(
+                """
                 SELECT * FROM outbox_events o1
                 WHERE (
                     o1.status = 'pending'
@@ -99,7 +103,9 @@ class OutboxWorker:
                 )
                 ORDER BY o1.aggregate_type, o1.aggregate_id, o1.aggregate_version
                 LIMIT 1
-            """, (now_int,)).fetchone()
+            """,
+                (now_int,),
+            ).fetchone()
 
             if row is None:
                 return None
@@ -111,8 +117,14 @@ class OutboxWorker:
                 "UPDATE outbox_events SET status='leased', lease_owner=?, "
                 "lease_version=lease_version+1, attempt_count=?, lease_expires_at=? "
                 "WHERE event_id=? AND status=? AND lease_version=?",
-                (worker_id, new_attempt_count, lease_expires,
-                 row["event_id"], row["status"], old_version),
+                (
+                    worker_id,
+                    new_attempt_count,
+                    lease_expires,
+                    row["event_id"],
+                    row["status"],
+                    old_version,
+                ),
             )
             if updated.rowcount == 0:
                 return None

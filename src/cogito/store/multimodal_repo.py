@@ -99,8 +99,7 @@ class MultimodalRepository:
 
     def record_sticker_usage(self, asset_id: str) -> None:
         self._conn.execute(
-            "UPDATE multimodal_assets SET usage_count = usage_count + 1 "
-            "WHERE asset_id=?",
+            "UPDATE multimodal_assets SET usage_count = usage_count + 1 WHERE asset_id=?",
             (asset_id,),
         )
         self._conn.commit()

@@ -52,7 +52,9 @@ class TaskDispatcher:
         return override if override is not None else self._clock.now()
 
     def claim_next(
-        self, worker_id: str, clock: datetime | None = None,
+        self,
+        worker_id: str,
+        clock: datetime | None = None,
     ) -> ClaimedTask | None:
         """领取 queued/scheduled Task，创建带有效 Lease 的 TaskAttempt。"""
         now = self._now(clock)
@@ -68,7 +70,10 @@ class TaskDispatcher:
 
             # 领取：queued → running
             ok = self._task_repo.claim(
-                task.task_id, worker_id, self._lease_ttl_s * 1000, now_ms=now_ms,
+                task.task_id,
+                worker_id,
+                self._lease_ttl_s * 1000,
+                now_ms=now_ms,
             )
             if not ok:
                 return None
@@ -100,8 +105,7 @@ class TaskDispatcher:
 
             # 更新 Attempt 状态为 running
             self._conn.execute(
-                "UPDATE task_attempts SET status='running' "
-                "WHERE task_attempt_id=?",
+                "UPDATE task_attempts SET status='running' WHERE task_attempt_id=?",
                 (attempt.task_attempt_id,),
             )
 
@@ -127,7 +131,10 @@ class TaskDispatcher:
 
         with UnitOfWork(self._conn) as uow:
             ok = self._task_repo.complete(
-                task.task_id, worker_id, attempt.lease_version, now_ms=now_ms,
+                task.task_id,
+                worker_id,
+                attempt.lease_version,
+                now_ms=now_ms,
                 result_ref=task.result_ref,
             )
             if not ok:
@@ -153,7 +160,10 @@ class TaskDispatcher:
 
         with UnitOfWork(self._conn) as uow:
             ok = self._task_repo.fail(
-                task.task_id, worker_id, attempt.lease_version, now_ms=now_ms,
+                task.task_id,
+                worker_id,
+                attempt.lease_version,
+                now_ms=now_ms,
             )
             if not ok:
                 return False
@@ -205,6 +215,9 @@ class TaskDispatcher:
         now_ms = epoch_ms(self._now(clock))
 
         return self._task_repo.heartbeat(
-            task_id, worker_id, lease_version,
-            self._lease_ttl_s * 1000, now_ms=now_ms,
+            task_id,
+            worker_id,
+            lease_version,
+            self._lease_ttl_s * 1000,
+            now_ms=now_ms,
         )

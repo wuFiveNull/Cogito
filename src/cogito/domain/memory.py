@@ -219,9 +219,7 @@ class MemoryItem:
             importance=data.get("importance", 0.5),
             confirmation_method=data.get("confirmation_method", ""),
             confirmed_by=data.get("confirmed_by", ""),
-            confirmed_at=(
-                _parse_dt(data["confirmed_at"]) if data.get("confirmed_at") else None
-            ),
+            confirmed_at=(_parse_dt(data["confirmed_at"]) if data.get("confirmed_at") else None),
             status=MemoryStatus(data.get("status", "candidate")),
             valid_from=_parse_dt(data["valid_from"]) if data.get("valid_from") else None,
             valid_to=_parse_dt(data["valid_to"]) if data.get("valid_to") else None,
@@ -251,8 +249,7 @@ class MemoryItem:
 
     def __repr__(self) -> str:
         return (
-            f"MemoryItem({self.memory_id}, {self.kind}, {self.status}, "
-            f"key={self.canonical_key!r})"
+            f"MemoryItem({self.memory_id}, {self.kind}, {self.status}, key={self.canonical_key!r})"
         )
 
     @staticmethod

@@ -100,7 +100,10 @@ class TestItemDedup:
     def test_dedup_by_source_id(self, conn, connector):
         """相同 source_item_id 不应重复插入（UNIQUE 约束）。"""
         item1 = ConnectorItem(
-            connector_id="c1", source_item_id="g1", title="T", content_hash="h1",
+            connector_id="c1",
+            source_item_id="g1",
+            title="T",
+            content_hash="h1",
         )
         ConnectorItemRepository(conn).insert(item1)
         # 重复 source_id 应被检测
@@ -110,7 +113,10 @@ class TestItemDedup:
     def test_dedup_by_content_hash(self, conn, connector):
         """不同 source_id 但相同 content_hash 应被检测为重复。"""
         item1 = ConnectorItem(
-            connector_id="c1", source_item_id="g1", title="T", content_hash="same",
+            connector_id="c1",
+            source_item_id="g1",
+            title="T",
+            content_hash="same",
         )
         ConnectorItemRepository(conn).insert(item1)
         existing = ConnectorItemRepository(conn).find_by_content_hash("c1", "same")
@@ -118,7 +124,10 @@ class TestItemDedup:
 
     def test_update_status(self, conn, connector):
         item = ConnectorItem(
-            connector_id="c1", source_item_id="g1", title="T", content_hash="h1",
+            connector_id="c1",
+            source_item_id="g1",
+            title="T",
+            content_hash="h1",
         )
         ConnectorItemRepository(conn).insert(item)
         ConnectorItemRepository(conn).update_status(item.item_id, ItemStatus.digest)
@@ -127,16 +136,25 @@ class TestItemDedup:
 
     def test_find_by_status(self, conn, connector):
         i1 = ConnectorItem(
-            connector_id="c1", source_item_id="g1", title="A",
-            content_hash="h1", status=ItemStatus.digest,
+            connector_id="c1",
+            source_item_id="g1",
+            title="A",
+            content_hash="h1",
+            status=ItemStatus.digest,
         )
         i2 = ConnectorItem(
-            connector_id="c1", source_item_id="g2", title="B",
-            content_hash="h2", status=ItemStatus.silent,
+            connector_id="c1",
+            source_item_id="g2",
+            title="B",
+            content_hash="h2",
+            status=ItemStatus.silent,
         )
         i3 = ConnectorItem(
-            connector_id="c1", source_item_id="g3", title="C",
-            content_hash="h3", status=ItemStatus.digest,
+            connector_id="c1",
+            source_item_id="g3",
+            title="C",
+            content_hash="h3",
+            status=ItemStatus.digest,
         )
         repo = ConnectorItemRepository(conn)
         for i in (i1, i2, i3):

@@ -106,13 +106,9 @@ async def chat_ws(websocket: WebSocket) -> None:
         await websocket.close()
         return
 
-    conversation_id = (
-        init.get("conversation_id") or f"web:{uuid.uuid4().hex[:12]}"
-    )
+    conversation_id = init.get("conversation_id") or f"web:{uuid.uuid4().hex[:12]}"
     queue = adapter.subscribe(conversation_id)
-    await websocket.send_json(
-        {"type": "ready", "conversation_id": conversation_id}
-    )
+    await websocket.send_json({"type": "ready", "conversation_id": conversation_id})
 
     consumer = asyncio.create_task(_ws_consume(websocket, runtime, conversation_id))
     producer = asyncio.create_task(_ws_produce(websocket, queue))
@@ -148,42 +144,50 @@ async def _ws_produce(websocket: WebSocket, queue: asyncio.Queue[dict[str, Any]]
         conversation_id = item.get("conversation_id")
         try:
             if kind == "edit":
-                await websocket.send_json({
-                    "type": "assistant.delta",
-                    "conversation_id": conversation_id,
-                    "message_id": item.get("platform_message_id"),
-                    "text": item.get("text", ""),
-                    "operation_seq": item.get("operation_seq", 0),
-                    "final": bool(item.get("is_final", False)),
-                    "delivery_id": item.get("delivery_id"),
-                })
+                await websocket.send_json(
+                    {
+                        "type": "assistant.delta",
+                        "conversation_id": conversation_id,
+                        "message_id": item.get("platform_message_id"),
+                        "text": item.get("text", ""),
+                        "operation_seq": item.get("operation_seq", 0),
+                        "final": bool(item.get("is_final", False)),
+                        "delivery_id": item.get("delivery_id"),
+                    }
+                )
             elif kind == "delete":
-                await websocket.send_json({
-                    "type": "assistant.delete",
-                    "conversation_id": conversation_id,
-                    "message_id": item.get("platform_message_id"),
-                    "reason": item.get("reason", "withdrawn"),
-                })
+                await websocket.send_json(
+                    {
+                        "type": "assistant.delete",
+                        "conversation_id": conversation_id,
+                        "message_id": item.get("platform_message_id"),
+                        "reason": item.get("reason", "withdrawn"),
+                    }
+                )
             else:
                 # send：占位符 "…" 表示流式开始；其余视为最终全文
                 text = item.get("text", "")
                 is_placeholder = text == "…"
-                await websocket.send_json({
-                    "type": "assistant",
-                    "conversation_id": conversation_id,
-                    "message_id": item.get("platform_message_id"),
-                    "text": text,
-                    "streaming": is_placeholder,
-                    "final": not is_placeholder,
-                    "delivery_id": item.get("delivery_id"),
-                    "reply_to_message_id": item.get("reply_to_message_id"),
-                })
+                await websocket.send_json(
+                    {
+                        "type": "assistant",
+                        "conversation_id": conversation_id,
+                        "message_id": item.get("platform_message_id"),
+                        "text": text,
+                        "streaming": is_placeholder,
+                        "final": not is_placeholder,
+                        "delivery_id": item.get("delivery_id"),
+                        "reply_to_message_id": item.get("reply_to_message_id"),
+                    }
+                )
         except Exception:
             return
 
 
 async def _ws_consume(
-    websocket: WebSocket, runtime: Any, conversation_id: str,
+    websocket: WebSocket,
+    runtime: Any,
+    conversation_id: str,
 ) -> None:
     """接收浏览器消息，构造 web ChannelEnvelope 进主链路。"""
     while True:
@@ -197,6 +201,8 @@ async def _ws_consume(
         if not text or not str(text).strip():
             continue
         envelope = _build_web_envelope(
-            str(text), conversation_id, data.get("sender") or "web-user",
+            str(text),
+            conversation_id,
+            data.get("sender") or "web-user",
         )
         runtime.inbound.accept(envelope)

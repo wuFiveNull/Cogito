@@ -50,8 +50,7 @@ class ConcurrencyConflictError(CogitoError):
         self.expected_version = expected_version
         self.actual_version = actual_version
         super().__init__(
-            f"{entity_type}({entity_id}): expected version {expected_version}, "
-            f"got {actual_version}"
+            f"{entity_type}({entity_id}): expected version {expected_version}, got {actual_version}"
         )
 
 
@@ -101,9 +100,7 @@ class ApprovalUnauthorizedError(CogitoError):
     def __init__(self, approval_id: str, responder_id: str) -> None:
         self.approval_id = approval_id
         self.responder_id = responder_id
-        super().__init__(
-            f"Responder {responder_id} not authorized for approval {approval_id}"
-        )
+        super().__init__(f"Responder {responder_id} not authorized for approval {approval_id}")
 
 
 class PolicyDeniedError(CogitoError):

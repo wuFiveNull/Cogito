@@ -109,7 +109,7 @@ class EchoModelProvider(ModelProvider):
 
         # 逐字符 yield，模拟 token 流（避免大块文本一次性返回）
         for i, ch in enumerate(text):
-            is_last = (i == len(text) - 1)
+            is_last = i == len(text) - 1
             yield ModelResponse(
                 request_id=request.request_id,
                 provider_request_id=uuid.uuid4().hex,

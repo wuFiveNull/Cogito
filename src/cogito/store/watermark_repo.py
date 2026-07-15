@@ -20,6 +20,7 @@ PROC_EXTERNAL_SYNC = "external_sync"
 
 class WatermarkRow:
     """水位行。"""
+
     def __init__(
         self,
         processor_type: str,
@@ -48,9 +49,7 @@ class WatermarkRepository:
     def _ensure_table(self) -> bool:
         """检查表是否存在。"""
         try:
-            self._conn.execute(
-                "SELECT 1 FROM processing_watermarks LIMIT 1"
-            ).fetchone()
+            self._conn.execute("SELECT 1 FROM processing_watermarks LIMIT 1").fetchone()
             return True
         except sqlite3.OperationalError:
             return False
@@ -150,8 +149,7 @@ class WatermarkRepository:
                 "(processor_type, conversation_id, session_id, "
                 " processed_upto_sequence, input_version, version, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, 1, ?)",
-                (processor_type, conversation_id, session_id,
-                 initial_upto, input_version, now),
+                (processor_type, conversation_id, session_id, initial_upto, input_version, now),
             )
             return True
         except sqlite3.OperationalError:

@@ -56,6 +56,7 @@ class ReceiptKind(StrEnum):
     - uncertain: Gateway 已调用但本地提交条件失效（Lease 过期、版本变化、Recovery 介入）
     - reconciled: 人工或自动对账后确认平台结果
     """
+
     confirmed = "confirmed"
     uncertain = "uncertain"
     reconciled = "reconciled"
@@ -79,7 +80,8 @@ class Delivery:
         content_mode: str = "final",  # provisional | final
         final_message_id: str | None = None,
         stream_status: str | None = None,  # placeholder_created|streaming|finalizing|done
-        degradation_mode: str | None = None,  # native_stream|edit_placeholder|processing_then_final|final_only
+        degradation_mode: str
+        | None = None,  # native_stream|edit_placeholder|processing_then_final|final_only
         last_confirmed_revision: int = 0,
         policy_json: str | None = None,
         metrics_json: str | None = None,
@@ -130,10 +132,14 @@ class Delivery:
             content_ref=data.get("content_ref"),
             status=DeliveryStatus(data.get("status", "pending")),
             idempotency_key=data.get("idempotency_key", ""),
-            scheduled_at=datetime.fromisoformat(data["scheduled_at"]) if data.get("scheduled_at") else None,
+            scheduled_at=datetime.fromisoformat(data["scheduled_at"])
+            if data.get("scheduled_at")
+            else None,
             platform_message_id=data.get("platform_message_id"),
             last_error=data.get("last_error"),
-            created_at=datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None,
+            created_at=datetime.fromisoformat(data["created_at"])
+            if data.get("created_at")
+            else None,
             content_mode=data.get("content_mode", "final"),
             final_message_id=data.get("final_message_id"),
             stream_status=data.get("stream_status"),
@@ -197,8 +203,12 @@ class DeliveryAttempt:
             delivery_id=data["delivery_id"],
             attempt_no=data.get("attempt_no", 1),
             status=DeliveryAttemptStatus(data.get("status", "created")),
-            started_at=datetime.fromisoformat(data["started_at"]) if data.get("started_at") else None,
-            finished_at=datetime.fromisoformat(data["finished_at"]) if data.get("finished_at") else None,
+            started_at=datetime.fromisoformat(data["started_at"])
+            if data.get("started_at")
+            else None,
+            finished_at=datetime.fromisoformat(data["finished_at"])
+            if data.get("finished_at")
+            else None,
             platform_receipt=data.get("platform_receipt", {}),
             error=data.get("error"),
             last_confirmed_revision=int(data.get("last_confirmed_revision", 0)),
@@ -263,9 +273,13 @@ class DeliveryReceipt:
             receipt_kind=ReceiptKind(data.get("receipt_kind", "uncertain")),
             platform_message_id=data.get("platform_message_id"),
             safe_result=data.get("safe_result"),
-            observed_at=datetime.fromisoformat(data["observed_at"]) if data.get("observed_at") else None,
+            observed_at=datetime.fromisoformat(data["observed_at"])
+            if data.get("observed_at")
+            else None,
             lease_version=data.get("lease_version", 0),
         )
 
     def __repr__(self) -> str:
-        return f"DeliveryReceipt({self.receipt_id}, {self.receipt_kind}, delivery={self.delivery_id})"
+        return (
+            f"DeliveryReceipt({self.receipt_id}, {self.receipt_kind}, delivery={self.delivery_id})"
+        )

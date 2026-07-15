@@ -25,12 +25,14 @@ class TaskRepository:
 
     def get(self, task_id: str) -> Task | None:
         row = self._conn.execute(
-            "SELECT * FROM tasks WHERE task_id=?", (task_id,),
+            "SELECT * FROM tasks WHERE task_id=?",
+            (task_id,),
         ).fetchone()
         return self._row_to_task(row) if row else None
 
     def find_queued(
-        self, limit: int = 10,
+        self,
+        limit: int = 10,
         now: datetime | None = None,
     ) -> list[Task]:
         """查找可领取的 Task：queued 或 scheduled 且已到调度时间。"""
@@ -74,14 +76,12 @@ class TaskRepository:
         """按状态过滤列出 Task（None 表示全部）。"""
         if status is None:
             rows = self._conn.execute(
-                "SELECT * FROM tasks "
-                "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 (limit, offset),
             ).fetchall()
         else:
             rows = self._conn.execute(
-                "SELECT * FROM tasks WHERE status=? "
-                "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                "SELECT * FROM tasks WHERE status=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 (status, limit, offset),
             ).fetchall()
         return [self._row_to_task(r) for r in rows]
@@ -92,7 +92,8 @@ class TaskRepository:
             row = self._conn.execute("SELECT COUNT(*) FROM tasks").fetchone()
         else:
             row = self._conn.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status=?", (status,),
+                "SELECT COUNT(*) FROM tasks WHERE status=?",
+                (status,),
             ).fetchone()
         return int(row[0]) if row else 0
 
@@ -157,8 +158,11 @@ class TaskRepository:
     # ── 状态变更（原子操作）──
 
     def claim(
-        self, task_id: str, worker_id: str,
-        lease_ttl_ms: int, now_ms: int | None = None,
+        self,
+        task_id: str,
+        worker_id: str,
+        lease_ttl_ms: int,
+        now_ms: int | None = None,
     ) -> bool:
         if now_ms is None:
             now_ms = epoch_ms(datetime.now(UTC))
@@ -174,8 +178,12 @@ class TaskRepository:
         return cursor.rowcount > 0
 
     def complete(
-        self, task_id: str, worker_id: str, lease_version: int,
-        now_ms: int | None = None, result_ref: str | None = None,
+        self,
+        task_id: str,
+        worker_id: str,
+        lease_version: int,
+        now_ms: int | None = None,
+        result_ref: str | None = None,
     ) -> bool:
         if now_ms is None:
             now_ms = epoch_ms(datetime.now(UTC))
@@ -189,7 +197,10 @@ class TaskRepository:
         return cursor.rowcount > 0
 
     def fail(
-        self, task_id: str, worker_id: str, lease_version: int,
+        self,
+        task_id: str,
+        worker_id: str,
+        lease_version: int,
         now_ms: int | None = None,
     ) -> bool:
         if now_ms is None:
@@ -212,8 +223,12 @@ class TaskRepository:
         return cursor.rowcount > 0
 
     def heartbeat(
-        self, task_id: str, worker_id: str, lease_version: int,
-        lease_ttl_ms: int, now_ms: int | None = None,
+        self,
+        task_id: str,
+        worker_id: str,
+        lease_version: int,
+        lease_ttl_ms: int,
+        now_ms: int | None = None,
     ) -> bool:
         if now_ms is None:
             now_ms = epoch_ms(datetime.now(UTC))
@@ -306,15 +321,15 @@ class TaskAttemptRepository:
     def list_for_task(self, task_id: str) -> list[TaskAttempt]:
         """列出某个 Task 的全部 Attempt。"""
         rows = self._conn.execute(
-            "SELECT * FROM task_attempts WHERE task_id=? "
-            "ORDER BY attempt_no ASC",
+            "SELECT * FROM task_attempts WHERE task_id=? ORDER BY attempt_no ASC",
             (task_id,),
         ).fetchall()
         return [self._row_to_attempt(r) for r in rows]
 
     def get_attempt(self, attempt_id: str) -> TaskAttempt | None:
         row = self._conn.execute(
-            "SELECT * FROM task_attempts WHERE task_attempt_id=?", (attempt_id,),
+            "SELECT * FROM task_attempts WHERE task_attempt_id=?",
+            (attempt_id,),
         ).fetchone()
         return self._row_to_attempt(row) if row else None
 

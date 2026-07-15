@@ -3,6 +3,7 @@
 drift_runs.status 是查询投影，必须由同一事务或 Event Consumer 更新。
 tasks/task_attempts 是生命周期权威 —— 本仓库不复制 Task 状态。
 """
+
 from __future__ import annotations
 
 import json
@@ -11,21 +12,23 @@ import time
 import uuid
 from typing import Any
 
-from cogito.domain.drift import (
-    DriftRunStatus,
-    DriftSkillManifest,
-)
-
 
 class DriftRunRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
-    def insert(self, *, task_id: str, principal_id: str, skill_name: str,
-               skill_version: str, admission_snapshot: dict[str, Any],
-               status: str = "admitted",
-               selection_trace_json: dict[str, Any] | None = None,
-               selector_version: str | None = None) -> str:
+    def insert(
+        self,
+        *,
+        task_id: str,
+        principal_id: str,
+        skill_name: str,
+        skill_version: str,
+        admission_snapshot: dict[str, Any],
+        status: str = "admitted",
+        selection_trace_json: dict[str, Any] | None = None,
+        selector_version: str | None = None,
+    ) -> str:
         now = int(time.time() * 1000)
         run_id = f"dr-{uuid.uuid4().hex[:16]}"
         self._conn.execute(
@@ -34,11 +37,20 @@ class DriftRunRepository:
             " status, admission_snapshot_json, created_at, "
             " selection_trace_json, selector_version) "
             "VALUES (?,?,?,?,?,?,?,?, ?,?)",
-            (run_id, task_id, principal_id, skill_name, skill_version,
-             status, json.dumps(admission_snapshot, ensure_ascii=False), now,
-             json.dumps(selection_trace_json, ensure_ascii=False)
-             if selection_trace_json is not None else None,
-             selector_version),
+            (
+                run_id,
+                task_id,
+                principal_id,
+                skill_name,
+                skill_version,
+                status,
+                json.dumps(admission_snapshot, ensure_ascii=False),
+                now,
+                json.dumps(selection_trace_json, ensure_ascii=False)
+                if selection_trace_json is not None
+                else None,
+                selector_version,
+            ),
         )
         self._conn.commit()
         return run_id
@@ -63,8 +75,9 @@ class DriftRunRepository:
         )
         self._conn.commit()
 
-    def update_progress(self, drift_run_id: str, *, budget_used: dict[str, int],
-                        steps_taken: int) -> None:
+    def update_progress(
+        self, drift_run_id: str, *, budget_used: dict[str, int], steps_taken: int
+    ) -> None:
         """写入 steps + budget 的绝对累计值（不是 delta）。
 
         DriftRunner 在 resume 时把 budget_used/steps_taken 作为"自 admission
@@ -73,16 +86,15 @@ class DriftRunRepository:
         一致：每个 attempt 的 finish_drift 写入它盯到的真实累计量。
         """
         self._conn.execute(
-            "UPDATE drift_runs SET budget_used_json=?, steps_taken=? "
-            "WHERE drift_run_id=?",
-            (json.dumps(dict(budget_used), ensure_ascii=False),
-             int(steps_taken), drift_run_id),
+            "UPDATE drift_runs SET budget_used_json=?, steps_taken=? WHERE drift_run_id=?",
+            (json.dumps(dict(budget_used), ensure_ascii=False), int(steps_taken), drift_run_id),
         )
         self._conn.commit()
 
     def get(self, drift_run_id: str) -> dict[str, Any] | None:
         row = self._conn.execute(
-            "SELECT * FROM drift_runs WHERE drift_run_id=?", (drift_run_id,),
+            "SELECT * FROM drift_runs WHERE drift_run_id=?",
+            (drift_run_id,),
         ).fetchone()
         if row is None:
             return None
@@ -109,8 +121,7 @@ class DriftSkillStateRepository:
         ).fetchone()
         return dict(row) if row else None
 
-    def upsert(self, principal_id: str, skill_name: str, skill_version: str,
-               **fields: Any) -> None:
+    def upsert(self, principal_id: str, skill_name: str, skill_version: str, **fields: Any) -> None:
         now = int(time.time() * 1000)
         existing = self.get(principal_id, skill_name)
         if existing is None:
@@ -119,10 +130,16 @@ class DriftSkillStateRepository:
                 "(principal_id, skill_name, skill_version, last_status, "
                 " last_run_at, run_count, cursor_json, updated_at) "
                 "VALUES (?,?,?,?,?,?,?,?)",
-                (principal_id, skill_name, skill_version,
-                 fields.get("last_status"), fields.get("last_run_at"),
-                 fields.get("run_count", 1),
-                 json.dumps(fields.get("cursor", {}), ensure_ascii=False), now),
+                (
+                    principal_id,
+                    skill_name,
+                    skill_version,
+                    fields.get("last_status"),
+                    fields.get("last_run_at"),
+                    fields.get("run_count", 1),
+                    json.dumps(fields.get("cursor", {}), ensure_ascii=False),
+                    now,
+                ),
             )
             self._conn.commit()
             return
@@ -141,8 +158,7 @@ class DriftSkillStateRepository:
                 vals.append(v)
         vals.extend([principal_id, skill_name])
         self._conn.execute(
-            f"UPDATE drift_skill_state SET {', '.join(sets)} "
-            "WHERE principal_id=? AND skill_name=?",
+            f"UPDATE drift_skill_state SET {', '.join(sets)} WHERE principal_id=? AND skill_name=?",
             vals,
         )
         self._conn.commit()

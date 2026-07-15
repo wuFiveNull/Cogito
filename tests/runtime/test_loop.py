@@ -96,10 +96,14 @@ class TestAgentLoop:
 
     @pytest.mark.asyncio
     async def test_refusal_via_content_filter(self):
-        provider = StubModelProvider([StubScenario(
-            response_text="I cannot answer that",
-            finish_reason=FinishReason.content_filter,
-        )])
+        provider = StubModelProvider(
+            [
+                StubScenario(
+                    response_text="I cannot answer that",
+                    finish_reason=FinishReason.content_filter,
+                )
+            ]
+        )
         router = ModelRouter(
             providers={"stub": provider},
             role_map={"main": "stub"},
@@ -112,10 +116,12 @@ class TestAgentLoop:
     @pytest.mark.asyncio
     async def test_invalid_output_repaired_once(self):
         """InvalidOutput 修复一次后成功。"""
-        provider = StubModelProvider([
-            StubScenario(response_text="", finish_reason=FinishReason.stop),  # empty = invalid
-            StubScenario(response_text="Valid response", finish_reason=FinishReason.stop),
-        ])
+        provider = StubModelProvider(
+            [
+                StubScenario(response_text="", finish_reason=FinishReason.stop),  # empty = invalid
+                StubScenario(response_text="Valid response", finish_reason=FinishReason.stop),
+            ]
+        )
         router = ModelRouter(
             providers={"stub": provider},
             role_map={"main": "stub"},
@@ -129,10 +135,12 @@ class TestAgentLoop:
     @pytest.mark.asyncio
     async def test_double_invalid_leads_to_invalid_output(self):
         """二次无效后失败。"""
-        provider = StubModelProvider([
-            StubScenario(response_text="", finish_reason=FinishReason.stop),  # invalid
-            StubScenario(response_text="", finish_reason=FinishReason.stop),  # invalid again
-        ])
+        provider = StubModelProvider(
+            [
+                StubScenario(response_text="", finish_reason=FinishReason.stop),  # invalid
+                StubScenario(response_text="", finish_reason=FinishReason.stop),  # invalid again
+            ]
+        )
         router = ModelRouter(
             providers={"stub": provider},
             role_map={"main": "stub"},
@@ -174,10 +182,14 @@ class TestAgentLoop:
     @pytest.mark.asyncio
     async def test_tool_call_without_executor_returns_error(self):
         """没有 Executor 时 Tool Call 返回 error。"""
-        provider = StubModelProvider([StubScenario(
-            response_text="",
-            finish_reason=FinishReason.tool_calls,
-        )])
+        provider = StubModelProvider(
+            [
+                StubScenario(
+                    response_text="",
+                    finish_reason=FinishReason.tool_calls,
+                )
+            ]
+        )
         router = ModelRouter(
             providers={"stub": provider},
             role_map={"main": "stub"},
@@ -190,13 +202,17 @@ class TestAgentLoop:
     @pytest.mark.asyncio
     async def test_provider_error_returns_error_result(self):
         """Provider terminal error。"""
-        provider = StubModelProvider([StubScenario(
-            error=ErrorEnvelope(
-                category=ErrorCategory.provider_internal,
-                message="Internal error",
-                retryable=False,
-            ),
-        )])
+        provider = StubModelProvider(
+            [
+                StubScenario(
+                    error=ErrorEnvelope(
+                        category=ErrorCategory.provider_internal,
+                        message="Internal error",
+                        retryable=False,
+                    ),
+                )
+            ]
+        )
         router = ModelRouter(
             providers={"stub": provider},
             role_map={"main": "stub"},
@@ -210,9 +226,14 @@ class TestAgentLoop:
     async def test_loop_tracks_usage(self):
         """Loop 累计 Usage。"""
         usage1 = Usage(input_tokens=10, output_tokens=20)
-        provider = StubModelProvider([StubScenario(
-            response_text="Hello", usage=usage1,
-        )])
+        provider = StubModelProvider(
+            [
+                StubScenario(
+                    response_text="Hello",
+                    usage=usage1,
+                )
+            ]
+        )
         router = ModelRouter(
             providers={"stub": provider},
             role_map={"main": "stub"},
@@ -237,12 +258,17 @@ class TestAgentLoop:
 
     @pytest.mark.asyncio
     async def test_error_is_not_success(self):
-        provider = StubModelProvider([StubScenario(
-            error=ErrorEnvelope(
-                category=ErrorCategory.provider_internal,
-                message="Err", retryable=False,
-            ),
-        )])
+        provider = StubModelProvider(
+            [
+                StubScenario(
+                    error=ErrorEnvelope(
+                        category=ErrorCategory.provider_internal,
+                        message="Err",
+                        retryable=False,
+                    ),
+                )
+            ]
+        )
         router = ModelRouter(
             providers={"stub": provider},
             role_map={"main": "stub"},

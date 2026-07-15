@@ -1,4 +1,5 @@
 """PR-C3: SideEffect reconcile — Plan 03 M3."""
+
 from __future__ import annotations
 
 from cogito.capability.models import SideEffectReceipt
@@ -12,7 +13,7 @@ class _DB:
         self.receipts: dict[str, dict] = {}
         self.approvals: list[dict] = []
 
-    def execute(self, sql: str, params: tuple = ()) -> "_Cursor":
+    def execute(self, sql: str, params: tuple = ()) -> _Cursor:
         if sql.startswith("UPDATE"):
             rid = params[-1]
             self.receipts[rid] = {"reconcile_status": params[0], "summary": params[1]}
@@ -31,11 +32,12 @@ class _Cursor:
         self.rowcount = rowcount
 
 
-def _receipt(rid: str = "r1", op_id: str = "op-123",
-             req_hash: str = "abc") -> SideEffectReceipt:
+def _receipt(rid: str = "r1", op_id: str = "op-123", req_hash: str = "abc") -> SideEffectReceipt:
     return SideEffectReceipt(
-        receipt_id=rid, tool_call_id="c1",
-        external_operation_id=op_id, request_hash=req_hash,
+        receipt_id=rid,
+        tool_call_id="c1",
+        external_operation_id=op_id,
+        request_hash=req_hash,
         status="unknown",
     )
 

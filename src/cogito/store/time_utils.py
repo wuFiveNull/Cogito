@@ -3,6 +3,7 @@
 Kept as a compatibility shim. New code should import from
 `cogito.contracts.clock` directly.
 """
+
 from __future__ import annotations
 
 from cogito.contracts.clock import (

@@ -30,20 +30,28 @@ class ConfigVersionRepository:
             "INSERT INTO config_versions (version_id, content_hash, schema_version, "
             "source_layers, applied_at, applied_by, change_summary) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (record.version_id, record.content_hash, record.schema_version,
-             json.dumps(record.source_layers), record.applied_at,
-             record.applied_by, record.change_summary),
+            (
+                record.version_id,
+                record.content_hash,
+                record.schema_version,
+                json.dumps(record.source_layers),
+                record.applied_at,
+                record.applied_by,
+                record.change_summary,
+            ),
         )
 
     def get_by_hash(self, content_hash: str) -> ConfigVersionRecord | None:
         row = self._conn.execute(
-            "SELECT * FROM config_versions WHERE content_hash=?", (content_hash,),
+            "SELECT * FROM config_versions WHERE content_hash=?",
+            (content_hash,),
         ).fetchone()
         return self._row_to_record(row) if row else None
 
     def get(self, version_id: str) -> ConfigVersionRecord | None:
         row = self._conn.execute(
-            "SELECT * FROM config_versions WHERE version_id=?", (version_id,),
+            "SELECT * FROM config_versions WHERE version_id=?",
+            (version_id,),
         ).fetchone()
         return self._row_to_record(row) if row else None
 

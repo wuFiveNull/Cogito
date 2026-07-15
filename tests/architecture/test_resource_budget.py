@@ -1,4 +1,5 @@
 """ResourceBudget + LoopState budget tracking — Plan 02 M4."""
+
 from __future__ import annotations
 
 import pytest
@@ -19,9 +20,13 @@ from cogito.runtime.context import ContextItem, ContextSnapshot
 
 def test_budget_roundtrip() -> None:
     budget = ResourceBudget(
-        max_loop_iterations=5, max_model_calls=10, max_tool_calls=20,
-        max_input_tokens=16000, max_output_tokens=4096,
-        max_wall_time_s=60, max_cost=1.0,
+        max_loop_iterations=5,
+        max_model_calls=10,
+        max_tool_calls=20,
+        max_input_tokens=16000,
+        max_output_tokens=4096,
+        max_wall_time_s=60,
+        max_cost=1.0,
     )
     data = budget.to_dict()
     restored = ResourceBudget.from_dict(data)
@@ -98,9 +103,14 @@ async def test_output_budget_is_sent_to_provider() -> None:
     snapshot = ContextSnapshot(
         snapshot_id="snapshot",
         turn_id="turn",
-        items=(ContextItem(
-            item_type="message", item_id="message", source="test", content="hello",
-        ),),
+        items=(
+            ContextItem(
+                item_type="message",
+                item_id="message",
+                source="test",
+                content="hello",
+            ),
+        ),
     )
 
     await loop.run(snapshot)
@@ -118,6 +128,7 @@ async def test_output_budget_is_sent_to_provider() -> None:
 def _stub_router() -> Any:
     from cogito.model.router import ModelRouter
     from cogito.model.stub_provider import StubModelProvider
+
     provider = StubModelProvider()
     return ModelRouter(
         providers={"main": provider},

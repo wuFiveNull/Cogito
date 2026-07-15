@@ -16,6 +16,7 @@ Known violations are registered with an ADR link and a clear_by date; once a
 violation is cleared the entry is removed, and the test will fail on any
 *new* violation or any exception past its clear_by date.
 """
+
 from __future__ import annotations
 
 import ast
@@ -67,9 +68,7 @@ def test_no_new_forbidden_edges() -> None:
     if overdue:
         messages.append("Overdue architecture exceptions:\n  " + "\n  ".join(overdue))
     if unexpected:
-        body = "\n".join(
-            f"  {s} -> {sorted(ds)}" for s, ds in sorted(unexpected.items())
-        )
+        body = "\n".join(f"  {s} -> {sorted(ds)}" for s, ds in sorted(unexpected.items()))
         messages.append("New forbidden edges must be registered with ADR + clear_by:\n" + body)
     assert not messages, "\n\n".join(messages)
 

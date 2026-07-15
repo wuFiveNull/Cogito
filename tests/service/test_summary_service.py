@@ -33,12 +33,15 @@ def db_path() -> str:
         pass
 
 
-def _init_with_data(db_path: str, session_id: str, conv_id: str, msg_count: int) -> sqlite3.Connection:
+def _init_with_data(
+    db_path: str, session_id: str, conv_id: str, msg_count: int
+) -> sqlite3.Connection:
     conn = get_connection(db_path)
     migrate(conn)
     conn.execute(
         "INSERT OR IGNORE INTO conversations (conversation_id, conversation_type, platform_conversation_id) "
-        "VALUES (?, 'private', ?)", (conv_id, conv_id),
+        "VALUES (?, 'private', ?)",
+        (conv_id, conv_id),
     )
     conn.execute(
         "INSERT OR IGNORE INTO sessions (session_id, conversation_id, context_partition_key, created_at) "
@@ -103,14 +106,15 @@ class TestSummaryService:
             connection_factory=lambda: get_connection(db_path),
         )
         messages = service.build_messages_for_summary(
-            sid, 3, 5,
+            sid,
+            3,
+            5,
             existing_summary={"content": {"summary": "Previous summary"}, "covers_to_seq": 2},
         )
 
         # 第一条消息应该是父摘要
         has_summary_ref = any(
-            "Existing session summary" in (m.get("content") or "")
-            for m in messages
+            "Existing session summary" in (m.get("content") or "") for m in messages
         )
         assert has_summary_ref
 
@@ -180,8 +184,11 @@ class TestSummaryService:
 
         # 第一次摘要：1-5
         service.generate_summary(
-            session_id=sid, conversation_id=cid,
-            principal_id="p1", from_sequence=1, to_sequence=5,
+            session_id=sid,
+            conversation_id=cid,
+            principal_id="p1",
+            from_sequence=1,
+            to_sequence=5,
         )
 
         # 获取 active
@@ -200,8 +207,11 @@ class TestSummaryService:
 
         # 第二次摘要：6-10（带 parent）
         service.generate_summary(
-            session_id=sid, conversation_id=cid,
-            principal_id="p1", from_sequence=6, to_sequence=10,
+            session_id=sid,
+            conversation_id=cid,
+            principal_id="p1",
+            from_sequence=6,
+            to_sequence=10,
             parent_summary_id=parent_id,
         )
 
@@ -258,8 +268,11 @@ class TestSummaryService:
             connection_factory=lambda: get_connection(db_path),
         )
         service.generate_summary(
-            session_id=sid, conversation_id=cid,
-            principal_id="p1", from_sequence=1, to_sequence=3,
+            session_id=sid,
+            conversation_id=cid,
+            principal_id="p1",
+            from_sequence=1,
+            to_sequence=3,
         )
 
         conn2 = get_connection(db_path)

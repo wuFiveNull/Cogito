@@ -5,6 +5,7 @@
 
 Admission 不得使用模型；全部基于阈值比较。
 """
+
 from __future__ import annotations
 
 import time
@@ -16,8 +17,12 @@ from cogito.domain.drift import DriftAdmissionSnapshot, DriftReasonCode
 class DriftAdmissionResult:
     """admission 结果（deny 带 reason list）。"""
 
-    def __init__(self, admit: bool, reasons: list[str] | None = None,
-                 snapshot: DriftAdmissionSnapshot | None = None) -> None:
+    def __init__(
+        self,
+        admit: bool,
+        reasons: list[str] | None = None,
+        snapshot: DriftAdmissionSnapshot | None = None,
+    ) -> None:
         self.admit = admit
         self.reasons: list[str] = reasons or []
         self.snapshot = snapshot or DriftAdmissionSnapshot()
@@ -56,9 +61,7 @@ def admit(
     priority_backlog = row[0] if row else 0
 
     # 3. ready delivery backlog (pending)
-    row = conn.execute(
-        "SELECT COUNT(*) FROM deliveries WHERE status='pending'"
-    ).fetchone()
+    row = conn.execute("SELECT COUNT(*) FROM deliveries WHERE status='pending'").fetchone()
     delivery_backlog = row[0] if row else 0
 
     # 4. outbox critical age (最老的 pending outbox event)。
@@ -74,9 +77,7 @@ def admit(
 
     # 5. recovery in progress (近 grace_period 内存在恢复过的 attempt → 视为进行中)
     #    简化：有 in-progress 的 turn/streaming delivery 即为 recovery
-    row = conn.execute(
-        "SELECT COUNT(*) FROM turns WHERE status='running'"
-    ).fetchone()
+    row = conn.execute("SELECT COUNT(*) FROM turns WHERE status='running'").fetchone()
     recovery_in_progress = (row[0] if row else 0) > 0
 
     # 6. user activity age
@@ -89,6 +90,7 @@ def admit(
             last_user_dt = None
     if last_user_dt is not None:
         from cogito.contracts.clock import epoch_ms
+
         lu = epoch_ms(last_user_dt)
         if lu is not None:
             last_user_activity_age_ms = max(0, now_ms - lu)
@@ -134,8 +136,7 @@ def admit(
     if delivery_backlog > 0:
         reasons.append(DriftReasonCode.delivery_backlog)
     # outbox_critical_age 必须 < threshold 才准入；无 pending 视为满足
-    if (oldest_outbox_age_ms is not None
-            and oldest_outbox_age_ms >= outbox_critical_age_ms):
+    if oldest_outbox_age_ms is not None and oldest_outbox_age_ms >= outbox_critical_age_ms:
         reasons.append(DriftReasonCode.outbox_critical)
     if recovery_in_progress:
         reasons.append(DriftReasonCode.recovery_in_progress)
@@ -143,8 +144,10 @@ def admit(
         reasons.append(DriftReasonCode.budget_exhausted)
     if drift_already_active:
         reasons.append(DriftReasonCode.drift_already_active)
-    if (last_user_activity_age_ms is not None
-            and last_user_activity_age_ms < idle_after_minutes * 60 * 1000):
+    if (
+        last_user_activity_age_ms is not None
+        and last_user_activity_age_ms < idle_after_minutes * 60 * 1000
+    ):
         reasons.append(DriftReasonCode.not_idle_long_enough)
 
     admit = len(reasons) == 0

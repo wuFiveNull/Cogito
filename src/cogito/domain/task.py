@@ -77,7 +77,9 @@ class Task:
             "scheduled_at": self.scheduled_at.isoformat() if self.scheduled_at else None,
             "retry_policy": self.retry_policy,
             "lease_owner": self.lease_owner,
-            "lease_expires_at": self.lease_expires_at.isoformat() if self.lease_expires_at else None,
+            "lease_expires_at": self.lease_expires_at.isoformat()
+            if self.lease_expires_at
+            else None,
             "checkpoint_ref": self.checkpoint_ref,
             "idempotency_key": self.idempotency_key,
             "origin": self.origin,
@@ -93,14 +95,20 @@ class Task:
             result_ref=data.get("result_ref"),
             status=TaskStatus(data.get("status", "created")),
             priority=data.get("priority", 40),
-            scheduled_at=datetime.fromisoformat(data["scheduled_at"]) if data.get("scheduled_at") else None,
+            scheduled_at=datetime.fromisoformat(data["scheduled_at"])
+            if data.get("scheduled_at")
+            else None,
             retry_policy=data.get("retry_policy", {}),
             lease_owner=data.get("lease_owner"),
-            lease_expires_at=datetime.fromisoformat(data["lease_expires_at"]) if data.get("lease_expires_at") else None,
+            lease_expires_at=datetime.fromisoformat(data["lease_expires_at"])
+            if data.get("lease_expires_at")
+            else None,
             checkpoint_ref=data.get("checkpoint_ref"),
             idempotency_key=data.get("idempotency_key", ""),
             origin=data.get("origin", "system"),
-            created_at=datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None,
+            created_at=datetime.fromisoformat(data["created_at"])
+            if data.get("created_at")
+            else None,
         )
 
     def __eq__(self, other: object) -> bool:
@@ -147,7 +155,9 @@ class TaskAttempt:
             "status": self.status.value,
             "lease_owner": self.lease_owner,
             "lease_version": self.lease_version,
-            "lease_expires_at": self.lease_expires_at.isoformat() if self.lease_expires_at else None,
+            "lease_expires_at": self.lease_expires_at.isoformat()
+            if self.lease_expires_at
+            else None,
             "checkpoint_ref": self.checkpoint_ref,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
@@ -162,10 +172,16 @@ class TaskAttempt:
             status=TaskAttemptStatus(data.get("status", "created")),
             lease_owner=data.get("lease_owner", ""),
             lease_version=data.get("lease_version", 1),
-            lease_expires_at=datetime.fromisoformat(data["lease_expires_at"]) if data.get("lease_expires_at") else None,
+            lease_expires_at=datetime.fromisoformat(data["lease_expires_at"])
+            if data.get("lease_expires_at")
+            else None,
             checkpoint_ref=data.get("checkpoint_ref"),
-            started_at=datetime.fromisoformat(data["started_at"]) if data.get("started_at") else None,
-            finished_at=datetime.fromisoformat(data["finished_at"]) if data.get("finished_at") else None,
+            started_at=datetime.fromisoformat(data["started_at"])
+            if data.get("started_at")
+            else None,
+            finished_at=datetime.fromisoformat(data["finished_at"])
+            if data.get("finished_at")
+            else None,
         )
 
     def __eq__(self, other: object) -> bool:

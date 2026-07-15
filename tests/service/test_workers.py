@@ -52,27 +52,35 @@ def _insert_outbox_events(conn: sqlite3.Connection, events: list[dict]) -> None:
             "INSERT INTO outbox_events (event_id, event_type, aggregate_type, aggregate_id, "
             "aggregate_version, status, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (ev["event_id"], ev.get("event_type", "TestEvent"),
-             ev.get("aggregate_type", "turn"), ev.get("aggregate_id", "t1"),
-             ev.get("aggregate_version", 1), ev.get("status", "pending"),
-             ev.get("created_at", epoch_ms(datetime.now(UTC)))),
+            (
+                ev["event_id"],
+                ev.get("event_type", "TestEvent"),
+                ev.get("aggregate_type", "turn"),
+                ev.get("aggregate_id", "t1"),
+                ev.get("aggregate_version", 1),
+                ev.get("status", "pending"),
+                ev.get("created_at", epoch_ms(datetime.now(UTC))),
+            ),
         )
     conn.commit()
 
 
 def _insert_delivery(conn: sqlite3.Connection, **overrides: object) -> str:
     import uuid
+
     delivery_id = overrides.get("delivery_id", uuid.uuid4().hex)
     conn.execute(
         "INSERT INTO deliveries (delivery_id, target_snapshot, content_ref, status, "
         "idempotency_key, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        (delivery_id,
-         overrides.get("target_snapshot", '{"target": "test"}'),
-         overrides.get("content_ref", "msg_ref"),
-         overrides.get("status", "pending"),
-         overrides.get("idempotency_key", f"key_{delivery_id[:8]}"),
-         overrides.get("created_at", epoch_ms(datetime.now(UTC)))),
+        (
+            delivery_id,
+            overrides.get("target_snapshot", '{"target": "test"}'),
+            overrides.get("content_ref", "msg_ref"),
+            overrides.get("status", "pending"),
+            overrides.get("idempotency_key", f"key_{delivery_id[:8]}"),
+            overrides.get("created_at", epoch_ms(datetime.now(UTC))),
+        ),
     )
     conn.commit()
     return delivery_id
@@ -114,11 +122,14 @@ class TestOutboxLease:
 
     def test_lease_maintains_order(self, db: sqlite3.Connection):
         """Events are leased in aggregate order, respecting version gaps."""
-        _insert_outbox_events(db, [
-            {"event_id": "e1", "aggregate_id": "t1", "aggregate_version": 1},
-            {"event_id": "e2", "aggregate_id": "t1", "aggregate_version": 2},
-            {"event_id": "e3", "aggregate_id": "t2", "aggregate_version": 1},
-        ])
+        _insert_outbox_events(
+            db,
+            [
+                {"event_id": "e1", "aggregate_id": "t1", "aggregate_version": 1},
+                {"event_id": "e2", "aggregate_id": "t1", "aggregate_version": 2},
+                {"event_id": "e3", "aggregate_id": "t2", "aggregate_version": 1},
+            ],
+        )
         worker = OutboxWorker(db)
 
         l1 = worker.lease_next("w1")
@@ -137,10 +148,13 @@ class TestOutboxLease:
         assert l3.event_id == "e2"
 
     def test_order_skips_aggregate_with_pending_previous(self, db: sqlite3.Connection):
-        _insert_outbox_events(db, [
-            {"event_id": "e1", "aggregate_id": "t1", "aggregate_version": 1},
-            {"event_id": "e2", "aggregate_id": "t1", "aggregate_version": 2},
-        ])
+        _insert_outbox_events(
+            db,
+            [
+                {"event_id": "e1", "aggregate_id": "t1", "aggregate_version": 1},
+                {"event_id": "e2", "aggregate_id": "t1", "aggregate_version": 2},
+            ],
+        )
         worker = OutboxWorker(db)
 
         lease1 = worker.lease_next("w1")
@@ -154,9 +168,12 @@ class TestOutboxLease:
 
     def test_retry_scheduled_expired_can_be_leased(self, db: sqlite3.Connection):
         """retry_scheduled past next_attempt_at should be leasable."""
-        _insert_outbox_events(db, [
-            {"event_id": "e1", "status": "retry_scheduled"},
-        ])
+        _insert_outbox_events(
+            db,
+            [
+                {"event_id": "e1", "status": "retry_scheduled"},
+            ],
+        )
         # Set next_attempt_at in the past (epoch ms)
         past_ms = int(datetime(2020, 1, 1, tzinfo=UTC).timestamp() * 1000)
         db.execute(
@@ -172,9 +189,12 @@ class TestOutboxLease:
 
     def test_retry_scheduled_future_cannot_be_leased(self, db: sqlite3.Connection):
         """retry_scheduled with future next_attempt_at should NOT be leasable."""
-        _insert_outbox_events(db, [
-            {"event_id": "e1", "status": "retry_scheduled"},
-        ])
+        _insert_outbox_events(
+            db,
+            [
+                {"event_id": "e1", "status": "retry_scheduled"},
+            ],
+        )
         future_ms = int(datetime(2099, 1, 1, tzinfo=UTC).timestamp() * 1000)
         db.execute(
             "UPDATE outbox_events SET next_attempt_at=? WHERE event_id='e1'",
@@ -196,9 +216,7 @@ class TestOutboxPublish:
         ok = worker.publish(lease, "w1")
         assert ok is True
 
-        row = db.execute(
-            "SELECT status FROM outbox_events WHERE event_id='e1'"
-        ).fetchone()
+        row = db.execute("SELECT status FROM outbox_events WHERE event_id='e1'").fetchone()
         assert row["status"] == "published"
 
     def test_publish_wrong_worker_fails(self, db: sqlite3.Connection):
@@ -231,9 +249,7 @@ class TestOutboxRetry:
         ok = worker.retry(lease, "w1")
         assert ok is True
 
-        row = db.execute(
-            "SELECT status FROM outbox_events WHERE event_id='e1'"
-        ).fetchone()
+        row = db.execute("SELECT status FROM outbox_events WHERE event_id='e1'").fetchone()
         assert row["status"] == "retry_scheduled"
 
     def test_retry_sets_next_attempt_at(self, db: sqlite3.Connection):
@@ -258,6 +274,7 @@ class TestOutboxRetry:
     def test_dead_letter_after_max_retries(self, db: sqlite3.Connection):
         """After MAX_TENTATIVE attempts, retry should move to dead_letter."""
         from cogito.service.outbox_worker import MAX_TENTATIVE
+
         _insert_outbox_events(db, [{"event_id": "e1"}])
         worker = OutboxWorker(db)
 
@@ -298,9 +315,7 @@ class TestOutboxRetry:
         ok = worker.dead_letter("e1")
         assert ok is True
 
-        row = db.execute(
-            "SELECT status FROM outbox_events WHERE event_id='e1'"
-        ).fetchone()
+        row = db.execute("SELECT status FROM outbox_events WHERE event_id='e1'").fetchone()
         assert row["status"] == "dead_letter"
 
 
@@ -311,22 +326,27 @@ class TestOutboxFullCycle:
 
         lease = worker.lease_next("w1")
         assert lease is not None
-        assert db.execute(
-            "SELECT status FROM outbox_events WHERE event_id='e1'"
-        ).fetchone()["status"] == "leased"
+        assert (
+            db.execute("SELECT status FROM outbox_events WHERE event_id='e1'").fetchone()["status"]
+            == "leased"
+        )
 
         worker.publish(lease, "w1")
-        assert db.execute(
-            "SELECT status FROM outbox_events WHERE event_id='e1'"
-        ).fetchone()["status"] == "published"
+        assert (
+            db.execute("SELECT status FROM outbox_events WHERE event_id='e1'").fetchone()["status"]
+            == "published"
+        )
 
         assert worker.lease_next("w1") is None
 
     def test_multiple_aggregates_independent(self, db: sqlite3.Connection):
-        _insert_outbox_events(db, [
-            {"event_id": "e1", "aggregate_id": "t1", "aggregate_version": 1},
-            {"event_id": "e2", "aggregate_id": "t2", "aggregate_version": 1},
-        ])
+        _insert_outbox_events(
+            db,
+            [
+                {"event_id": "e1", "aggregate_id": "t1", "aggregate_version": 1},
+                {"event_id": "e2", "aggregate_id": "t2", "aggregate_version": 1},
+            ],
+        )
         worker = OutboxWorker(db)
 
         l1 = worker.lease_next("w1")
@@ -359,9 +379,7 @@ class TestOutboxConcurrency:
         assert lease is not None
 
         # Recovery resets the lease
-        RecoveryService(db).recover_outbox_leases(
-            clock=datetime(2099, 1, 1, tzinfo=UTC)
-        )
+        RecoveryService(db).recover_outbox_leases(clock=datetime(2099, 1, 1, tzinfo=UTC))
 
         # Old worker tries to publish with stale lease
         ok = worker.publish(lease, "w1")
@@ -417,9 +435,7 @@ class TestDeliveryLease:
         assert lease.delivery_id == did
         assert lease.attempt_count == 1
 
-        row = db.execute(
-            "SELECT status FROM deliveries WHERE delivery_id=?", (did,)
-        ).fetchone()
+        row = db.execute("SELECT status FROM deliveries WHERE delivery_id=?", (did,)).fetchone()
         assert row["status"] == "sending"
 
     def test_lease_creates_attempt(self, db: sqlite3.Connection):
@@ -429,9 +445,7 @@ class TestDeliveryLease:
 
         worker.lease_next("w1")
 
-        attempts = db.execute(
-            "SELECT status, attempt_no FROM delivery_attempts"
-        ).fetchall()
+        attempts = db.execute("SELECT status, attempt_no FROM delivery_attempts").fetchall()
         assert len(attempts) == 1
         assert attempts[0]["status"] == "sending"
         assert attempts[0]["attempt_no"] == 1
@@ -505,7 +519,8 @@ class TestDeliverySend:
         assert len(gateway.sent) == 0
 
         row = db.execute(
-            "SELECT status FROM deliveries WHERE delivery_id=?", (did,),
+            "SELECT status FROM deliveries WHERE delivery_id=?",
+            (did,),
         ).fetchone()
         assert row["status"] == "retry_scheduled"
 
@@ -521,7 +536,8 @@ class TestDeliverySend:
         assert result == "unknown"
 
         row = db.execute(
-            "SELECT status FROM deliveries WHERE delivery_id=?", (did,),
+            "SELECT status FROM deliveries WHERE delivery_id=?",
+            (did,),
         ).fetchone()
         assert row["status"] == "unknown"  # not auto-retried
 
@@ -621,9 +637,7 @@ class TestRecoveryService:
         count = recovery.recover_outbox_leases(clock=future)
         assert count == 1
 
-        row = db.execute(
-            "SELECT status FROM outbox_events WHERE event_id='e1'"
-        ).fetchone()
+        row = db.execute("SELECT status FROM outbox_events WHERE event_id='e1'").fetchone()
         assert row["status"] == "pending"  # reset to pending
 
     def test_recover_outbox_idempotent(self, db: sqlite3.Connection):
@@ -666,7 +680,8 @@ class TestRecoveryService:
         assert count == 1
 
         row = db.execute(
-            "SELECT status FROM deliveries WHERE delivery_id=?", (did,),
+            "SELECT status FROM deliveries WHERE delivery_id=?",
+            (did,),
         ).fetchone()
         # sending + expired → unknown (not pending, because external may have succeeded)
         assert row["status"] == "unknown"
@@ -679,7 +694,8 @@ class TestRecoveryService:
         assert count == 0
 
         row = db.execute(
-            "SELECT status FROM deliveries WHERE delivery_id=?", (did,),
+            "SELECT status FROM deliveries WHERE delivery_id=?",
+            (did,),
         ).fetchone()
         assert row["status"] == "unknown"
 
@@ -710,6 +726,7 @@ class TestRecoveryService:
     def test_recover_all(self, db: sqlite3.Connection):
         """recover_all runs all recovery scans."""
         import uuid
+
         # Create an outbox with expired lease
         eid = uuid.uuid4().hex
         _insert_outbox_events(db, [{"event_id": eid}])
@@ -751,11 +768,14 @@ class TestFullCycle:
 
     def test_outbox_aggregate_version_ordering(self, db: sqlite3.Connection):
         """Outbox events from same aggregate must be published in version order."""
-        _insert_outbox_events(db, [
-            {"event_id": "v1", "aggregate_id": "agg1", "aggregate_version": 1},
-            {"event_id": "v2", "aggregate_id": "agg1", "aggregate_version": 2},
-            {"event_id": "v3", "aggregate_id": "agg1", "aggregate_version": 3},
-        ])
+        _insert_outbox_events(
+            db,
+            [
+                {"event_id": "v1", "aggregate_id": "agg1", "aggregate_version": 1},
+                {"event_id": "v2", "aggregate_id": "agg1", "aggregate_version": 2},
+                {"event_id": "v3", "aggregate_id": "agg1", "aggregate_version": 3},
+            ],
+        )
         worker = OutboxWorker(db)
 
         l1 = worker.lease_next("w1")
@@ -816,12 +836,13 @@ class TestFullCycle:
 class TestDeliveryBackoff:
     def test_delivery_backoff_increases(self):
         from cogito.service.delivery_worker import compute_delivery_backoff
+
         b1 = compute_delivery_backoff(1)
         b2 = compute_delivery_backoff(2)
         b3 = compute_delivery_backoff(3)
         assert b1 == DELIVERY_BACKOFF_BASE
         assert b2 == DELIVERY_BACKOFF_BASE * DELIVERY_BACKOFF_MULTIPLIER
-        assert b3 == DELIVERY_BACKOFF_BASE * (DELIVERY_BACKOFF_MULTIPLIER ** 2)
+        assert b3 == DELIVERY_BACKOFF_BASE * (DELIVERY_BACKOFF_MULTIPLIER**2)
         assert b1 < b2 < b3
 
 
@@ -863,6 +884,7 @@ class TestDeliveryFaultWindow:
 
         class ExpiryGateway:
             """在 send 期间推进 FakeClock 使 Lease 过期。"""
+
             def __init__(self, clk: FakeClock):
                 self.sent: list[tuple[str, str]] = []
                 self._clock = clk
@@ -886,9 +908,7 @@ class TestDeliveryFaultWindow:
         assert len(gateway.sent) == 1
 
         # Delivery 进入了 unknown
-        row = db.execute(
-            "SELECT status FROM deliveries WHERE delivery_id=?", (did,)
-        ).fetchone()
+        row = db.execute("SELECT status FROM deliveries WHERE delivery_id=?", (did,)).fetchone()
         assert row["status"] == "unknown"
 
         # 检查存在 uncertain Receipt
@@ -906,6 +926,7 @@ class TestDeliveryFaultWindow:
 
         class RaceGateway:
             """在 send 期间模拟 Recovery 推进版本。"""
+
             def __init__(self, conn: sqlite3.Connection):
                 self.sent: list[tuple[str, str]] = []
                 self._conn = conn
@@ -916,7 +937,8 @@ class TestDeliveryFaultWindow:
                 self._conn.execute(
                     "UPDATE deliveries SET status='unknown', lease_owner=NULL, "
                     "lease_expires_at=NULL, lease_version=lease_version+1 "
-                    "WHERE delivery_id=?", (did,)
+                    "WHERE delivery_id=?",
+                    (did,),
                 )
                 self._conn.commit()
                 return True
@@ -1009,13 +1031,12 @@ class TestDeliveryFaultWindow:
 
         # Recovery 不应将 sent 回退
         from cogito.service.recovery_service import RecoveryService
+
         recovery = RecoveryService(db)
         count = recovery.recover_delivery_leases()
         assert count == 0
 
-        row = db.execute(
-            "SELECT status FROM deliveries WHERE delivery_id=?", (did,)
-        ).fetchone()
+        row = db.execute("SELECT status FROM deliveries WHERE delivery_id=?", (did,)).fetchone()
         assert row["status"] == "sent"
 
 
@@ -1026,13 +1047,18 @@ class TestDeliveryLeaseValidation:
         """NULL Lease 不能 complete/fail/heartbeat。"""
 
         with db:
-            db.execute("INSERT INTO turns (turn_id, session_id, status, created_at) "
-                       "VALUES ('t_null', 's1', 'running', 1736942520000)")
-            db.execute("INSERT INTO run_attempts (attempt_id, turn_id, attempt_no, status, "
-                       "worker_id, lease_version, lease_expires_at) "
-                       "VALUES ('a_null', 't_null', 1, 'running', 'w1', 0, NULL)")
+            db.execute(
+                "INSERT INTO turns (turn_id, session_id, status, created_at) "
+                "VALUES ('t_null', 's1', 'running', 1736942520000)"
+            )
+            db.execute(
+                "INSERT INTO run_attempts (attempt_id, turn_id, attempt_no, status, "
+                "worker_id, lease_version, lease_expires_at) "
+                "VALUES ('a_null', 't_null', 1, 'running', 'w1', 0, NULL)"
+            )
 
         from cogito.service.dispatcher import Dispatcher
+
         dispatcher = Dispatcher(db)
 
         # complete with NULL lease
@@ -1057,9 +1083,15 @@ class TestDeliveryLeaseValidation:
         db.execute(
             "INSERT INTO turns (turn_id, session_id, input_message_id, status, priority, version, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (turn.turn_id, turn.session_id, turn.input_message_id,
-             turn.status.value, turn.priority, turn.version,
-             1736942520000),
+            (
+                turn.turn_id,
+                turn.session_id,
+                turn.input_message_id,
+                turn.status.value,
+                turn.priority,
+                turn.version,
+                1736942520000,
+            ),
         )
         db.execute(
             "INSERT OR IGNORE INTO conversations (conversation_id, conversation_type, platform_conversation_id) "
@@ -1081,7 +1113,8 @@ class TestDeliveryLeaseValidation:
         clock.advance_minutes(5)  # 超过 TTL 120s
 
         ok = dispatcher.complete(
-            claimed.turn.turn_id, claimed.attempt.attempt_id,
+            claimed.turn.turn_id,
+            claimed.attempt.attempt_id,
             claimed.turn.version,
             worker_id=claimed.attempt.worker_id,
             lease_version=claimed.attempt.lease_version,
@@ -1098,7 +1131,8 @@ class TestDeliveryLeaseValidation:
         assert claimed is not None
 
         ok = dispatcher.complete(
-            claimed.turn.turn_id, claimed.attempt.attempt_id,
+            claimed.turn.turn_id,
+            claimed.attempt.attempt_id,
             claimed.turn.version,
             worker_id="WRONG_OWNER",
             lease_version=claimed.attempt.lease_version,
@@ -1114,7 +1148,8 @@ class TestDeliveryLeaseValidation:
         assert claimed is not None
 
         ok = dispatcher.complete(
-            claimed.turn.turn_id, claimed.attempt.attempt_id,
+            claimed.turn.turn_id,
+            claimed.attempt.attempt_id,
             claimed.turn.version,
             worker_id=claimed.attempt.worker_id,
             lease_version=999,  # 错误的版本

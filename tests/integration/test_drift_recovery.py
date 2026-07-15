@@ -4,6 +4,7 @@
   重启后 resume 从 step+1 续跑，不重复已确认副作用。
 - 备份恢复后 Task/Drift/Decision 因果链可查询。
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -30,16 +31,23 @@ def _seed_run(conn, run_id):
     conn.execute(
         "INSERT INTO tasks (task_id, task_type, status, priority, idempotency_key, created_at) "
         "VALUES (?,?,?,?,?,?)",
-        (f"t-{run_id}", "drift.run", "running", 5, f"id-{run_id}",
-         int(time.time()*1000)),
+        (f"t-{run_id}", "drift.run", "running", 5, f"id-{run_id}", int(time.time() * 1000)),
     )
     conn.execute(
         "INSERT INTO drift_runs "
         "(drift_run_id, task_id, principal_id, skill_name, skill_version, "
         " status, admission_snapshot_json, created_at) "
         "VALUES (?,?,?,?,?,?,?,?)",
-        (run_id, f"t-{run_id}", "owner", "proactive-policy-view-audit",
-         "1.0", "admitted", "{}", int(time.time()*1000)),
+        (
+            run_id,
+            f"t-{run_id}",
+            "owner",
+            "proactive-policy-view-audit",
+            "1.0",
+            "admitted",
+            "{}",
+            int(time.time() * 1000),
+        ),
     )
     conn.commit()
 
@@ -57,35 +65,29 @@ class TestCrashRecovery:
         重启后 resume 续跑，Delivery 创建次数不翻倍。"""
         conn = _fresh_db()
         _seed_run(conn, "dr-crash")
-        task = Task(task_id="t-dr-crash", task_type="drift.run",
-                    status=TaskStatus.running)
+        task = Task(task_id="t-dr-crash", task_type="drift.run", status=TaskStatus.running)
         # 第 0 步前抢占 → 模拟在 checkpoint 处崩溃
         request_preemption(conn, "owner", "turn")
         first = handle_drift_run(task, _Ctx(conn))
         assert "paused" in first
 
         # 暂停后不应有副作用 (read-only skill 不写 Delivery)
-        deliveries_before = conn.execute(
-            "SELECT COUNT(*) FROM deliveries").fetchone()[0]
+        deliveries_before = conn.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0]
         assert deliveries_before == 0
 
         # resume (再次触发同一 run)
-        resume_task = Task(task_id="t-dr-crash", task_type="drift.run",
-                           status=TaskStatus.running)
+        resume_task = Task(task_id="t-dr-crash", task_type="drift.run", status=TaskStatus.running)
         second = handle_drift_run(resume_task, _Ctx(conn))
         # 不出现重复副作用
-        deliveries_after = conn.execute(
-            "SELECT COUNT(*) FROM deliveries").fetchone()[0]
+        deliveries_after = conn.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0]
         assert deliveries_after == deliveries_before  # 零增长
-        assert "resumed" in second.lower() or "completed" in second or \
-            "needs_review" in second
+        assert "resumed" in second.lower() or "completed" in second or "needs_review" in second
 
     def test_repeated_preempt_resumes_stable(self):
         """连续暂停-恢复循环最终收敛：立即抢占时 steps_taken=0（零副作用 safety）。"""
         conn = _fresh_db()
         _seed_run(conn, "dr-loop")
-        task = Task(task_id="t-dr-loop", task_type="drift.run",
-                    status=TaskStatus.running)
+        task = Task(task_id="t-dr-loop", task_type="drift.run", status=TaskStatus.running)
         for _ in range(5):
             request_preemption(conn, "owner", "turn")
             handle_drift_run(task, _Ctx(conn))
@@ -100,12 +102,10 @@ class TestCrashRecovery:
         """备份恢复后 Task/Drift 因果链可查询 (门禁 #9)。"""
         conn = _fresh_db()
         _seed_run(conn, "dr-chain")
-        task = Task(task_id="t-dr-chain", task_type="drift.run",
-                    status=TaskStatus.running)
+        task = Task(task_id="t-dr-chain", task_type="drift.run", status=TaskStatus.running)
         handle_drift_run(task, _Ctx(conn))
         # 因果链：task → drift_run → skill_state
-        task_row = conn.execute(
-            "SELECT task_id FROM tasks WHERE task_id='t-dr-chain'").fetchone()
+        task_row = conn.execute("SELECT task_id FROM tasks WHERE task_id='t-dr-chain'").fetchone()
         assert task_row is not None
         run_row = conn.execute(
             "SELECT drift_run_id FROM drift_runs WHERE task_id='t-dr-chain'"

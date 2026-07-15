@@ -4,6 +4,7 @@ Verifies every SYSTEM-BOUNDARIES / 4 aggregate has a unique write entry
 (Protocol) defined in cogito.service, and that implementations exist for
 the previously-undefined ones (Task, Approval, IdentityConversation).
 """
+
 from __future__ import annotations
 
 import inspect
@@ -64,6 +65,7 @@ def test_previously_missing_facades_have_implementations() -> None:
 # ---------------------------------------------------------------------------
 # 2. Approval facade: the unique write entry replaces direct SQL in commands.
 # ---------------------------------------------------------------------------
+
 
 def _mem_db_with_approvals() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")

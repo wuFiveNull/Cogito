@@ -26,9 +26,8 @@ import uuid
 from datetime import UTC, datetime
 from typing import NamedTuple, Protocol
 
-from cogito.contracts.clock import Clock, ProductionClock
+from cogito.contracts.clock import Clock, ProductionClock, epoch_ms
 from cogito.service.unit_of_work import UnitOfWork
-from cogito.contracts.clock import epoch_ms
 
 # ── Gateway Protocol ──
 
@@ -93,9 +92,13 @@ def compute_delivery_backoff(attempt_count: int) -> float:
 class DeliveryWorker:
     """投递 Worker。"""
 
-    def __init__(self, conn: sqlite3.Connection, gateway: Gateway,
-                 lease_ttl_s: int = DELIVERY_LEASE_TTL_S,
-                 clock: Clock | None = None) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        gateway: Gateway,
+        lease_ttl_s: int = DELIVERY_LEASE_TTL_S,
+        clock: Clock | None = None,
+    ) -> None:
         self._conn = conn
         self._gateway = gateway
         self._lease_ttl_s = lease_ttl_s
@@ -116,7 +119,8 @@ class DeliveryWorker:
         lease_expires = now_int + self._lease_ttl_s * 1000
 
         with UnitOfWork(self._conn) as uow:
-            row = self._conn.execute("""
+            row = self._conn.execute(
+                """
                 SELECT * FROM deliveries
                 WHERE (
                     status = 'pending'
@@ -127,7 +131,9 @@ class DeliveryWorker:
                 )
                 ORDER BY created_at ASC
                 LIMIT 1
-            """, (now_int,)).fetchone()
+            """,
+                (now_int,),
+            ).fetchone()
 
             if row is None:
                 return None
@@ -139,8 +145,14 @@ class DeliveryWorker:
                 "UPDATE deliveries SET status='sending', lease_owner=?, "
                 "lease_version=lease_version+1, attempt_count=?, lease_expires_at=? "
                 "WHERE delivery_id=? AND status=? AND lease_version=?",
-                (worker_id, new_attempt_count, lease_expires,
-                 row["delivery_id"], row["status"], old_version),
+                (
+                    worker_id,
+                    new_attempt_count,
+                    lease_expires,
+                    row["delivery_id"],
+                    row["status"],
+                    old_version,
+                ),
             )
             if updated.rowcount == 0:
                 return None
@@ -170,21 +182,41 @@ class DeliveryWorker:
     def _request_hash(self, delivery_id: str, content_ref: str, lease_version: int) -> str:
         """计算请求的简短哈希。"""
         import hashlib
+
         raw = f"{delivery_id}:{content_ref}:{lease_version}"
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
-    def _write_receipt(self, uow: UnitOfWork, delivery_id: str, attempt_id: str,
-                       request_hash: str, receipt_kind: str, platform_message_id: str | None,
-                       safe_result: str | None, observed_at: int, lease_version: int) -> None:
+    def _write_receipt(
+        self,
+        uow: UnitOfWork,
+        delivery_id: str,
+        attempt_id: str,
+        request_hash: str,
+        receipt_kind: str,
+        platform_message_id: str | None,
+        safe_result: str | None,
+        observed_at: int,
+        lease_version: int,
+    ) -> None:
         """写入 delivery_receipt 记录。"""
         import uuid
+
         self._conn.execute(
             "INSERT OR IGNORE INTO delivery_receipts "
             "(receipt_id, delivery_id, delivery_attempt_id, operation_seq, request_hash, "
             "receipt_kind, platform_message_id, safe_result, observed_at, lease_version) "
             "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)",
-            (uuid.uuid4().hex, delivery_id, attempt_id, request_hash,
-             receipt_kind, platform_message_id, safe_result, observed_at, lease_version),
+            (
+                uuid.uuid4().hex,
+                delivery_id,
+                attempt_id,
+                request_hash,
+                receipt_kind,
+                platform_message_id,
+                safe_result,
+                observed_at,
+                lease_version,
+            ),
         )
 
     def deliver(self, lease: DeliveryLease, worker_id: str, clock: datetime | None = None) -> str:
@@ -230,6 +262,7 @@ class DeliveryWorker:
 
         # ── 第三步：事务外调用 Gateway（结构化版本）──
         from cogito.channel.base import ChannelSendResult
+
         send_result: ChannelSendResult
         if hasattr(self._gateway, "send_request"):
             try:
@@ -274,18 +307,28 @@ class DeliveryWorker:
             attempt_id = attempt_row["attempt_id"] if attempt_row else ""
 
             # 使用 post_call_int 验证 Lease（可能已在 Gateway 调用期间过期或被 Recovery 推进）
-            if current is None \
-                    or current["status"] != "sending" \
-                    or current["lease_owner"] != worker_id \
-                    or current["lease_version"] != lease.lease_version \
-                    or current["lease_expires_at"] is None \
-                    or current["lease_expires_at"] <= post_call_int:
+            if (
+                current is None
+                or current["status"] != "sending"
+                or current["lease_owner"] != worker_id
+                or current["lease_version"] != lease.lease_version
+                or current["lease_expires_at"] is None
+                or current["lease_expires_at"] <= post_call_int
+            ):
                 # Gateway was called but we can't commit — enter unknown
                 # 写 uncertain Receipt 作为持久证据
                 safe_result = f"{send_result.status}:{send_result.error_code or ''}"
-                self._write_receipt(uow, lease.delivery_id, attempt_id, req_hash,
-                                    "uncertain", send_result.platform_message_id,
-                                    safe_result, post_call_int, lease.lease_version)
+                self._write_receipt(
+                    uow,
+                    lease.delivery_id,
+                    attempt_id,
+                    req_hash,
+                    "uncertain",
+                    send_result.platform_message_id,
+                    safe_result,
+                    post_call_int,
+                    lease.lease_version,
+                )
                 # 使用 delivery_id 主键直接更新（lease 可能已被 Recovery 推进版本）
                 self._conn.execute(
                     "UPDATE deliveries SET status='unknown', lease_owner=NULL, "
@@ -310,9 +353,17 @@ class DeliveryWorker:
                     (post_call_int, attempt_id),
                 )
                 # 写 confirmed Receipt
-                self._write_receipt(uow, lease.delivery_id, attempt_id, req_hash,
-                                    "confirmed", platform_msg_id, "ok",
-                                    post_call_int, lease.lease_version)
+                self._write_receipt(
+                    uow,
+                    lease.delivery_id,
+                    attempt_id,
+                    req_hash,
+                    "confirmed",
+                    platform_msg_id,
+                    "ok",
+                    post_call_int,
+                    lease.lease_version,
+                )
                 uow.commit()
                 return "sent"
 
@@ -327,9 +378,17 @@ class DeliveryWorker:
                     "WHERE attempt_id=?",
                     (post_call_int, attempt_id),
                 )
-                self._write_receipt(uow, lease.delivery_id, attempt_id, req_hash,
-                                    "permanent", None, send_result.error_code or "permanent",
-                                    post_call_int, lease.lease_version)
+                self._write_receipt(
+                    uow,
+                    lease.delivery_id,
+                    attempt_id,
+                    req_hash,
+                    "permanent",
+                    None,
+                    send_result.error_code or "permanent",
+                    post_call_int,
+                    lease.lease_version,
+                )
                 uow.commit()
                 return "failed"
 
@@ -341,7 +400,9 @@ class DeliveryWorker:
                         (lease.delivery_id, worker_id, lease.lease_version),
                     )
                 else:
-                    delay = send_result.retry_after_seconds or compute_delivery_backoff(lease.attempt_count)
+                    delay = send_result.retry_after_seconds or compute_delivery_backoff(
+                        lease.attempt_count
+                    )
                     next_at = datetime.fromtimestamp(post_call.timestamp() + delay, tz=UTC)
                     next_at_int = epoch_ms(next_at)
                     self._conn.execute(
@@ -354,9 +415,17 @@ class DeliveryWorker:
                     "WHERE attempt_id=?",
                     (post_call_int, attempt_id),
                 )
-                self._write_receipt(uow, lease.delivery_id, attempt_id, req_hash,
-                                    "temporary", None, send_result.error_code or "temporary",
-                                    post_call_int, lease.lease_version)
+                self._write_receipt(
+                    uow,
+                    lease.delivery_id,
+                    attempt_id,
+                    req_hash,
+                    "temporary",
+                    None,
+                    send_result.error_code or "temporary",
+                    post_call_int,
+                    lease.lease_version,
+                )
                 uow.commit()
                 return "failed"  # temporary 失败本轮返回 failed，但实际进入 retry_scheduled
 
@@ -367,20 +436,31 @@ class DeliveryWorker:
                 (lease.delivery_id, worker_id, lease.lease_version),
             )
             self._conn.execute(
-                "UPDATE delivery_attempts SET status='failed', finished_at=? "
-                "WHERE attempt_id=?",
+                "UPDATE delivery_attempts SET status='failed', finished_at=? WHERE attempt_id=?",
                 (post_call_int, attempt_id),
             )
             # 写 uncertain Receipt
-            self._write_receipt(uow, lease.delivery_id, attempt_id, req_hash,
-                                "uncertain", None,
-                                send_result.error_code or "unknown",
-                                post_call_int, lease.lease_version)
+            self._write_receipt(
+                uow,
+                lease.delivery_id,
+                attempt_id,
+                req_hash,
+                "uncertain",
+                None,
+                send_result.error_code or "unknown",
+                post_call_int,
+                lease.lease_version,
+            )
             uow.commit()
             return "unknown"
 
-    def reconcile(self, delivery_id: str, platform_message_id: str,
-                  worker_id: str = "", clock: datetime | None = None) -> bool:
+    def reconcile(
+        self,
+        delivery_id: str,
+        platform_message_id: str,
+        worker_id: str = "",
+        clock: datetime | None = None,
+    ) -> bool:
         """Reconcile 路径：unknown → sent。
 
         同时写入 reconciled Receipt 作为持久证据。
@@ -430,8 +510,15 @@ class DeliveryWorker:
                     "(receipt_id, delivery_id, delivery_attempt_id, operation_seq, request_hash, "
                     "receipt_kind, platform_message_id, safe_result, observed_at, lease_version) "
                     "VALUES (?, ?, ?, ?, '', 'reconciled', ?, 'reconciled', ?, ?)",
-                    (uuid.uuid4().hex, delivery_id, attempt_id, op_seq,
-                     platform_message_id, observed_at, lease_ver),
+                    (
+                        uuid.uuid4().hex,
+                        delivery_id,
+                        attempt_id,
+                        op_seq,
+                        platform_message_id,
+                        observed_at,
+                        lease_ver,
+                    ),
                 )
 
             uow.commit()

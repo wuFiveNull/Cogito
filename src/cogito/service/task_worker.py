@@ -30,10 +30,10 @@ TASK_WORKER_ID_PREFIX = "task-wkr-"
 
 
 class TaskRunOutcome(StrEnum):
-    idle = "idle"            # 无可用 Task
+    idle = "idle"  # 无可用 Task
     completed = "completed"  # 成功完成
-    failed = "failed"        # 执行失败
-    lost = "lost"            # Lease 失效
+    failed = "failed"  # 执行失败
+    lost = "lost"  # Lease 失效
     no_handler = "no_handler"  # 无对应处理器
 
 
@@ -127,10 +127,12 @@ class TaskWorker:
                 return True
             except Exception:
                 return False
+
         self._handler_ctx.lease_checker = _lease_checker
         heartbeat_task = asyncio.create_task(
-            self._heartbeat_loop(task.task_id, attempt.task_attempt_id,
-                                 worker_id, attempt.lease_version)
+            self._heartbeat_loop(
+                task.task_id, attempt.task_attempt_id, worker_id, attempt.lease_version
+            )
         )
 
         try:
@@ -141,11 +143,14 @@ class TaskWorker:
                 result = await handler(task, self._handler_ctx)
             else:
                 result = await asyncio.to_thread(
-                    handler, task, self._handler_ctx,
+                    handler,
+                    task,
+                    self._handler_ctx,
                 )
             _LOGGER.info(
                 "Task handler completed: %s => %s",
-                task.task_type, (result or "")[:100],
+                task.task_type,
+                (result or "")[:100],
             )
         except Exception as e:
             _LOGGER.exception("Task handler failed: %s", e)
@@ -250,6 +255,7 @@ class TaskWorker:
         if not deps:
             return
         from cogito.service.memory_signals import SignalWriter
+
         conn = getattr(self._dispatcher, "_conn", None)
         if conn is None:
             return
@@ -276,15 +282,21 @@ class TaskWorker:
             _LOGGER.warning("persist_declared_dependencies failed: %s", e)
 
     async def _heartbeat_loop(
-        self, task_id: str, attempt_id: str,
-        worker_id: str, lease_version: int,
+        self,
+        task_id: str,
+        attempt_id: str,
+        worker_id: str,
+        lease_version: int,
     ) -> None:
         """定期发送 heartbeat 防止 Lease 过期。"""
         while True:
             await asyncio.sleep(self._heartbeat_interval_s)
             try:
                 ok = self._dispatcher.heartbeat(
-                    task_id, attempt_id, worker_id, lease_version,
+                    task_id,
+                    attempt_id,
+                    worker_id,
+                    lease_version,
                 )
                 if not ok:
                     return

@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
-import sqlite3
 import json
+import sqlite3
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -56,27 +56,49 @@ class ContextSnapshotRepository:
             "message_upper_bound, query_plan_version, "
             "selection_policy_version, token_budget, tokens_used, "
             "excluded_summary, created_at, schema_version, per_source_tokens_json, "
-            "exclusion_stats_json, excluded_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (record.snapshot_id, record.session_id, record.attempt_id, record.attempt_type,
-             record.parent_snapshot_id, record.message_upper_bound, record.query_plan_version,
-             record.selection_policy_version, record.token_budget, record.tokens_used,
-             int(record.excluded_summary), record.created_at, record.schema_version,
-             json.dumps(record.per_source_tokens), json.dumps(record.exclusion_stats),
-             json.dumps(list(record.excluded)) if record.excluded else None),
+            "exclusion_stats_json, excluded_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                record.snapshot_id,
+                record.session_id,
+                record.attempt_id,
+                record.attempt_type,
+                record.parent_snapshot_id,
+                record.message_upper_bound,
+                record.query_plan_version,
+                record.selection_policy_version,
+                record.token_budget,
+                record.tokens_used,
+                int(record.excluded_summary),
+                record.created_at,
+                record.schema_version,
+                json.dumps(record.per_source_tokens),
+                json.dumps(record.exclusion_stats),
+                json.dumps(list(record.excluded)) if record.excluded else None,
+            ),
         )
         for item in record.items:
             self._conn.execute(
                 "INSERT INTO context_snapshot_items (snapshot_id, item_index, source, score, "
                 "tokens, trust_label, retrieval_path, content_ref, provenance_json) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (record.snapshot_id, item.item_index, item.source, item.score,
-                 item.tokens, item.trust_label, item.retrieval_path, item.content_ref,
-                 json.dumps(item.provenance)),
+                (
+                    record.snapshot_id,
+                    item.item_index,
+                    item.source,
+                    item.score,
+                    item.tokens,
+                    item.trust_label,
+                    item.retrieval_path,
+                    item.content_ref,
+                    json.dumps(item.provenance),
+                ),
             )
 
     def get(self, snapshot_id: str) -> ContextSnapshotRecord | None:
         row = self._conn.execute(
-            "SELECT * FROM context_snapshots WHERE snapshot_id=?", (snapshot_id,),
+            "SELECT * FROM context_snapshots WHERE snapshot_id=?",
+            (snapshot_id,),
         ).fetchone()
         if row is None:
             return None

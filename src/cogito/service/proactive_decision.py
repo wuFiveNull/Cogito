@@ -16,6 +16,7 @@
 
 dry_run 模式下仍执行完整逻辑（除副作用），写出 decision 用于观测。
 """
+
 from __future__ import annotations
 
 import logging
@@ -39,6 +40,7 @@ _LOGGER = logging.getLogger(__name__)
 @dataclass
 class DecisionTrace:
     """单个 decision 的中间结果（供 Dashboard/审计）。"""
+
     rule: str
     passed: bool
     detail: str = ""
@@ -67,13 +69,10 @@ def decide(
 
     # 1. alert fast-path: 跳过以下 2-5
     alert_hourly = (
-        existing_hourly_sent
-        if existing_alert_hourly_sent is None
-        else existing_alert_hourly_sent
+        existing_hourly_sent if existing_alert_hourly_sent is None else existing_alert_hourly_sent
     )
     if alert and alert_hourly < policy.alert_max_per_hour:
-        return _decide_alert(candidate, policy, now, energy_value,
-                             alert_hourly, traces)
+        return _decide_alert(candidate, policy, now, energy_value, alert_hourly, traces)
     if alert:
         record("alert_hourly_budget", False, "degraded_to_content")
 
@@ -157,6 +156,7 @@ def decide(
 
 def _decide_alert(candidate, policy, now, energy_value, hourly_sent, traces):
     """alert 快速通道：仅服从 hard safety 与独立 alert 限额。"""
+
     def r(name, passed, detail=""):
         traces.append(DecisionTrace(name, passed, detail))
         return passed
@@ -211,11 +211,10 @@ def enqueue_send_later(
     """
     import uuid
 
-    from datetime import timedelta
-
     from cogito.domain.task import Task, TaskStatus
     from cogito.service.proactive_delivery_service import create_scheduled_request
     from cogito.store.task_repo import TaskRepository
+
     scheduled_at_ms = now_ms() + int(delay_minutes) * 60 * 1000
     # Task.scheduled_at 为 datetime 类型，此处转为 datetime 保持一致
     scheduled_at_dt = from_epoch_ms(scheduled_at_ms) if scheduled_at_ms else None
@@ -275,10 +274,9 @@ def persist_decision(
         candidate_id=candidate.candidate_id,
         principal_id=candidate.principal_id,
         action=action,
-        rule_results={"trace": [
-            {"rule": t.rule, "passed": t.passed, "detail": t.detail}
-            for t in trace
-        ]},
+        rule_results={
+            "trace": [{"rule": t.rule, "passed": t.passed, "detail": t.detail} for t in trace]
+        },
         model_score=model_score,
         policy_version=policy.version,
         energy_value=energy_value,

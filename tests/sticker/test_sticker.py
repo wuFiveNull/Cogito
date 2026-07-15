@@ -12,7 +12,14 @@ import pytest
 
 from cogito.capability.models import ToolContext
 from cogito.config import MultimodalConfig
-from cogito.domain.conversation import Conversation, ConversationStatus, ConversationType, ContextPartitionPolicy, Session, SessionStatus
+from cogito.domain.conversation import (
+    Conversation,
+    ConversationStatus,
+    ConversationType,
+    ContextPartitionPolicy,
+    Session,
+    SessionStatus,
+)
 from cogito.domain.message import ContentPart, Message, MessageDirection, MessageRole
 from cogito.domain.multimodal import MultimodalAsset
 from cogito.infrastructure.multimodal_metrics import MultimodalMetrics
@@ -31,15 +38,17 @@ from cogito.tools.sticker import (
 
 
 PNG_BYTES = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNg"
-    "AAIAAAUAAeImBZsAAAAASUVORK5CYII="
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgAAIAAAUAAeImBZsAAAAASUVORK5CYII="
 )
 
 
 def _ctx(principal: str, session: str) -> ToolContext:
     return ToolContext(
-        attempt_id="a1", trace_id="t1", tool_call_id="tc1",
-        principal_id=principal, session_id=session,
+        attempt_id="a1",
+        trace_id="t1",
+        tool_call_id="tc1",
+        principal_id=principal,
+        session_id=session,
     )
 
 
@@ -70,7 +79,9 @@ def payload_store(db: sqlite3.Connection, tmp_path: Path) -> PayloadStore:
 
 
 @pytest.fixture
-def asset_service(db: sqlite3.Connection, tmp_path: Path, config: MultimodalConfig) -> AssetIngestionService:
+def asset_service(
+    db: sqlite3.Connection, tmp_path: Path, config: MultimodalConfig
+) -> AssetIngestionService:
     return AssetIngestionService(db, str(tmp_path / "payload"), config)
 
 
@@ -88,8 +99,14 @@ def _seed_image(
         "INSERT OR IGNORE INTO payload_objects "
         "(payload_ref,sha256,content_type,size,storage_path,created_at) "
         "VALUES (?,?,?,?,?,?)",
-        (payload.payload_id, payload.sha256, "image/png",
-         payload.size_bytes, payload.storage_uri, int(time.time() * 1000)),
+        (
+            payload.payload_id,
+            payload.sha256,
+            "image/png",
+            payload.size_bytes,
+            payload.storage_uri,
+            int(time.time() * 1000),
+        ),
     )
     db.commit()
     asset = MultimodalAsset(
@@ -117,20 +134,28 @@ def _seed_image(
         sender_principal_id=principal,
         role=MessageRole.user,
         direction=MessageDirection.inbound,
-        content_parts=[ContentPart(
-            part_id=part_id, content_type="image",
-            payload_ref=asset.payload_ref, size=asset.size_bytes,
-            sha256=asset.sha256, metadata={"mime": "image/png", "name": "cat.png"},
-            ordinal=0,
-        )],
+        content_parts=[
+            ContentPart(
+                part_id=part_id,
+                content_type="image",
+                payload_ref=asset.payload_ref,
+                size=asset.size_bytes,
+                sha256=asset.sha256,
+                metadata={"mime": "image/png", "name": "cat.png"},
+                ordinal=0,
+            )
+        ],
         receive_sequence=int(payload.payload_id, 16) % 100000,
         created_at=datetime.now(UTC),
     )
     msg_repo.insert(msg)
     msg_repo.insert_content_part(msg.content_parts[0], msg.message_id)
     repo.link_message_asset(
-        message_id=msg_id, part_id=part_id,
-        asset_id=asset.asset_id, ordinal=0, original_filename="cat.png",
+        message_id=msg_id,
+        part_id=part_id,
+        asset_id=asset.asset_id,
+        ordinal=0,
+        original_filename="cat.png",
     )
     return asset
 
@@ -181,9 +206,12 @@ def _seed_message_with_image(
         content_parts=[
             ContentPart(content_type="text", inline_data="hello", ordinal=0),
             ContentPart(
-                content_type="image", payload_ref=asset.payload_ref,
-                size=asset.size_bytes, sha256=asset.sha256,
-                metadata={"mime": "image/png", "name": "cat.png"}, ordinal=1,
+                content_type="image",
+                payload_ref=asset.payload_ref,
+                size=asset.size_bytes,
+                sha256=asset.sha256,
+                metadata={"mime": "image/png", "name": "cat.png"},
+                ordinal=1,
             ),
         ],
         receive_sequence=1,
@@ -228,6 +256,7 @@ async def test_save_sticker_marks_asset(sticker_service, repo, payload_store, db
         _ctx("owner", "s1"),
     )
     import json
+
     data = json.loads(result)
     assert data["status"] == "saved"
     assert data["sticker_id"] == asset.asset_id
@@ -249,6 +278,7 @@ async def test_save_sticker_denies_cross_principal(sticker_service, repo, payloa
         _ctx("intruder", "other-session"),
     )
     import json
+
     data = json.loads(result)
     assert data["status"] == "denied"
 
@@ -261,7 +291,10 @@ async def test_save_sticker_records_metrics(sticker_service, repo, payload_store
     sticker_service._metrics = metrics
     asset = _seed_image(repo, payload_store, db)
     sticker_service.save_sticker(
-        asset.asset_id, name="cat", principal_id="owner", session_id="s1",
+        asset.asset_id,
+        name="cat",
+        principal_id="owner",
+        session_id="s1",
     )
     assert metrics.snapshot()["stickers_saved"] == 1
 
@@ -307,6 +340,7 @@ async def test_send_sticker_without_delivery(sticker_service, repo, payload_stor
         _ctx("owner", "s1"),
     )
     import json
+
     data = json.loads(result)
     assert data["status"] == "error"
     assert "delivery" in data["error"]
@@ -369,11 +403,15 @@ def test_gateway_text_only_message(db, tmp_path: Path):
     _seed_session(db, "conv1")
     msg_repo = MessageRepository(db)
     msg = Message(
-        message_id="m2", conversation_id="conv1", session_id="s1",
-        sender_principal_id="owner", role=MessageRole.user,
+        message_id="m2",
+        conversation_id="conv1",
+        session_id="s1",
+        sender_principal_id="owner",
+        role=MessageRole.user,
         direction=MessageDirection.inbound,
         content_parts=[ContentPart(content_type="text", inline_data="only text", ordinal=0)],
-        receive_sequence=2, created_at=datetime.now(UTC),
+        receive_sequence=2,
+        created_at=datetime.now(UTC),
     )
     msg_repo.insert(msg)
     msg_repo.insert_content_part(msg.content_parts[0], msg.message_id)

@@ -53,11 +53,17 @@ def tool_contract_issues(tool: ToolDef) -> list[str]:
     if tool.output_schema is None:
         issues.append("missing_output_schema")
     if tool.result_trust_label not in {
-        "verified_local", "external_untrusted", "user_supplied", "unverified",
+        "verified_local",
+        "external_untrusted",
+        "user_supplied",
+        "unverified",
     }:
         issues.append("invalid_trust_label")
     if tool.side_effect_class not in {
-        "none", "idempotent", "reconcilable", "non_retriable",
+        "none",
+        "idempotent",
+        "reconcilable",
+        "non_retriable",
     }:
         issues.append("invalid_side_effect_class")
     if tool.side_effect_class == "reconcilable" and tool.reconcile_fn is None:

@@ -216,8 +216,13 @@ class WorkspaceBoundary:
         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
         create_file = kernel32.CreateFileW
         create_file.argtypes = (
-            ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
-            ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
         )
         create_file.restype = ctypes.c_void_p
         handle = create_file(

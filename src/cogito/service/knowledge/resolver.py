@@ -35,6 +35,7 @@ def resolve_segment_text(
                 return data.decode("utf-8", errors="replace")
         except Exception as e:  # 解析失败降级到 inline（不应发生，但保持鲁棒）
             import logging
+
             logger = logging.getLogger("cogito.knowledge.resolver")
             logger.warning("resolve payload_ref %s failed: %s", payload_ref, e)
     return str(segment_row.get("text_ref_or_inline") or "")
@@ -50,8 +51,10 @@ def resolve_payload_ref(payload_ref: str, store=None) -> str:
             return data.decode("utf-8", errors="replace")
     except Exception as e:
         import logging
+
         logging.getLogger("cogito.knowledge.resolver").warning(
-            "resolve_payload_ref %s failed: %s", payload_ref, e)
+            "resolve_payload_ref %s failed: %s", payload_ref, e
+        )
     return ""
 
 
@@ -66,6 +69,7 @@ def make_payload_store_factory(config=None):
     def _factory(conn=None):
         root = config.resolve_payload_dir() if config else ".workspace/payloads"
         import sqlite3 as _sqlite3
+
         c = conn or _sqlite3.connect(config.resolve_db_path()) if config else None
         return PayloadStore(root, c)
 

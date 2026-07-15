@@ -5,6 +5,7 @@
 - MCP 返回内容固定 external_untrusted，不能注入 system prompt
 - Schema 变化生成新 CapabilitySnapshot，不修改正在执行 Attempt
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -16,8 +17,9 @@ from cogito.contracts.envelope import ErrorCategory, ErrorEnvelope
 @dataclass(frozen=True)
 class MCPServerSecurityPolicy:
     """每个 MCP Server 的安全策略（Plan 03 M5）。"""
+
     server_name: str
-    allowed_tools: tuple[str, ...] = ()        # 空 = 全部允许
+    allowed_tools: tuple[str, ...] = ()  # 空 = 全部允许
     denied_tools: tuple[str, ...] = ()
     toolset: str = "mcp"
     max_output_chars: int = 50_000
@@ -31,7 +33,7 @@ class MCPServerSecurityPolicy:
 class MCPSchemaValidator:
     """MCP Tool Schema 校验器。"""
 
-    MAX_SCHEMA_SIZE = 10_000          # 单 Tool Schema 最大字符
+    MAX_SCHEMA_SIZE = 10_000  # 单 Tool Schema 最大字符
     MAX_TOOLS_PER_SERVER = 100
     FORBIDDEN_KEYWORDS = {"oneOf", "anyOf", "allOf", "$ref"}  # 可选限制
 
@@ -42,8 +44,7 @@ class MCPSchemaValidator:
         if not name:
             errors.append("tool name empty")
         elif len(name) > 128 or not all(
-            character.isalnum() or character in {"_", "-", "."}
-            for character in name
+            character.isalnum() or character in {"_", "-", "."} for character in name
         ):
             errors.append(f"tool {name!r}: invalid name")
         size = len(str(schema))
@@ -94,7 +95,7 @@ def mcp_error_envelope(
     return ErrorEnvelope(
         category=category,
         message=message,
-        retryable=category in (ErrorCategory.timeout, ErrorCategory.rate_limit,
-                               ErrorCategory.dependency_unavailable),
+        retryable=category
+        in (ErrorCategory.timeout, ErrorCategory.rate_limit, ErrorCategory.dependency_unavailable),
         safe_details=message[:200],
     )

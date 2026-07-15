@@ -14,6 +14,7 @@ QQ-ONEBOT-E2E-01 / PR 4:
 FakeChannelAdapter 在内存中模拟 OneBot send_*_msg 响应，
 验证 Core 的 Inbound/AgentLoop/DeliveryWorker/Receipt 完整链路。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -74,18 +75,23 @@ class FakeChannelAdapter:
         self.status = AdapterStatus.stopped
 
     async def send(
-        self, conversation_id: str, message: str, reply_to_message_id: str | None = None,
+        self,
+        conversation_id: str,
+        message: str,
+        reply_to_message_id: str | None = None,
     ) -> dict[str, Any]:
-        result = await self.send_request(ChannelSendRequest(
-            delivery_id="",
-            attempt_id="",
-            idempotency_key="",
-            channel_instance_id=self.adapter_id,
-            target_endpoint_ref="",
-            platform_conversation_id=conversation_id,
-            reply_to_platform_message_id=reply_to_message_id,
-            text=message,
-        ))
+        result = await self.send_request(
+            ChannelSendRequest(
+                delivery_id="",
+                attempt_id="",
+                idempotency_key="",
+                channel_instance_id=self.adapter_id,
+                target_endpoint_ref="",
+                platform_conversation_id=conversation_id,
+                reply_to_platform_message_id=reply_to_message_id,
+                text=message,
+            )
+        )
         return {"status": result.status, "platform_message_id": result.platform_message_id}
 
     def send_request_sync(self, request: ChannelSendRequest) -> ChannelSendResult:
@@ -99,21 +105,25 @@ class FakeChannelAdapter:
 
         if self._fail_mode == "temporary":
             return ChannelSendResult(
-                status="temporary", error_code="connection_error",
+                status="temporary",
+                error_code="connection_error",
             )
         if self._fail_mode == "permanent":
             return ChannelSendResult(
-                status="permanent", error_code="auth_error",
+                status="permanent",
+                error_code="auth_error",
             )
 
         message_id = self._next_message_id
         self._next_message_id += 1
-        self.sent_log.append({
-            "delivery_id": request.delivery_id,
-            "target": request.platform_conversation_id,
-            "text": request.text,
-            "message_id": message_id,
-        })
+        self.sent_log.append(
+            {
+                "delivery_id": request.delivery_id,
+                "target": request.platform_conversation_id,
+                "text": request.text,
+                "message_id": message_id,
+            }
+        )
         return ChannelSendResult(
             status="sent",
             platform_message_id=str(message_id),
@@ -163,7 +173,9 @@ def _make_private_inbound(message_id: str, text: str = "你好 Cogito") -> Inbou
 
 
 def _make_group_inbound(
-    message_id: str, group_id: str = ALLOWED_GROUP, text: str = "@Bot 你好",
+    message_id: str,
+    group_id: str = ALLOWED_GROUP,
+    text: str = "@Bot 你好",
 ) -> Inbound:
     """创建群聊入站消息。"""
     return Inbound(
@@ -294,6 +306,7 @@ class TestE2EPrivateLoop:
         # 构建 ChannelSendRequest
         from cogito.channel.base import ChannelSendRequest
         import json as _json
+
         target = _json.loads(delivery_row["target_snapshot"])
         request = ChannelSendRequest(
             delivery_id=target.get("delivery_id", ""),
@@ -302,7 +315,9 @@ class TestE2EPrivateLoop:
             channel_instance_id=target.get("adapter_id", "qq-main"),
             target_endpoint_ref=target.get("target_endpoint_ref", ""),
             platform_conversation_id=delivery_row["target_snapshot"],  # 仅用于解析
-            reply_to_platform_message_id=target.get("reply_route", {}).get("reply_to_platform_message_id"),
+            reply_to_platform_message_id=target.get("reply_route", {}).get(
+                "reply_to_platform_message_id"
+            ),
             text="Stub reply: hello from Cogito",
         )
         result = await fake_adapter.send_request(request)

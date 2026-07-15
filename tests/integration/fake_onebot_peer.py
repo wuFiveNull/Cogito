@@ -9,6 +9,7 @@ QQ-ONEBOT-E2E-01 / PR 4:
 
 不改 Cogito 入站路径；从协议边界驱动 Inbound。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -72,6 +73,7 @@ class FakeOneBotPeer:
 
     async def start(self) -> None:
         """启动 fake peer server。"""
+
         async def handler(ws: WebSocketServerProtocol) -> None:
             await self._handle(ws)
 
@@ -236,7 +238,14 @@ class FakeOneBotPeer:
                 "msg": "",
             }
         else:
-            resp = {"status": "ok", "retcode": 0, "data": None, "message": "", "wording": "", "msg": ""}
+            resp = {
+                "status": "ok",
+                "retcode": 0,
+                "data": None,
+                "message": "",
+                "wording": "",
+                "msg": "",
+            }
 
         if self._ws is not None:
             await self._ws.send(json.dumps(resp))

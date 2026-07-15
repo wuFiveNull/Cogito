@@ -1,4 +1,5 @@
 """MCP lifecycle must stay on the manager's persistent runner loop."""
+
 from __future__ import annotations
 
 import asyncio
@@ -62,7 +63,10 @@ def test_start_call_health_and_stop_share_one_runner_loop(monkeypatch):
         "type": ["object", "array", "string", "number", "boolean", "null"],
     }
     result = manager.call_tool_structured_sync(
-        "fake", "items", {}, sampling_scope="attempt-1",
+        "fake",
+        "items",
+        {},
+        sampling_scope="attempt-1",
     )
     assert result.is_error is False
     assert asyncio.run(manager.health_check_all()) == {"fake": True}

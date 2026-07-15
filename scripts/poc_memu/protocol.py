@@ -2,6 +2,7 @@
 
 所有后端（Cogito / memU）实现同一协议，保证数据集和指标可比。
 """
+
 from __future__ import annotations
 
 from typing import Protocol, runtime_checkable

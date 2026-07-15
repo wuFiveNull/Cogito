@@ -147,9 +147,7 @@ def test_crash_then_replay_finalizes() -> None:
     assert completed, "replay run_once should complete"
 
     # 重放后：1 条 sent 流式 delivery（新）+ 1 条 interrupted（崩溃遗留）
-    sent = conn.execute(
-        "SELECT COUNT(*) AS c FROM deliveries WHERE status='sent'"
-    ).fetchone()["c"]
+    sent = conn.execute("SELECT COUNT(*) AS c FROM deliveries WHERE status='sent'").fetchone()["c"]
     interrupted = conn.execute(
         "SELECT COUNT(*) AS c FROM deliveries WHERE status='interrupted'"
     ).fetchone()["c"]
@@ -159,7 +157,5 @@ def test_crash_then_replay_finalizes() -> None:
     # Turn 最终完成，且写入了 1 条 assistant 消息（崩溃那次未写入）
     t = conn.execute("SELECT status FROM turns WHERE turn_id=?", (turn_id,)).fetchone()
     assert t["status"] == "completed", t
-    msgs = conn.execute(
-        "SELECT COUNT(*) AS c FROM messages WHERE role='assistant'"
-    ).fetchone()["c"]
+    msgs = conn.execute("SELECT COUNT(*) AS c FROM messages WHERE role='assistant'").fetchone()["c"]
     assert msgs == 1, f"replay should persist exactly one assistant message, got {msgs}"

@@ -95,14 +95,27 @@ class ModelCallRepository:
             "finish_reason, input_tokens, output_tokens, cached_tokens, "
             "latency_ms, error_category, retry_count, started_at, completed_at, trace_id) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (record.model_call_id, record.attempt_id, record.request_id,
-             record.provider_id, record.model_id, record.status,
-             record.request_hash, record.request_payload_ref,
-             record.response_payload_ref,
-             record.finish_reason, record.input_tokens, record.output_tokens,
-             record.cached_tokens, record.latency_ms, record.error_category,
-             record.retry_count, record.started_at, record.completed_at,
-             record.trace_id),
+            (
+                record.model_call_id,
+                record.attempt_id,
+                record.request_id,
+                record.provider_id,
+                record.model_id,
+                record.status,
+                record.request_hash,
+                record.request_payload_ref,
+                record.response_payload_ref,
+                record.finish_reason,
+                record.input_tokens,
+                record.output_tokens,
+                record.cached_tokens,
+                record.latency_ms,
+                record.error_category,
+                record.retry_count,
+                record.started_at,
+                record.completed_at,
+                record.trace_id,
+            ),
         )
 
     def find_by_attempt(self, attempt_id: str) -> list[ModelCallRecord]:

@@ -5,6 +5,7 @@ SYSTEM-BOUNDARIES / 4: Task/TaskAttempt 的唯一写入者是 TaskService。
 
 当前实现：`SqliteTaskService`（SQLite 后端）。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from cogito.domain.task import Task, TaskAttempt, TaskStatus
 @dataclass(frozen=True)
 class TaskClaim:
     """Task 领取结果。"""
+
     task_id: str
     attempt_id: str
     task: Task
@@ -26,6 +28,7 @@ class TaskClaim:
 @dataclass(frozen=True)
 class TaskOutcome:
     """TaskAttempt 执行结果。"""
+
     attempt_id: str
     status: TaskStatus
     result: str = ""

@@ -191,8 +191,12 @@ def bench_web_adapter_state(request: Request) -> dict:
         "loop_is_running": adapter._loop is not None and adapter._loop.is_running(),
         "cross_buffer_size": len(adapter._cross) if hasattr(adapter, "_cross") else -1,
         "subscriber_count": len(adapter._subscribers) if hasattr(adapter, "_subscribers") else -1,
-        "subscriber_cids": list(adapter._subscribers.keys()) if hasattr(adapter, "_subscribers") else [],
-        "mailbox_count": sum(len(v) for v in adapter._mailbox.values()) if hasattr(adapter, "_mailbox") else -1,
+        "subscriber_cids": list(adapter._subscribers.keys())
+        if hasattr(adapter, "_subscribers")
+        else [],
+        "mailbox_count": sum(len(v) for v in adapter._mailbox.values())
+        if hasattr(adapter, "_mailbox")
+        else -1,
         "mailbox_cids": list(adapter._mailbox.keys()) if hasattr(adapter, "_mailbox") else [],
     }
 
@@ -276,8 +280,10 @@ def list_proactive_candidates(
     limit: int = Query(50, ge=1, le=200),
     deps: CommandDeps = Depends(get_command_deps),
 ) -> dict:
-    return {"items": _svc(deps).list_proactive_candidates(limit=limit),
-            "total": len(_svc(deps).list_proactive_candidates(limit=limit))}
+    return {
+        "items": _svc(deps).list_proactive_candidates(limit=limit),
+        "total": len(_svc(deps).list_proactive_candidates(limit=limit)),
+    }
 
 
 @router.get("/proactive/decisions")
@@ -285,8 +291,10 @@ def list_proactive_decisions(
     limit: int = Query(50, ge=1, le=200),
     deps: CommandDeps = Depends(get_command_deps),
 ) -> dict:
-    return {"items": _svc(deps).list_proactive_decisions(limit=limit),
-            "total": len(_svc(deps).list_proactive_decisions(limit=limit))}
+    return {
+        "items": _svc(deps).list_proactive_decisions(limit=limit),
+        "total": len(_svc(deps).list_proactive_decisions(limit=limit)),
+    }
 
 
 @router.get("/proactive/scheduled-requests")
@@ -306,7 +314,8 @@ def proactive_feedback(deps: CommandDeps = Depends(get_command_deps)) -> dict:
 
 @router.get("/proactive/fetch-runs/{poll_task_id}")
 def proactive_fetch_run(
-    poll_task_id: str, deps: CommandDeps = Depends(get_command_deps),
+    poll_task_id: str,
+    deps: CommandDeps = Depends(get_command_deps),
 ) -> dict:
     out = _svc(deps).proactive_fetch_run(poll_task_id)
     if out is None:
@@ -329,7 +338,8 @@ def list_drift_runs(
     deps: CommandDeps = Depends(get_command_deps),
 ) -> dict:
     items = _svc(deps).list_drift_runs(
-        principal_id=deps.config.drift.default_principal_id, limit=limit)
+        principal_id=deps.config.drift.default_principal_id, limit=limit
+    )
     return {"items": items, "total": len(items)}
 
 
@@ -337,16 +347,14 @@ def list_drift_runs(
 def list_drift_skill_states(
     deps: CommandDeps = Depends(get_command_deps),
 ) -> dict:
-    items = _svc(deps).list_drift_skill_states(
-        principal_id=deps.config.drift.default_principal_id)
+    items = _svc(deps).list_drift_skill_states(principal_id=deps.config.drift.default_principal_id)
     return {"items": items, "total": len(items)}
 
 
 @router.get("/drift/metrics")
 def drift_metrics(deps: CommandDeps = Depends(get_command_deps)) -> dict:
     """Drift 核心指标（M7）。"""
-    return _svc(deps).drift_metrics(
-        principal_id=deps.config.drift.default_principal_id)
+    return _svc(deps).drift_metrics(principal_id=deps.config.drift.default_principal_id)
 
 
 # ── multimodal metrics (PLAN-12 M6) ─────────────────────────────
@@ -372,7 +380,10 @@ def list_outbox(
     limit: int = Query(50, ge=1, le=200),
     deps: CommandDeps = Depends(get_command_deps),
 ) -> dict:
-    return {"items": _svc(deps).list_outbox(limit=limit), "total": len(_svc(deps).list_outbox(limit=limit))}
+    return {
+        "items": _svc(deps).list_outbox(limit=limit),
+        "total": len(_svc(deps).list_outbox(limit=limit)),
+    }
 
 
 @router.get("/events")
@@ -380,7 +391,10 @@ def list_events(
     limit: int = Query(50, ge=1, le=200),
     deps: CommandDeps = Depends(get_command_deps),
 ) -> dict:
-    return {"items": _svc(deps).list_events(limit=limit), "total": len(_svc(deps).list_events(limit=limit))}
+    return {
+        "items": _svc(deps).list_events(limit=limit),
+        "total": len(_svc(deps).list_events(limit=limit)),
+    }
 
 
 @router.get("/dead-letter")
@@ -398,8 +412,10 @@ def list_audit(
     limit: int = Query(50, ge=1, le=200),
     deps: CommandDeps = Depends(get_command_deps),
 ) -> dict:
-    return {"items": _svc(deps).list_audit(entity_id=entity_id, action=action, limit=limit),
-            "total": len(_svc(deps).list_audit(entity_id=entity_id, action=action, limit=limit))}
+    return {
+        "items": _svc(deps).list_audit(entity_id=entity_id, action=action, limit=limit),
+        "total": len(_svc(deps).list_audit(entity_id=entity_id, action=action, limit=limit)),
+    }
 
 
 # ── capabilities / tool-calls / receipts ──────────────────────
@@ -436,9 +452,7 @@ def runtime_mcp_status(request: Request) -> dict:
     for entry in runtime.config.capability.mcp_servers:
         state = states.get(entry.name, {})
         prefix = f"mcp:{entry.name}"
-        count = sum(
-            tool.namespace == prefix for tool in (registry.all_tools() if registry else [])
-        )
+        count = sum(tool.namespace == prefix for tool in (registry.all_tools() if registry else []))
         items.append(
             {
                 "name": entry.name,
@@ -446,9 +460,7 @@ def runtime_mcp_status(request: Request) -> dict:
                 "enabled": entry.enabled,
                 "toolset": entry.toolset,
                 "isolation": entry.isolation,
-                "status": state.get(
-                    "status", "disabled" if not entry.enabled else "not_started"
-                ),
+                "status": state.get("status", "disabled" if not entry.enabled else "not_started"),
                 "tool_count": count,
                 "reconnect_attempts": state.get("reconnect_attempts", 0),
                 "schema_changes": state.get("schema_changes", 0),
@@ -468,7 +480,10 @@ def list_tool_calls(
     limit: int = Query(50, ge=1, le=200),
     deps: CommandDeps = Depends(get_command_deps),
 ) -> dict:
-    return {"items": _svc(deps).list_tool_calls(limit=limit), "total": len(_svc(deps).list_tool_calls(limit=limit))}
+    return {
+        "items": _svc(deps).list_tool_calls(limit=limit),
+        "total": len(_svc(deps).list_tool_calls(limit=limit)),
+    }
 
 
 @router.get("/receipts")
@@ -476,12 +491,18 @@ def list_receipts(
     limit: int = Query(50, ge=1, le=200),
     deps: CommandDeps = Depends(get_command_deps),
 ) -> dict:
-    return {"items": _svc(deps).list_receipts(limit=limit), "total": len(_svc(deps).list_receipts(limit=limit))}
+    return {
+        "items": _svc(deps).list_receipts(limit=limit),
+        "total": len(_svc(deps).list_receipts(limit=limit)),
+    }
 
 
 @router.get("/reconcile")
 def list_reconcile(deps: CommandDeps = Depends(get_command_deps)) -> dict:
-    return {"items": _svc(deps).list_reconcile_pending(), "total": len(_svc(deps).list_reconcile_pending())}
+    return {
+        "items": _svc(deps).list_reconcile_pending(),
+        "total": len(_svc(deps).list_reconcile_pending()),
+    }
 
 
 @router.get("/skills")
@@ -538,6 +559,7 @@ def get_proactive_context(deps: CommandDeps = Depends(get_command_deps)) -> dict
 class _ContextDiffBody(BaseModel):
     content: str = ""
 
+
 @router.post("/proactive/context-diff")
 def proactive_context_diff(
     body: _ContextDiffBody,
@@ -557,14 +579,19 @@ def list_knowledge_resources(
     deps: CommandDeps = Depends(get_command_deps),
 ) -> dict:
     """知识资源列表（摘要）。"""
-    return {"items": _svc(deps).list_knowledge_resources(
-        principal_id=principal_id, limit=limit, status_filter=status,
-    )}
+    return {
+        "items": _svc(deps).list_knowledge_resources(
+            principal_id=principal_id,
+            limit=limit,
+            status_filter=status,
+        )
+    }
 
 
 @router.get("/knowledge/resources/{resource_id}")
 def get_knowledge_resource(
-    resource_id: str, deps: CommandDeps = Depends(get_command_deps),
+    resource_id: str,
+    deps: CommandDeps = Depends(get_command_deps),
 ) -> dict:
     """知识资源详情 + 段统计。"""
     out = _svc(deps).get_knowledge_resource(resource_id)
@@ -575,7 +602,8 @@ def get_knowledge_resource(
 
 @router.get("/knowledge/resources/{resource_id}/explain")
 def explain_knowledge_retrieval(
-    resource_id: str, deps: CommandDeps = Depends(get_command_deps),
+    resource_id: str,
+    deps: CommandDeps = Depends(get_command_deps),
 ) -> dict:
     """解释资源是否可检索 + 检索路径覆盖。"""
     out = _svc(deps).explain_knowledge_retrieval(resource_id)
@@ -586,7 +614,8 @@ def explain_knowledge_retrieval(
 
 @router.get("/memory/{memory_id}/explain")
 def explain_memory_weight(
-    memory_id: str, deps: CommandDeps = Depends(get_command_deps),
+    memory_id: str,
+    deps: CommandDeps = Depends(get_command_deps),
 ) -> dict:
     """记忆权重分项解释（PLAN-13 Enable）。"""
     out = _svc(deps).explain_memory_weight(memory_id)
@@ -597,7 +626,8 @@ def explain_memory_weight(
 
 @router.get("/memory/{memory_id}/sources")
 def list_memory_sources(
-    memory_id: str, deps: CommandDeps = Depends(get_command_deps),
+    memory_id: str,
+    deps: CommandDeps = Depends(get_command_deps),
 ) -> dict:
     """记忆来源集合。"""
     return {"memory_id": memory_id, "sources": _svc(deps).list_memory_sources(memory_id)}
@@ -605,7 +635,8 @@ def list_memory_sources(
 
 @router.get("/memory/{memory_id}")
 def get_memory_detail(
-    memory_id: str, deps: CommandDeps = Depends(get_command_deps),
+    memory_id: str,
+    deps: CommandDeps = Depends(get_command_deps),
 ) -> dict:
     """记忆详情安全摘要。"""
     out = _svc(deps).get_memory_detail(memory_id)
@@ -619,7 +650,8 @@ def get_memory_detail(
 
 @router.get("/context-snapshots/{snapshot_id}")
 def get_context_snapshot(
-    snapshot_id: str, deps: CommandDeps = Depends(get_command_deps),
+    snapshot_id: str,
+    deps: CommandDeps = Depends(get_command_deps),
 ) -> dict:
     """某次 Turn 的上下文快照（含 items / 来源 / 分数）。"""
     out = _svc(deps).get_context_snapshot(snapshot_id)
@@ -636,7 +668,8 @@ def cognition_metrics(deps: CommandDeps = Depends(get_command_deps)) -> dict:
 
 @router.get("/context-snapshots/{snapshot_id}/explain")
 def explain_context_selection(
-    snapshot_id: str, deps: CommandDeps = Depends(get_command_deps),
+    snapshot_id: str,
+    deps: CommandDeps = Depends(get_command_deps),
 ) -> dict:
     """解释某次 Turn 选中/排除的原因。"""
     out = _svc(deps).explain_context_selection(snapshot_id)

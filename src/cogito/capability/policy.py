@@ -107,11 +107,7 @@ class ToolPolicy:
                 f"Tool '{tool_name}' requires explicit approval",
             )
 
-        if (
-            tool_def
-            and tool_def.namespace.startswith("mcp:")
-            and tool_def.risk_level == "high"
-        ):
+        if tool_def and tool_def.namespace.startswith("mcp:") and tool_def.risk_level == "high":
             return PolicyResult(
                 PolicyDecision.require_approval,
                 f"High-risk MCP Tool '{tool_name}' requires explicit approval",

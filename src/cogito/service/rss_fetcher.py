@@ -20,6 +20,7 @@ _LOGGER = logging.getLogger(__name__)
 @dataclass
 class RssEntry:
     """单条解析结果。"""
+
     source_item_id: str
     title: str
     link: str
@@ -32,6 +33,7 @@ class RssEntry:
 @dataclass
 class Fetched:
     """抓取成功结果。"""
+
     entries: list[RssEntry]
     new_etag: str
     new_last_modified: str
@@ -47,6 +49,7 @@ class NotModified:
 @dataclass
 class FetchFailed:
     """抓取失败。"""
+
     error_category: ErrorCategory
     retryable: bool
     message: str
@@ -102,7 +105,9 @@ class RssFetcher:
 
         if response.status_code >= 500:
             return FetchFailed(
-                ErrorCategory.provider_internal, True, f"HTTP {response.status_code}",
+                ErrorCategory.provider_internal,
+                True,
+                f"HTTP {response.status_code}",
             )
         if response.status_code == 429:
             return FetchFailed(ErrorCategory.rate_limit, True, "HTTP 429 rate limit")
@@ -118,7 +123,8 @@ class RssFetcher:
 
         new_etag = response.headers.get("ETag", cursor.etag if cursor else "")
         new_last_modified = response.headers.get(
-            "Last-Modified", cursor.last_modified if cursor else "",
+            "Last-Modified",
+            cursor.last_modified if cursor else "",
         )
 
         return Fetched(
@@ -156,15 +162,17 @@ class RssFetcher:
 
             content_hash = compute_content_hash(title, link, summary)
 
-            entries.append(RssEntry(
-                source_item_id=source_id,
-                title=title,
-                link=link,
-                summary=summary,
-                author=author,
-                published_at=published_at,
-                content_hash=content_hash,
-            ))
+            entries.append(
+                RssEntry(
+                    source_item_id=source_id,
+                    title=title,
+                    link=link,
+                    summary=summary,
+                    author=author,
+                    published_at=published_at,
+                    content_hash=content_hash,
+                )
+            )
 
         return entries
 
@@ -179,10 +187,7 @@ def _parse_feed_stdlib(raw_body: bytes) -> list[RssEntry]:
     def local_name(tag: str) -> str:
         return tag.rsplit("}", 1)[-1]
 
-    nodes = [
-        node for node in root.iter()
-        if local_name(node.tag) in ("item", "entry")
-    ]
+    nodes = [node for node in root.iter() if local_name(node.tag) in ("item", "entry")]
     results: list[RssEntry] = []
     for node in nodes:
         values: dict[str, str] = {}
@@ -199,9 +204,7 @@ def _parse_feed_stdlib(raw_body: bytes) -> list[RssEntry]:
         author = values.get("author", "")
         source_id = values.get("guid") or values.get("id") or link
         published_raw = (
-            values.get("pubDate")
-            or values.get("published")
-            or values.get("updated", "")
+            values.get("pubDate") or values.get("published") or values.get("updated", "")
         )
         if not source_id:
             source_id = f"{title}|{published_raw}"
@@ -220,15 +223,17 @@ def _parse_feed_stdlib(raw_body: bytes) -> list[RssEntry]:
                     ).astimezone(UTC)
                 except ValueError:
                     published_at = None
-        results.append(RssEntry(
-            source_item_id=source_id,
-            title=title,
-            link=link,
-            summary=summary,
-            author=author,
-            published_at=published_at,
-            content_hash=compute_content_hash(title, link, summary),
-        ))
+        results.append(
+            RssEntry(
+                source_item_id=source_id,
+                title=title,
+                link=link,
+                summary=summary,
+                author=author,
+                published_at=published_at,
+                content_hash=compute_content_hash(title, link, summary),
+            )
+        )
     return results
 
 
@@ -248,6 +253,7 @@ def _parse_date(struct_time) -> datetime | None:
         return None
     try:
         import calendar
+
         ts = calendar.timegm(struct_time)
         return datetime.fromtimestamp(ts, tz=UTC)
     except (TypeError, ValueError, OverflowError):

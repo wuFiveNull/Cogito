@@ -51,8 +51,16 @@ class TraceRepository:
             "INSERT INTO spans (span_id, trace_id, parent_span_id, name, kind, "
             "started_at, status, attributes) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (record.span_id, record.trace_id, record.parent_span_id, record.name, record.kind,
-             record.started_at, record.status, json.dumps(record.attributes)),
+            (
+                record.span_id,
+                record.trace_id,
+                record.parent_span_id,
+                record.name,
+                record.kind,
+                record.started_at,
+                record.status,
+                json.dumps(record.attributes),
+            ),
         )
 
     def end_trace(self, trace_id: str, status: str = "ok", ended_at: int | None = None) -> None:
@@ -69,7 +77,8 @@ class TraceRepository:
 
     def get_trace(self, trace_id: str) -> TraceRecord | None:
         row = self._conn.execute(
-            "SELECT * FROM traces WHERE trace_id=?", (trace_id,),
+            "SELECT * FROM traces WHERE trace_id=?",
+            (trace_id,),
         ).fetchone()
         if row is None:
             return None
@@ -94,8 +103,12 @@ class TraceRepository:
         ).fetchall()
         return [
             TraceRecord(
-                trace_id=r["trace_id"], actor=r["actor"], origin=r["origin"],
-                started_at=r["started_at"], ended_at=r["ended_at"], status=r["status"],
+                trace_id=r["trace_id"],
+                actor=r["actor"],
+                origin=r["origin"],
+                started_at=r["started_at"],
+                ended_at=r["ended_at"],
+                status=r["status"],
             )
             for r in rows
         ]
@@ -107,9 +120,14 @@ class TraceRepository:
         ).fetchall()
         return [
             SpanRecord(
-                span_id=r["span_id"], trace_id=r["trace_id"], parent_span_id=r["parent_span_id"],
-                name=r["name"], kind=r["kind"], started_at=r["started_at"],
-                ended_at=r["ended_at"], status=r["status"],
+                span_id=r["span_id"],
+                trace_id=r["trace_id"],
+                parent_span_id=r["parent_span_id"],
+                name=r["name"],
+                kind=r["kind"],
+                started_at=r["started_at"],
+                ended_at=r["ended_at"],
+                status=r["status"],
                 attributes=json.loads(r["attributes"]) if r["attributes"] else {},
             )
             for r in rows

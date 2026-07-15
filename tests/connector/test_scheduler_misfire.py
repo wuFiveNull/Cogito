@@ -78,8 +78,10 @@ class TestSchedulerMisfire:
         now = clock.now()
         last = now - timedelta(hours=2, minutes=30)  # 错过 5 次
         self._make_schedule(
-            conn, policy=MisfirePolicy.catch_up_limited,
-            last_fire_at=last, max_catch_up=3,
+            conn,
+            policy=MisfirePolicy.catch_up_limited,
+            last_fire_at=last,
+            max_catch_up=3,
         )
 
         tasks = scheduler.tick()
@@ -90,8 +92,10 @@ class TestSchedulerMisfire:
         now = clock.now()
         last = now - timedelta(hours=1)  # 错过 2 次
         self._make_schedule(
-            conn, policy=MisfirePolicy.catch_up_limited,
-            last_fire_at=last, max_catch_up=3,
+            conn,
+            policy=MisfirePolicy.catch_up_limited,
+            last_fire_at=last,
+            max_catch_up=3,
         )
 
         tasks = scheduler.tick()
@@ -107,6 +111,7 @@ class TestSchedulerMisfire:
         assert len(tasks) == 1
         # 验证 payload 携带合并元数据
         import json
+
         payload = json.loads(tasks[0].payload_ref)
         assert payload["merged_count"] == 3
         assert payload["connector_id"] == "c1"
@@ -148,6 +153,7 @@ class TestDSTHandling:
     def test_next_fire_at_deterministic_same_input(self):
         """相同输入返回稳定输出（DST 策略确定性）。"""
         from cogito.domain.schedule import next_fire_at
+
         # UTC 时无 DST 影响
         t1 = next_fire_at("30m", "UTC", after=datetime(2026, 1, 1, 12, 0, tzinfo=UTC))
         t2 = next_fire_at("30m", "UTC", after=datetime(2026, 1, 1, 12, 0, tzinfo=UTC))
@@ -156,16 +162,18 @@ class TestDSTHandling:
     def test_next_fire_at_non_utc_timezone(self):
         """非 UTC 时区能正确计算（zoneinfo 可用）。"""
         from cogito.domain.schedule import next_fire_at
-        result = next_fire_at("1h", "Asia/Shanghai",
-                              after=datetime(2026, 7, 7, 12, 0, tzinfo=UTC))
+
+        result = next_fire_at("1h", "Asia/Shanghai", after=datetime(2026, 7, 7, 12, 0, tzinfo=UTC))
         assert result is not None
         assert result > datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
 
     def test_next_fire_at_every_daily_dst_policy(self):
         """every day 08:00 + DST policy 参数传递。"""
         from cogito.domain.schedule import next_fire_at
+
         result_post = next_fire_at(
-            "every day 08:00", "America/New_York",
+            "every day 08:00",
+            "America/New_York",
             after=datetime(2026, 3, 8, 12, 0, tzinfo=UTC),  # DST 前一天
             dst_policy="post",
         )
@@ -185,8 +193,10 @@ class TestDSTHandling:
     def test_next_fire_at_365d_duration(self):
         """misfire 测试矩阵：365d Duration。"""
         from cogito.domain.schedule import next_fire_at
+
         result = next_fire_at(
-            "365d", "UTC",
+            "365d",
+            "UTC",
             after=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
         )
         assert result is not None

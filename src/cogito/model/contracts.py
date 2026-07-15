@@ -38,6 +38,7 @@ class FinishReason(StrEnum):
     - cancelled: 被调用方取消
     - error: Provider 内部错误
     """
+
     stop = "stop"
     tool_calls = "tool_calls"
     length = "length"
@@ -59,6 +60,7 @@ class ContentPartType(StrEnum):
 @dataclass(frozen=True)
 class Usage:
     """模型调用 Token 用量。"""
+
     input_tokens: int = 0
     output_tokens: int = 0
     cached_tokens: int = 0
@@ -83,6 +85,7 @@ class Usage:
 @dataclass(frozen=True)
 class ContentPart:
     """不可变内容片段。"""
+
     part_type: ContentPartType = ContentPartType.text
     text: str = ""
     image_url: str | None = None
@@ -108,6 +111,7 @@ class ModelRequest:
     不包含 API Key 等 Secret。
     不支持的 ContentPartType 应被调用方拒绝而非静默忽略。
     """
+
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     model_role: str = "main"
     messages: tuple[dict[str, Any], ...] = ()
@@ -147,6 +151,7 @@ class ModelResponse:
 
     raw_response_ref 用于存储受限的原始响应引用。
     """
+
     request_id: str = ""
     provider_request_id: str = ""
     model_id: str = ""
@@ -165,10 +170,7 @@ class ModelResponse:
     @property
     def text(self) -> str:
         """提取所有文本内容片段的拼接。"""
-        return "".join(
-            p.text for p in self.content_parts
-            if p.part_type == ContentPartType.text
-        )
+        return "".join(p.text for p in self.content_parts if p.part_type == ContentPartType.text)
 
     def __repr__(self) -> str:
         return (
@@ -207,6 +209,7 @@ def normalize_finish_reason(raw: str) -> FinishReason:
 @dataclass(frozen=True)
 class ModelCapabilities:
     """Provider 能力声明。"""
+
     context_window: int = 0
     max_output_tokens: int = 0
     modalities: tuple[str, ...] = ("text",)
@@ -230,6 +233,7 @@ class ErrorCategory(StrEnum):
     MODEL-ADAPTER / 7. 错误映射
     每个错误具有 retryable、retry_after 和安全消息。
     """
+
     authentication = "authentication"
     permission = "permission"
     model_not_found = "model_not_found"
@@ -249,6 +253,7 @@ class ErrorEnvelope:
 
     所有用户可见消息必须安全（不泄漏 Secret 或内部路径）。
     """
+
     category: ErrorCategory = ErrorCategory.provider_internal
     message: str = "An unknown error occurred"
     retryable: bool = False

@@ -51,11 +51,13 @@ def conv_session(db: sqlite3.Connection) -> tuple[str, str, str]:
     sid = "test_session"
     db.execute(
         "INSERT OR IGNORE INTO conversations (conversation_id, conversation_type, platform_conversation_id) "
-        "VALUES (?, 'private', ?)", (cid, cid),
+        "VALUES (?, 'private', ?)",
+        (cid, cid),
     )
     db.execute(
         "INSERT OR IGNORE INTO sessions (session_id, conversation_id, context_partition_key, created_at) "
-        "VALUES (?, ?, ?, ?)", (sid, cid, cid, "2026-07-07T00:00:00Z"),
+        "VALUES (?, ?, ?, ?)",
+        (sid, cid, cid, "2026-07-07T00:00:00Z"),
     )
     db.commit()
     return cid, sid, "p1"
@@ -78,7 +80,8 @@ def _insert_messages(
         )
         db.execute(
             "INSERT INTO content_parts (part_id, message_id, content_type, inline_data) "
-            "VALUES (?, ?, 'text', ?)", (part_id, msg_id, f"Test message #{i} content."),
+            "VALUES (?, ?, 'text', ?)",
+            (part_id, msg_id, f"Test message #{i} content."),
         )
     db.commit()
 
@@ -116,7 +119,9 @@ class TestWatermarkRepo:
 
         # CAS: 从 0 推进到 10
         ok = wm.advance(
-            PROC_MEMORY_EXTRACT, cid, sid,
+            PROC_MEMORY_EXTRACT,
+            cid,
+            sid,
             to_sequence=10,
             expected_from_sequence=0,
             expected_version=1,
@@ -135,7 +140,9 @@ class TestWatermarkRepo:
 
         # version 不对 → CAS 失败
         ok = wm.advance(
-            PROC_MEMORY_EXTRACT, cid, sid,
+            PROC_MEMORY_EXTRACT,
+            cid,
+            sid,
             to_sequence=10,
             expected_from_sequence=0,
             expected_version=999,  # 错误的版本号
@@ -148,7 +155,9 @@ class TestWatermarkRepo:
         wm.upsert(PROC_MEMORY_EXTRACT, cid, sid)
 
         ok = wm.advance(
-            PROC_MEMORY_EXTRACT, cid, sid,
+            PROC_MEMORY_EXTRACT,
+            cid,
+            sid,
             to_sequence=10,
             expected_from_sequence=5,  # 错误的水位
             expected_version=1,
@@ -162,10 +171,17 @@ class TestWatermarkRepo:
         wm.upsert(PROC_MEMORY_EXTRACT, cid, sid)
         wm.upsert(PROC_SUMMARY, cid, sid)
 
-        wm.advance(PROC_MEMORY_EXTRACT, cid, sid, to_sequence=5,
-                    expected_from_sequence=0, expected_version=1)
-        wm.advance(PROC_SUMMARY, cid, sid, to_sequence=3,
-                    expected_from_sequence=0, expected_version=1)
+        wm.advance(
+            PROC_MEMORY_EXTRACT,
+            cid,
+            sid,
+            to_sequence=5,
+            expected_from_sequence=0,
+            expected_version=1,
+        )
+        wm.advance(
+            PROC_SUMMARY, cid, sid, to_sequence=3, expected_from_sequence=0, expected_version=1
+        )
 
         extract_wm = wm.get(PROC_MEMORY_EXTRACT, cid, sid)
         summary_wm = wm.get(PROC_SUMMARY, cid, sid)
@@ -200,29 +216,35 @@ class TestMemoryExtractHandler:
             task_id=uuid.uuid4().hex,
             task_type="memory.extract",
             status=TaskStatus.queued,
-            payload_ref=payload.to_json() if hasattr(payload, 'to_json') else "",
+            payload_ref=payload.to_json() if hasattr(payload, "to_json") else "",
         )
 
         # 如果没有 to_json 方法，手工序列化
         import json as _json
-        p_ref = _json.dumps({
-            "conversation_id": payload.conversation_id,
-            "session_id": payload.session_id,
-            "principal_id": payload.principal_id,
-            "from_sequence": payload.from_sequence,
-            "to_sequence": payload.to_sequence,
-        })
+
+        p_ref = _json.dumps(
+            {
+                "conversation_id": payload.conversation_id,
+                "session_id": payload.session_id,
+                "principal_id": payload.principal_id,
+                "from_sequence": payload.from_sequence,
+                "to_sequence": payload.to_sequence,
+            }
+        )
         task.payload_ref = p_ref
 
         # 创建内存数据库路径
         import tempfile
+
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
             from pathlib import Path
+
             db_path = f.name
 
         try:
             # 复制数据库到文件（为了独立连接）
             import sqlite3 as _sqlite3
+
             dest = _sqlite3.connect(db_path)
             dest.execute("PRAGMA foreign_keys=ON;")
             dest.row_factory = _sqlite3.Row
@@ -233,6 +255,7 @@ class TestMemoryExtractHandler:
 
             # 直接使用临时 path，让 handler 独立创建连接
             from cogito.store.connection import get_connection as _get_conn
+
             migrate(_get_conn(db_path))
 
             # 将数据复制到临时数据库
@@ -267,6 +290,7 @@ class TestMemoryExtractHandler:
 
             # 新数据库，复制 schema
             from cogito.store.connection import get_connection as _get_conn
+
             dest = _get_conn(db_path)
             migrate(dest)
 
@@ -291,10 +315,14 @@ class TestMemoryExtractHandler:
             from cogito.model.stub_provider import StubModelProvider, StubScenario
 
             router = ModelRouter(
-                providers={"extractor": StubModelProvider(scenarios=[
-                    StubScenario(response_text='{"candidates": []}'),
-                    StubScenario(response_text='{"candidates": []}'),
-                ])},
+                providers={
+                    "extractor": StubModelProvider(
+                        scenarios=[
+                            StubScenario(response_text='{"candidates": []}'),
+                            StubScenario(response_text='{"candidates": []}'),
+                        ]
+                    )
+                },
                 role_map={"memory_extractor": "extractor"},
             )
             ctx = TaskHandlerContext(
@@ -306,14 +334,16 @@ class TestMemoryExtractHandler:
                 task_id=uuid.uuid4().hex,
                 task_type="memory.extract",
                 status=TaskStatus.queued,
-                payload_ref=_json.dumps({
-                    "conversation_id": cid,
-                    "session_id": sid,
-                    "principal_id": pid,
-                    "from_sequence": 1,
-                    "to_sequence": 3,
-                    "input_version": 1,
-                }),
+                payload_ref=_json.dumps(
+                    {
+                        "conversation_id": cid,
+                        "session_id": sid,
+                        "principal_id": pid,
+                        "from_sequence": 1,
+                        "to_sequence": 3,
+                        "input_version": 1,
+                    }
+                ),
             )
             r1 = _handle_memory_extract(task1, ctx)
             assert "upto=3" in r1
@@ -323,14 +353,16 @@ class TestMemoryExtractHandler:
                 task_id=uuid.uuid4().hex,
                 task_type="memory.extract",
                 status=TaskStatus.queued,
-                payload_ref=_json.dumps({
-                    "conversation_id": cid,
-                    "session_id": sid,
-                    "principal_id": pid,
-                    "from_sequence": 1,
-                    "to_sequence": 3,
-                    "input_version": 1,
-                }),
+                payload_ref=_json.dumps(
+                    {
+                        "conversation_id": cid,
+                        "session_id": sid,
+                        "principal_id": pid,
+                        "from_sequence": 1,
+                        "to_sequence": 3,
+                        "input_version": 1,
+                    }
+                ),
             )
             r2 = _handle_memory_extract(task2, ctx)
             assert "already processed" in r2 or "upto=3" in r2
@@ -342,7 +374,12 @@ class TestMemoryExtractHandler:
 
     def test_make_idempotency_key(self):
         key = make_idempotency_key(
-            "memory.extract", "c1", "s1", 1, 5, "1",
+            "memory.extract",
+            "c1",
+            "s1",
+            1,
+            5,
+            "1",
         )
         assert key == "memory.extract:c1:s1:1:5:1"
         assert isinstance(key, str)

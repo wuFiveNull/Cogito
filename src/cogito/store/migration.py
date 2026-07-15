@@ -29,6 +29,7 @@ _VERSION_PATTERN = re.compile(r"^(\d+)_")
 @dataclass
 class MigrationMeta:
     """Migration 元数据（来自 .meta.toml）。"""
+
     online_safe: bool = False
     requires_backup: bool = True
     estimated_space: str = "0"
@@ -55,6 +56,7 @@ def _parse_meta(meta_path: Path) -> MigrationMeta:
         return MigrationMeta(online_safe=True)
     try:
         import tomllib
+
         with open(meta_path, "rb") as f:
             raw = tomllib.load(f)
     except ImportError:
@@ -125,16 +127,12 @@ def _get_current_version(conn: sqlite3.Connection) -> int:
 def _get_applied_versions(conn: sqlite3.Connection) -> set[int]:
     """查询已应用的版本集合。"""
     try:
-        rows = conn.execute(
-            "SELECT version FROM _schema_version WHERE error IS NULL"
-        ).fetchall()
+        rows = conn.execute("SELECT version FROM _schema_version WHERE error IS NULL").fetchall()
         return {r[0] for r in rows}
     except sqlite3.OperationalError:
         # 旧表结构无 error 列：回退到查询所有版本
         try:
-            rows = conn.execute(
-                "SELECT version FROM _schema_version"
-            ).fetchall()
+            rows = conn.execute("SELECT version FROM _schema_version").fetchall()
             return {r[0] for r in rows}
         except sqlite3.OperationalError:
             return set()
@@ -157,21 +155,13 @@ def _ensure_schema_version_table(conn: sqlite3.Connection) -> None:
         )
     """)
     # 补齐可能缺失的列（旧表升级）
-    existing_cols = {
-        row[1] for row in conn.execute("PRAGMA table_info(_schema_version)")
-    }
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(_schema_version)")}
     if "started_at" not in existing_cols:
-        conn.execute(
-            "ALTER TABLE _schema_version ADD COLUMN started_at TEXT"
-        )
+        conn.execute("ALTER TABLE _schema_version ADD COLUMN started_at TEXT")
     if "completed_at" not in existing_cols:
-        conn.execute(
-            "ALTER TABLE _schema_version ADD COLUMN completed_at TEXT"
-        )
+        conn.execute("ALTER TABLE _schema_version ADD COLUMN completed_at TEXT")
     if "error" not in existing_cols:
-        conn.execute(
-            "ALTER TABLE _schema_version ADD COLUMN error TEXT"
-        )
+        conn.execute("ALTER TABLE _schema_version ADD COLUMN error TEXT")
     if "online_safe" not in existing_cols:
         conn.execute(
             "ALTER TABLE _schema_version ADD COLUMN online_safe INTEGER NOT NULL DEFAULT 0"
@@ -207,8 +197,7 @@ def _apply_one(conn: sqlite3.Connection, mf: MigrationFile) -> None:
 def _check_foreign_keys(conn: sqlite3.Connection) -> list[str]:
     """运行 PRAGMA foreign_key_check，返回所有违规描述。"""
     rows = conn.execute("PRAGMA foreign_key_check").fetchall()
-    return [f"FK violation: table={r[0]}, rowid={r[1]}, parent={r[2]}, seq={r[3]}"
-            for r in rows]
+    return [f"FK violation: table={r[0]}, rowid={r[1]}, parent={r[2]}, seq={r[3]}" for r in rows]
 
 
 def _run_post_checks(conn: sqlite3.Connection, checks: list[str]) -> list[str]:

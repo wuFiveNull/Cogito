@@ -6,6 +6,7 @@
 QQ-ONEBOT-E2E-01: 传递 metadata 中的 conversation_type / trust_label / capability，
 让 InboundService 可以正确建模群聊 vs 私聊。
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -60,10 +61,8 @@ class InboundDispatcher:
             channel_instance_id=inbound.channel_instance_id,
             platform_conversation_id=inbound.conversation_id,
             reply_to_platform_message_id=inbound.route.source_message_id,
-            target_endpoint_ref=metadata_target_ref or (
-                f"{inbound.channel}:{inbound.sender_id}"
-                if inbound.sender_id else ""
-            ),
+            target_endpoint_ref=metadata_target_ref
+            or (f"{inbound.channel}:{inbound.sender_id}" if inbound.sender_id else ""),
         )
 
         return ChannelEnvelope(
@@ -71,9 +70,7 @@ class InboundDispatcher:
             channel_instance_id=inbound.channel_instance_id,
             platform_sender_id=inbound.sender_id,
             platform_conversation_id=inbound.conversation_id,
-            platform_message_id=(
-                inbound.message_id or inbound.route.source_message_id
-            ),
+            platform_message_id=(inbound.message_id or inbound.route.source_message_id),
             content_parts=content_parts,
             reply_route=reply_route,
             sender_endpoint_ref=inbound.metadata.get(

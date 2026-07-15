@@ -40,10 +40,21 @@ class CommandAuditRepository:
             "target_type, target_id, expected_version, payload, status, "
             "created_at, expires_at, origin, trace_id) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (record.command_id, record.actor, record.command_type,
-             record.idempotency_key, record.target_type, record.target_id,
-             record.expected_version, record.payload, record.status,
-             record.created_at, record.expires_at, record.origin, record.trace_id),
+            (
+                record.command_id,
+                record.actor,
+                record.command_type,
+                record.idempotency_key,
+                record.target_type,
+                record.target_id,
+                record.expected_version,
+                record.payload,
+                record.status,
+                record.created_at,
+                record.expires_at,
+                record.origin,
+                record.trace_id,
+            ),
         )
 
     def find_by_idempotency(
@@ -57,7 +68,8 @@ class CommandAuditRepository:
 
     def get(self, command_id: str) -> CommandRecord | None:
         row = self._conn.execute(
-            "SELECT * FROM commands WHERE command_id=?", (command_id,),
+            "SELECT * FROM commands WHERE command_id=?",
+            (command_id,),
         ).fetchone()
         return self._row_to_record(row) if row else None
 
@@ -69,7 +81,9 @@ class CommandAuditRepository:
         )
 
     def mark_rejected(
-        self, command_id: str, error_code: str,
+        self,
+        command_id: str,
+        error_code: str,
         result_summary: str | None = None,
     ) -> None:
         self._conn.execute(

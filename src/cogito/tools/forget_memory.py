@@ -8,6 +8,7 @@
 边界（PLAN-09 M4a）：工具通过 MemoryReader / MemoryWriter 端口操作，
 不直接依赖 SqliteMemoryService。组合根注入具体实现。
 """
+
 from __future__ import annotations
 
 from cogito.capability.models import ToolContext, ToolDef
@@ -26,6 +27,7 @@ def _make_handler(
         reader: MemoryReader 端口（用于读取候选 / 校验所有权）。
         writer: MemoryWriter 端口（用于 forget / forget_by_canonical_key）。
     """
+
     async def handler(args: dict, ctx: ToolContext) -> str:
         """从长期记忆中删除条目。"""
         memory_id = args.get("memory_id", "")
@@ -35,10 +37,7 @@ def _make_handler(
 
         principal_id = ctx.principal_id or ""
         if not principal_id:
-            return (
-                "[forget_memory] Cannot forget: "
-                "principal not available in current context."
-            )
+            return "[forget_memory] Cannot forget: principal not available in current context."
 
         # ── 按 memory_id 精确删除 ──
         if memory_id:
@@ -49,9 +48,7 @@ def _make_handler(
             if reader is not None:
                 mem = reader.get(memory_id)
                 if mem is None:
-                    return (
-                        f"[forget_memory] No memory found with id '{memory_id}'."
-                    )
+                    return f"[forget_memory] No memory found with id '{memory_id}'."
                 if mem.principal_id and mem.principal_id != principal_id:
                     return (
                         f"[forget_memory] Memory '{memory_id}' does not "
@@ -64,8 +61,8 @@ def _make_handler(
             # forget 返回 False 时可能是已不存在（并发或已删除）
             return (
                 f"[forget_memory] No memory found with id '{memory_id}'."
-                if reader is None else
-                f"[forget_memory] Failed to forget memory '{memory_id}'."
+                if reader is None
+                else f"[forget_memory] Failed to forget memory '{memory_id}'."
             )
 
         # ── 按 subject + predicate 删除 ──
@@ -75,10 +72,7 @@ def _make_handler(
 
             ok = writer.forget_by_canonical_key(principal_id, subject, predicate)
             if ok:
-                return (
-                    f"Forgot memory: subject='{subject}', "
-                    f"predicate='{predicate}'."
-                )
+                return f"Forgot memory: subject='{subject}', predicate='{predicate}'."
             return (
                 f"[forget_memory] No active memory found for "
                 f"subject='{subject}', predicate='{predicate}'."
@@ -87,10 +81,7 @@ def _make_handler(
         # ── 按自然语言搜索后提示 ──
         if query:
             if reader is None:
-                return (
-                    f"[forget_memory] Search for '{query}': "
-                    "memory reader not available."
-                )
+                return f"[forget_memory] Search for '{query}': memory reader not available."
             try:
                 candidates = reader.retrieve(
                     principal_id=principal_id,
@@ -101,9 +92,7 @@ def _make_handler(
                 return f"[forget_memory] Error searching memory: {e}"
 
             if not candidates:
-                return (
-                    f"[forget_memory] No memories found matching '{query}'."
-                )
+                return f"[forget_memory] No memories found matching '{query}'."
 
             lines = [f"Found {len(candidates)} memory candidate(s) for '{query}':"]
             for i, m in enumerate(candidates, 1):
@@ -112,15 +101,11 @@ def _make_handler(
                     f"[{m.kind}] {m.subject}/{m.predicate} = '{m.value}'"
                 )
             lines.append(
-                "Specify the memory_id to forget, "
-                "or refine your search with more specific terms."
+                "Specify the memory_id to forget, or refine your search with more specific terms."
             )
             return "\n".join(lines)
 
-        return (
-            "[forget_memory] Please specify one of: "
-            "memory_id, subject+predicate, or query."
-        )
+        return "[forget_memory] Please specify one of: memory_id, subject+predicate, or query."
 
     return handler
 

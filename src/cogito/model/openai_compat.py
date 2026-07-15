@@ -111,11 +111,13 @@ class OpenAICompatProvider(ModelProvider):
         """
         # ── 1. 校验 ──
         if request.stream:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.invalid_request,
-                message="Streaming is not supported in this version",
-                retryable=False,
-            ))
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.invalid_request,
+                    message="Streaming is not supported in this version",
+                    retryable=False,
+                )
+            )
 
         # ── 2. 构建请求体 ──
         payload = self._build_payload(request)
@@ -131,29 +133,35 @@ class OpenAICompatProvider(ModelProvider):
                 },
             )
         except httpx.TimeoutException as e:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.timeout,
-                message="Request timed out",
-                retryable=True,
-                original_type="timeout",
-                original_message=str(e),
-            )) from e
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.timeout,
+                    message="Request timed out",
+                    retryable=True,
+                    original_type="timeout",
+                    original_message=str(e),
+                )
+            ) from e
         except httpx.ConnectError as e:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.connection,
-                message="Connection error",
-                retryable=True,
-                original_type="connection",
-                original_message=str(e),
-            )) from e
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.connection,
+                    message="Connection error",
+                    retryable=True,
+                    original_type="connection",
+                    original_message=str(e),
+                )
+            ) from e
         except httpx.RequestError as e:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.connection,
-                message="Request error",
-                retryable=True,
-                original_type="request_error",
-                original_message=str(e),
-            )) from e
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.connection,
+                    message="Request error",
+                    retryable=True,
+                    original_type="request_error",
+                    original_message=str(e),
+                )
+            ) from e
 
         # ── 4. 检查 HTTP 状态码 ──
         if response.status_code != 200:
@@ -163,13 +171,15 @@ class OpenAICompatProvider(ModelProvider):
         try:
             data = response.json()
         except (json.JSONDecodeError, ValueError) as e:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.provider_internal,
-                message="Invalid response from provider",
-                retryable=False,
-                original_type="invalid_json",
-                original_message=str(e),
-            )) from e
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.provider_internal,
+                    message="Invalid response from provider",
+                    retryable=False,
+                    original_type="invalid_json",
+                    original_message=str(e),
+                )
+            ) from e
 
         return self._parse_response(request.request_id, data, request=request)
 
@@ -181,11 +191,13 @@ class OpenAICompatProvider(ModelProvider):
         - 复用 generate() 的错误映射
         """
         if not request.stream:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.invalid_request,
-                message="stream() requires request.stream=True",
-                retryable=False,
-            ))
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.invalid_request,
+                    message="stream() requires request.stream=True",
+                    retryable=False,
+                )
+            )
 
         payload = self._build_payload(request, stream=True)
         headers = {
@@ -211,7 +223,7 @@ class OpenAICompatProvider(ModelProvider):
                     line = line.strip()
                     if not line.startswith("data:"):
                         continue
-                    data_str = line[len("data:"):].strip()
+                    data_str = line[len("data:") :].strip()
                     if data_str == "[DONE]":
                         break
                     if not data_str:
@@ -222,29 +234,35 @@ class OpenAICompatProvider(ModelProvider):
                         continue
                     yield self._parse_stream_chunk(request_id, data, request=request)
         except httpx.TimeoutException as e:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.timeout,
-                message="Stream timed out",
-                retryable=True,
-                original_type="timeout",
-                original_message=str(e),
-            )) from e
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.timeout,
+                    message="Stream timed out",
+                    retryable=True,
+                    original_type="timeout",
+                    original_message=str(e),
+                )
+            ) from e
         except httpx.ConnectError as e:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.connection,
-                message="Connection error",
-                retryable=True,
-                original_type="connection",
-                original_message=str(e),
-            )) from e
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.connection,
+                    message="Connection error",
+                    retryable=True,
+                    original_type="connection",
+                    original_message=str(e),
+                )
+            ) from e
         except httpx.RequestError as e:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.connection,
-                message="Request error",
-                retryable=True,
-                original_type="request_error",
-                original_message=str(e),
-            )) from e
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.connection,
+                    message="Request error",
+                    retryable=True,
+                    original_type="request_error",
+                    original_message=str(e),
+                )
+            ) from e
 
     def capabilities(self) -> ModelCapabilities:
         return ModelCapabilities(
@@ -261,6 +279,7 @@ class OpenAICompatProvider(ModelProvider):
     async def health(self) -> HealthStatus:
         """检查 Provider 可用性（带 30s 缓存）。"""
         import time
+
         now = time.monotonic()
         if self._health_cache is not None and now - self._health_cache[1] < self.HEALTH_CACHE_TTL_S:
             return self._health_cache[0]
@@ -286,6 +305,7 @@ class OpenAICompatProvider(ModelProvider):
     def close(self) -> None:
         """关闭底层 HTTP 客户端。"""
         import asyncio
+
         try:
             asyncio.get_running_loop()
             # 如果在事件循环中，不阻塞关闭
@@ -354,11 +374,7 @@ class OpenAICompatProvider(ModelProvider):
 
         # 结构化输出：优先 response_schema（JSON Schema），其次 response_format
         if request.response_schema:
-            schema = {
-                key: value
-                for key, value in request.response_schema.items()
-                if key != "name"
-            }
+            schema = {key: value for key, value in request.response_schema.items() if key != "name"}
             payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
@@ -373,7 +389,9 @@ class OpenAICompatProvider(ModelProvider):
         return payload
 
     def _parse_response(
-        self, request_id: str, data: dict[str, Any],
+        self,
+        request_id: str,
+        data: dict[str, Any],
         request: ModelRequest | None = None,
     ) -> ModelResponse:
         """解析 OpenAI-compatible 响应体。
@@ -393,13 +411,15 @@ class OpenAICompatProvider(ModelProvider):
                 content = message.get("reasoning_content") or ""
             finish_reason_str = choice.get("finish_reason", "stop")
         except (KeyError, IndexError) as e:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.invalid_request,
-                message="Invalid response structure",
-                retryable=False,
-                original_type="parse_error",
-                original_message=str(e),
-            )) from e
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.invalid_request,
+                    message="Invalid response structure",
+                    retryable=False,
+                    original_type="parse_error",
+                    original_message=str(e),
+                )
+            ) from e
 
         # 多模态回复：content 可能为 content block 列表，提取文本部分
         content = _extract_text_from_content(content)
@@ -438,11 +458,13 @@ class OpenAICompatProvider(ModelProvider):
 
             tool_calls.append(entry)
 
-        parts = (ContentPart(
-            part_type=ContentPartType.text,
-            text=content,
-            trust_label="internal",
-        ),)
+        parts = (
+            ContentPart(
+                part_type=ContentPartType.text,
+                text=content,
+                trust_label="internal",
+            ),
+        )
 
         return ModelResponse(
             request_id=request_id,
@@ -455,7 +477,9 @@ class OpenAICompatProvider(ModelProvider):
         )
 
     def _parse_stream_chunk(
-        self, request_id: str, data: dict[str, Any],
+        self,
+        request_id: str,
+        data: dict[str, Any],
         request: ModelRequest | None = None,
     ) -> ModelResponse:
         """解析单个 SSE 流帧（delta）。
@@ -468,21 +492,25 @@ class OpenAICompatProvider(ModelProvider):
             content = delta.get("content") or ""
             finish_reason_str = choice.get("finish_reason") or "stop"
         except (KeyError, IndexError) as e:
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.invalid_request,
-                message="Invalid stream chunk structure",
-                retryable=False,
-                original_type="parse_error",
-                original_message=str(e),
-            )) from e
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.invalid_request,
+                    message="Invalid stream chunk structure",
+                    retryable=False,
+                    original_type="parse_error",
+                    original_message=str(e),
+                )
+            ) from e
 
         finish_reason = self._normalize_finish_reason(finish_reason_str)
 
-        parts = (ContentPart(
-            part_type=ContentPartType.text,
-            text=content,
-            trust_label="internal",
-        ),)
+        parts = (
+            ContentPart(
+                part_type=ContentPartType.text,
+                text=content,
+                trust_label="internal",
+            ),
+        )
 
         return ModelResponse(
             request_id=request_id,
@@ -520,11 +548,13 @@ class OpenAICompatProvider(ModelProvider):
         try:
             args = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
         except (json.JSONDecodeError, TypeError):
-            raise ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.invalid_request,
-                message=f"Tool '{tool_name}': invalid arguments JSON from provider",
-                retryable=False,
-            ))
+            raise ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.invalid_request,
+                    message=f"Tool '{tool_name}': invalid arguments JSON from provider",
+                    retryable=False,
+                )
+            )
 
         if not isinstance(args, dict):
             return
@@ -534,19 +564,26 @@ class OpenAICompatProvider(ModelProvider):
         required = schema.get("required", [])
         for field in required:
             if field not in args:
-                raise ModelProviderError(ErrorEnvelope(
-                    category=ErrorCategory.invalid_request,
-                    message=f"Tool '{tool_name}': response missing required field '{field}'",
-                    retryable=False,
-                ))
+                raise ModelProviderError(
+                    ErrorEnvelope(
+                        category=ErrorCategory.invalid_request,
+                        message=f"Tool '{tool_name}': response missing required field '{field}'",
+                        retryable=False,
+                    )
+                )
         for key, value in args.items():
             prop = properties.get(key, {})
             if "enum" in prop and value not in prop["enum"]:
-                raise ModelProviderError(ErrorEnvelope(
-                    category=ErrorCategory.invalid_request,
-                    message=f"Tool '{tool_name}': response field '{key}' has invalid enum value",
-                    retryable=False,
-                ))
+                raise ModelProviderError(
+                    ErrorEnvelope(
+                        category=ErrorCategory.invalid_request,
+                        message=(
+                            f"Tool '{tool_name}': response field '{key}' "
+                            "has invalid enum value"
+                        ),
+                        retryable=False,
+                    )
+                )
 
     def _map_http_error(self, response: httpx.Response) -> ModelProviderError:
         """将 HTTP 错误映射为统一 Provider 错误。"""
@@ -559,61 +596,75 @@ class OpenAICompatProvider(ModelProvider):
             body = response.text[:200]
 
         if status == 401:
-            return ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.authentication,
-                message="Authentication failed. Check your API key.",
-                retryable=False,
-                original_type=f"http_{status}",
-                original_message=body,
-            ))
+            return ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.authentication,
+                    message="Authentication failed. Check your API key.",
+                    retryable=False,
+                    original_type=f"http_{status}",
+                    original_message=body,
+                )
+            )
         elif status == 403:
-            return ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.permission,
-                message="Permission denied",
-                retryable=False,
-                original_type=f"http_{status}",
-                original_message=body,
-            ))
+            return ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.permission,
+                    message="Permission denied",
+                    retryable=False,
+                    original_type=f"http_{status}",
+                    original_message=body,
+                )
+            )
         elif status == 404:
-            return ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.model_not_found,
-                message=f"Model '{self._model}' not found",
-                retryable=False,
-                original_type=f"http_{status}",
-                original_message=body,
-            ))
+            return ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.model_not_found,
+                    message=f"Model '{self._model}' not found",
+                    retryable=False,
+                    original_type=f"http_{status}",
+                    original_message=body,
+                )
+            )
         elif status == 429:
-            return ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.rate_limit,
-                message="Rate limit exceeded",
-                retryable=True,
-                original_type=f"http_{status}",
-                original_message=body,
-            ))
+            return ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.rate_limit,
+                    message="Rate limit exceeded",
+                    retryable=True,
+                    original_type=f"http_{status}",
+                    original_message=body,
+                )
+            )
         elif status == 400:
-            return ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.invalid_request,
-                message=f"Invalid request: {body[:100]}",
-                retryable=False,
-                original_type=f"http_{status}",
-                original_message=body,
-            ))
+            return ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.invalid_request,
+                    message=f"Invalid request: {body[:100]}",
+                    retryable=False,
+                    original_type=f"http_{status}",
+                    original_message=body,
+                )
+            )
         elif status in (500, 502, 503):
-            return ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.provider_internal,
-                message="Provider internal error",
-                retryable=True,
-                original_type=f"http_{status}",
-                original_message=body,
-            ))
+            return ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.provider_internal,
+                    message="Provider internal error",
+                    retryable=True,
+                    original_type=f"http_{status}",
+                    original_message=body,
+                )
+            )
         else:
-            return ModelProviderError(ErrorEnvelope(
-                category=ErrorCategory.provider_internal,
-                message=f"HTTP {status}",
-                retryable=status >= 500,
-                original_type=f"http_{status}",
-                original_message=body,
-            ))
+            return ModelProviderError(
+                ErrorEnvelope(
+                    category=ErrorCategory.provider_internal,
+                    message=f"HTTP {status}",
+                    retryable=status >= 500,
+                    original_type=f"http_{status}",
+                    original_message=body,
+                )
+            )
 
     def _normalize_finish_reason(self, raw: str) -> FinishReason:
         """标准化 finish_reason。"""
@@ -630,6 +681,7 @@ class OpenAICompatProvider(ModelProvider):
     def __del__(self) -> None:
         try:
             import asyncio
+
             try:
                 asyncio.get_running_loop()
             except RuntimeError:

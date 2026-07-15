@@ -121,8 +121,7 @@ class TestConfigLoadVersion:
     def test_load_computes_content_hash(self, tmp_path):
         cfg_file = tmp_path / "config.toml"
         cfg_file.write_text(
-            '[runtime]\nprofile = "default"\n\n'
-            '[model]\nprovider = "echo"\n',
+            '[runtime]\nprofile = "default"\n\n[model]\nprovider = "echo"\n',
             encoding="utf-8",
         )
         config = Config.load(cfg_file)
@@ -164,16 +163,26 @@ class TestConfigVersionPersistence:
     def test_duplicate_hash_rejected(self, in_memory_db):
         """同一 content_hash 只允许一条记录（UNIQUE 约束）。"""
         repo = ConfigVersionRepository(in_memory_db)
-        repo.insert(ConfigVersionRecord(
-            version_id="cfg-1", content_hash="unique-hash", schema_version="1",
-            source_layers=[], applied_at=1000,
-        ))
+        repo.insert(
+            ConfigVersionRecord(
+                version_id="cfg-1",
+                content_hash="unique-hash",
+                schema_version="1",
+                source_layers=[],
+                applied_at=1000,
+            )
+        )
         in_memory_db.commit()
         with pytest.raises(Exception):
-            repo.insert(ConfigVersionRecord(
-                version_id="cfg-2", content_hash="unique-hash", schema_version="1",
-                source_layers=[], applied_at=2000,
-            ))
+            repo.insert(
+                ConfigVersionRecord(
+                    version_id="cfg-2",
+                    content_hash="unique-hash",
+                    schema_version="1",
+                    source_layers=[],
+                    applied_at=2000,
+                )
+            )
             in_memory_db.commit()
 
 
@@ -187,8 +196,7 @@ class TestConfigLoadValidation:
         """合法 worker 配置（lease > heartbeat）通过。"""
         cfg_file = tmp_path / "config.toml"
         cfg_file.write_text(
-            '[worker]\nheartbeat_interval_seconds = 60\n'
-            'lease_duration_seconds = 300\n',
+            "[worker]\nheartbeat_interval_seconds = 60\nlease_duration_seconds = 300\n",
             encoding="utf-8",
         )
         config = Config.load(cfg_file)
@@ -197,10 +205,10 @@ class TestConfigLoadValidation:
     def test_lease_less_than_heartbeat_rejected(self, tmp_path):
         """lease < 2*heartbeat 应在 load() 时 ConfigError。"""
         from cogito.config import ConfigError
+
         cfg_file = tmp_path / "config.toml"
         cfg_file.write_text(
-            '[worker]\nheartbeat_interval_seconds = 200\n'
-            'lease_duration_seconds = 300\n',
+            "[worker]\nheartbeat_interval_seconds = 200\nlease_duration_seconds = 300\n",
             encoding="utf-8",
         )
         with pytest.raises(ConfigError):
@@ -213,6 +221,7 @@ class TestConfigLoadValidation:
 class TestHotReload:
     def test_reload_success_activates(self):
         from cogito.infrastructure.config_version import ConfigHotReloader
+
         reloader = ConfigHotReloader({"runtime": {"profile": "old"}})
         ok, errors = reloader.attempt_reload({"runtime": {"profile": "new"}})
         assert ok is True
@@ -222,6 +231,7 @@ class TestHotReload:
     def test_reload_failure_keeps_old(self):
         """cfg-06: 热更新失败保留旧版本。"""
         from cogito.infrastructure.config_version import ConfigHotReloader
+
         reloader = ConfigHotReloader({"runtime": {"profile": "original"}})
         # 传入未知 key 触发 dry-run 拒绝
         ok, errors = reloader.attempt_reload({"unknown_key": "value"})

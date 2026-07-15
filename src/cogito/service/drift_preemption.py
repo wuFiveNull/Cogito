@@ -6,6 +6,7 @@ Drift 在安全点写 DriftCheckpointV1 + 更新 TaskAttempt.checkpoint_ref + �
 
 恢复前校验 config_version_id / skill_version / checkpoint_schema_version。
 """
+
 from __future__ import annotations
 
 import json
@@ -16,7 +17,6 @@ from typing import Any
 from cogito.domain.drift import (
     DriftCheckpointV1,
     DriftReasonCode,
-    DriftRunStatus,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -42,8 +42,8 @@ def request_preemption(conn, principal_id: str, reason: str) -> None:
 def is_preemption_requested(conn, principal_id: str) -> tuple[bool, str]:
     """检查并清除 preemption signal。"""
     row = conn.execute(
-        "SELECT preempt_requested, reason FROM drift_preemption_signals "
-        "WHERE principal_id=?", (principal_id,),
+        "SELECT preempt_requested, reason FROM drift_preemption_signals WHERE principal_id=?",
+        (principal_id,),
     ).fetchone()
     if row and row[0]:
         # 消费后清除
@@ -101,8 +101,7 @@ def should_preempt_step(
     if active_normal_turns > 0:
         return True, DriftReasonCode.active_turn
     if priority_backlog is None:
-        priority_backlog = _count_high_priority_backlog(
-            conn, threshold=high_priority_threshold)
+        priority_backlog = _count_high_priority_backlog(conn, threshold=high_priority_threshold)
     if priority_backlog > 0:
         return True, DriftReasonCode.priority_backlog
     if budget_remaining <= 0:
@@ -167,31 +166,36 @@ def write_checkpoint(
 
     now = int(time.time() * 1000)
     from cogito.store.task_checkpoint_repo import (
-        TaskCheckpoint, TaskCheckpointRepository, _hash_json,
+        TaskCheckpoint,
+        TaskCheckpointRepository,
+        _hash_json,
     )
+
     ck_id = f"ck-{uuid4_hex()[:16]}"
-    TaskCheckpointRepository(conn).insert(TaskCheckpoint(
-        checkpoint_id=ck_id,
-        task_id=task_id,
-        task_attempt_id=real_attempt_id,
-        drift_run_id=drift_run_id,
-        checkpoint_type=checkpoint_type,
-        schema_version=1,
-        payload_ref=ref,
-        payload_json=payload_json,
-        payload_hash=_hash_json(payload_json),
-        config_version_id=config_version_id,
-        capability_snapshot_version=capability_snapshot_version,
-        created_at=now,
-    ))
+    TaskCheckpointRepository(conn).insert(
+        TaskCheckpoint(
+            checkpoint_id=ck_id,
+            task_id=task_id,
+            task_attempt_id=real_attempt_id,
+            drift_run_id=drift_run_id,
+            checkpoint_type=checkpoint_type,
+            schema_version=1,
+            payload_ref=ref,
+            payload_json=payload_json,
+            payload_hash=_hash_json(payload_json),
+            config_version_id=config_version_id,
+            capability_snapshot_version=capability_snapshot_version,
+            created_at=now,
+        )
+    )
 
     # 同步最新引用到 Task / Attempt / skill_state（均属轻量引用列）
-    conn.execute(
-        "UPDATE tasks SET checkpoint_ref=? WHERE task_id=?", (ref, task_id))
+    conn.execute("UPDATE tasks SET checkpoint_ref=? WHERE task_id=?", (ref, task_id))
     if real_attempt_id:
         conn.execute(
             "UPDATE task_attempts SET checkpoint_ref=? WHERE task_attempt_id=?",
-            (ref, real_attempt_id))
+            (ref, real_attempt_id),
+        )
     # 绑定当前 run 解析 principal_id（子查询限定 drift_run_id）
     prow = conn.execute(
         "SELECT principal_id FROM drift_runs WHERE drift_run_id=?",
@@ -202,8 +206,14 @@ def write_checkpoint(
             "UPDATE drift_skill_state "
             "SET checkpoint_ref=?, cursor_json=?, updated_at=? "
             "WHERE principal_id=? AND skill_name=? AND skill_version=?",
-            (ref, json.dumps(dict(cursor), ensure_ascii=False), now,
-             prow[0], skill_name, skill_version),
+            (
+                ref,
+                json.dumps(dict(cursor), ensure_ascii=False),
+                now,
+                prow[0],
+                skill_name,
+                skill_version,
+            ),
         )
     conn.execute(
         "UPDATE drift_runs SET result_ref=? WHERE drift_run_id=?",
@@ -215,6 +225,7 @@ def write_checkpoint(
 
 def uuid4_hex() -> str:
     import uuid as _uuid
+
     return _uuid.uuid4().hex
 
 
@@ -235,10 +246,8 @@ def validate_checkpoint_for_resume(
     schema = data.get("schema_version")
     if schema != 1:
         return False, f"incompatible checkpoint schema_version={schema}"
-    if (data.get("config_version_id")
-            and data["config_version_id"] != current_config_version_id):
+    if data.get("config_version_id") and data["config_version_id"] != current_config_version_id:
         return False, "config_version changed"
-    if (data.get("skill_version")
-            and data["skill_version"] != current_skill_version):
+    if data.get("skill_version") and data["skill_version"] != current_skill_version:
         return False, "skill_version changed"
     return True, ""

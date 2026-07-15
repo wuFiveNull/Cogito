@@ -13,6 +13,7 @@ ProactiveCandidate(origin=drift) 状态=evaluating。
 - dry-run / allow_candidate_emission=False 仅 preview, 不写 Candidate
 - 幂等: 第二次消费不重复创建 Candidate
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -43,7 +44,8 @@ def _fresh_db():
 def _run_scheduler_admit(conn):
     """真实 Scheduler 选 Skill + 创建 drift.run Task，返回 run 的 drift_run_id。"""
     dr_cfg = DriftConfig(
-        enabled=True, dry_run=False,
+        enabled=True,
+        dry_run=False,
         default_principal_id="owner",
         idle_after_minutes=30,
         max_runs_per_day=3,
@@ -86,13 +88,13 @@ def _worker_claim_and_run(conn, task_id):
 def _dispatch_outbox(conn, dry_run=False):
     """模拟 application.process_background_once 的 Outbox 消费路径。"""
     dr_cfg = DriftConfig(
-        enabled=True, dry_run=dry_run,
+        enabled=True,
+        dry_run=dry_run,
         default_principal_id="owner",
         allow_candidate_emission=not dry_run,
         allow_candidate_projection=True,
     )
-    consumer = DriftResultCommittedConsumer(
-        default_principal_id="owner", drift_config=dr_cfg)
+    consumer = DriftResultCommittedConsumer(default_principal_id="owner", drift_config=dr_cfg)
     outbox = OutboxWorker(conn)
     worker_id = "wkr-outbox"
     result = {"candidates": 0, "consumed": 0}
@@ -129,7 +131,8 @@ def test_full_pipeline_emits_candidate():
     res = conn.execute(
         "SELECT result_kind, items_json, candidate_draft_json "
         "FROM drift_results WHERE drift_run_id=? "
-        "ORDER BY created_at DESC LIMIT 1", (run_id,),
+        "ORDER BY created_at DESC LIMIT 1",
+        (run_id,),
     ).fetchone()
     assert res is not None
     assert res["result_kind"] in ("candidate_emission", "internal_only")
@@ -190,9 +193,7 @@ def test_consumer_does_not_call_delivery():
         (run_id,),
     ).fetchone()
     assert c is not None
-    assert c["status"] == "evaluating", \
-        f"Drift 不能直接发送: {c['status']}"
+    assert c["status"] == "evaluating", f"Drift 不能直接发送: {c['status']}"
     # 无 Delivery 记录 (Delivery 由 Delivery 闭环处理)
-    nd = conn.execute(
-        "SELECT COUNT(*) FROM deliveries").fetchone()[0]
+    nd = conn.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0]
     assert nd == 0

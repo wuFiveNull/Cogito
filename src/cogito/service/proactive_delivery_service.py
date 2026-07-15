@@ -8,6 +8,7 @@ Delivery (TargetSnapshot 固定 per ACCESS-DELIVERY §4.2)。
 用户偏好 TargetSnapshot 时放行由 DeliveryWorker+Gateway 按
 suggested_target_json 决定。
 """
+
 from __future__ import annotations
 
 import json
@@ -44,7 +45,10 @@ def create_scheduled_request(
         " created_at) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (
-            req_id, "owner", candidate_id, content_ref,
+            req_id,
+            "owner",
+            candidate_id,
+            content_ref,
             json.dumps(suggested_target, ensure_ascii=False),
             reason[:500],
             "pending",

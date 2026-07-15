@@ -16,6 +16,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
+from cogito.contracts.clock import Clock, ProductionClock, epoch_ms
 from cogito.domain.schedule import (
     FireStatus,
     MisfirePolicy,
@@ -24,11 +25,9 @@ from cogito.domain.schedule import (
     next_fire_at,
 )
 from cogito.domain.task import Task, TaskStatus
-from cogito.contracts.clock import Clock, ProductionClock
 from cogito.service.unit_of_work import UnitOfWork
 from cogito.store.schedule_repo import ScheduledFireRepository, ScheduleRepository
 from cogito.store.task_repo import TaskRepository
-from cogito.contracts.clock import epoch_ms
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,13 +55,13 @@ class Scheduler:
         self,
         conn: sqlite3.Connection,
         clock: Clock | None = None,
-        proactive_config: Any = None,     # ProactiveConfig
-        presence_reader: Any = None,       # PresenceReader
-        rng: Any = None,                   # random.Random (可注入，测试可复现)
-        drift_config: Any = None,          # DriftConfig
+        proactive_config: Any = None,  # ProactiveConfig
+        presence_reader: Any = None,  # PresenceReader
+        rng: Any = None,  # random.Random (可注入，测试可复现)
+        drift_config: Any = None,  # DriftConfig
         config_version_id: str = "",
-        memory_config: Any = None,         # MemoryWeightConfig (PLAN-16 M3 MEM-07)
-        workspace_path: str = "",          # 工作区根（扫描 workspace Skills）
+        memory_config: Any = None,  # MemoryWeightConfig (PLAN-16 M3 MEM-07)
+        workspace_path: str = "",  # 工作区根（扫描 workspace Skills）
     ) -> None:
         self._conn = conn
         self._clock = clock or ProductionClock()
@@ -72,7 +71,7 @@ class Scheduler:
         self._proactive_config = proactive_config
         self._presence_reader = presence_reader
         self._rng = rng
-        self._drift_config = drift_config          # DriftConfig
+        self._drift_config = drift_config  # DriftConfig
         self._config_version_id = config_version_id
         self._memory_config = memory_config or _DEFAULT_MEMORY_WEIGHT_CONFIG
         self._workspace_path = workspace_path
@@ -88,12 +87,19 @@ class Scheduler:
             return MCP_POLL_TASK_TYPE
         return POLL_TASK_TYPE
 
-    def _try_create_unique_task(self, task_type: str, idempotency: str,
-                                 payload_ref: str = "", *, priority: int = 20,
-                                 origin: str = "memory_maintenance") -> Task | None:
+    def _try_create_unique_task(
+        self,
+        task_type: str,
+        idempotency: str,
+        payload_ref: str = "",
+        *,
+        priority: int = 20,
+        origin: str = "memory_maintenance",
+    ) -> Task | None:
         """幂等：创建唯一 Task（已存在则跳过），返回 Task 或 None。"""
         existing = self._conn.execute(
-            "SELECT task_id FROM tasks WHERE idempotency_key=?", (idempotency,),
+            "SELECT task_id FROM tasks WHERE idempotency_key=?",
+            (idempotency,),
         ).fetchone()
         if existing is not None:
             return None
@@ -130,8 +136,10 @@ class Scheduler:
         recompute_window = now_ms // max(cfg.recompute_interval_seconds * 1000, 1)
         idemp_recompute = f"memory-maintenance:recompute:{recompute_window}"
         t = self._try_create_unique_task(
-            MEMORY_RECOMPUTE_WEIGHT_TASK_TYPE, idemp_recompute,
-            priority=10, origin="memory_maintenance",
+            MEMORY_RECOMPUTE_WEIGHT_TASK_TYPE,
+            idemp_recompute,
+            priority=10,
+            origin="memory_maintenance",
         )
         if t:
             tasks.append(t)
@@ -140,8 +148,10 @@ class Scheduler:
         consolidate_window = now_ms // max(cfg.consolidate_interval_seconds * 1000, 1)
         idemp_consolidate = f"memory-maintenance:consolidate:{consolidate_window}"
         t = self._try_create_unique_task(
-            MEMORY_CONSOLIDATE_TASK_TYPE, idemp_consolidate,
-            priority=5, origin="memory_maintenance",
+            MEMORY_CONSOLIDATE_TASK_TYPE,
+            idemp_consolidate,
+            priority=5,
+            origin="memory_maintenance",
         )
         if t:
             tasks.append(t)
@@ -174,7 +184,8 @@ class Scheduler:
         # 创建 proactive.evaluate 任务（单次，misfire 只补一次）
         idempotency = f"proactive-evaluate:{now_ms}"
         existing = self._conn.execute(
-            "SELECT task_id FROM tasks WHERE idempotency_key=?", (idempotency,),
+            "SELECT task_id FROM tasks WHERE idempotency_key=?",
+            (idempotency,),
         ).fetchone()
         if existing is None:
             # Task.scheduled_at / created_at 为 datetime 类型（task_repo.insert
@@ -225,6 +236,7 @@ class Scheduler:
         if self._drift_config is None or not self._drift_config.enabled:
             return None
         from cogito.service.drift_admission import admit
+
         result = admit(
             self._conn,
             principal_id=self._drift_config.default_principal_id,
@@ -239,8 +251,10 @@ class Scheduler:
 
         # dry-run：仅记录，不创建真实 Task
         if self._drift_config.dry_run:
-            _LOGGER.info("[dry_run] drift admission would select skill (snapshot=%s)",
-                         result.snapshot.to_dict())
+            _LOGGER.info(
+                "[dry_run] drift admission would select skill (snapshot=%s)",
+                result.snapshot.to_dict(),
+            )
             return None
 
         # 创建幂等 drift.run Task (idempotency_key 包含 snapshot_at 的粗粒度窗口)
@@ -250,7 +264,8 @@ class Scheduler:
         window_ms = (now_ms // 60000) * 60000
         idempotency = f"drift-run:{self._drift_config.default_principal_id}:{window_ms}"
         existing = self._conn.execute(
-            "SELECT task_id FROM tasks WHERE idempotency_key=?", (idempotency,),
+            "SELECT task_id FROM tasks WHERE idempotency_key=?",
+            (idempotency,),
         ).fetchone()
         if existing is not None:
             return None
@@ -276,17 +291,19 @@ class Scheduler:
             return None
 
         # ── 选择真实 Skill（替换 "(selected-at-run)" 占位符，PLAN-17 R1 P0-01）──
+        from cogito.service.drift_selector import WEIGHTS_VERSION, select_skill
         from cogito.service.drift_skill_catalog import resolve_catalog
-        from cogito.service.drift_selector import select_skill, WEIGHTS_VERSION
         from cogito.store.drift_repo import DriftSkillStateRepository
 
-        catalog = resolve_catalog(self._workspace_path or
-                                  getattr(self._drift_config, "workspace_path", "") or "",
-                                  self._drift_config.allow_workspace_skills)
+        catalog = resolve_catalog(
+            self._workspace_path or getattr(self._drift_config, "workspace_path", "") or "",
+            self._drift_config.allow_workspace_skills,
+        )
         skill_states = {
             row["skill_name"]: row
             for row in DriftSkillStateRepository(self._conn).all_states(
-                self._drift_config.default_principal_id)
+                self._drift_config.default_principal_id
+            )
         }
         selected = select_skill(catalog, skill_states)
         if selected is None:
@@ -341,16 +358,26 @@ class Scheduler:
         ).fetchone()
         if row is None:
             return {
-                "last_eval_at": None, "next_eval_at": 0,
-                "interval_s": 60, "energy_band": "medium",
+                "last_eval_at": None,
+                "next_eval_at": 0,
+                "interval_s": 60,
+                "energy_band": "medium",
             }
         return {
-            "last_eval_at": row[0], "next_eval_at": row[1],
-            "interval_s": row[2], "energy_band": row[3],
+            "last_eval_at": row[0],
+            "next_eval_at": row[1],
+            "interval_s": row[2],
+            "energy_band": row[3],
         }
 
     def _write_cadence_state(
-        self, *, last_eval_at, next_eval_at, interval_s, energy_band, updated_at,
+        self,
+        *,
+        last_eval_at,
+        next_eval_at,
+        interval_s,
+        energy_band,
+        updated_at,
     ) -> None:
         self._conn.execute(
             "UPDATE proactive_cadence_state "
@@ -364,6 +391,7 @@ class Scheduler:
         if self._presence_reader is None or self._proactive_config is None:
             return "medium"
         from cogito.service.energy_model import compute_energy, energy_band
+
         try:
             last_user_dt = self._presence_reader.get_last_user_activity(
                 self._proactive_config.default_principal_id,
@@ -375,10 +403,13 @@ class Scheduler:
     def _compute_cadence_interval(self, band: str) -> int:
         """按能量档 + 配置计算下一次评估间隔（秒，含 jitter、上下限）。"""
         from cogito.service.proactive_cadence import compute_interval
+
         if self._proactive_config is None:
             return 60
         return compute_interval(
-            band, self._proactive_config.cadence, rng=self._rng,
+            band,
+            self._proactive_config.cadence,
+            rng=self._rng,
         )
 
     def tick(self, limit: int = 10) -> list[Task]:
@@ -427,6 +458,7 @@ class Scheduler:
             return float(row[0])
         # 回退：从 expression 解析
         from cogito.domain.schedule import parse_duration
+
         delta = parse_duration(schedule.expression)
         if delta is not None:
             return delta.total_seconds()
@@ -503,13 +535,19 @@ class Scheduler:
             nxt = next_fire_at(schedule.expression, schedule.timezone, now)
             if nxt and nxt != schedule.next_fire_at:
                 self._schedule_repo.update_fire_time(
-                    schedule.schedule_id, nxt, now, schedule.version,
+                    schedule.schedule_id,
+                    nxt,
+                    now,
+                    schedule.version,
                 )
             return None
 
         # Claim schedule lease: 条件更新版本号（将 next_fire_at 暂设为自身以锁定）
         if not self._schedule_repo.update_fire_time(
-            schedule.schedule_id, schedule.next_fire_at, now, schedule.version,
+            schedule.schedule_id,
+            schedule.next_fire_at,
+            now,
+            schedule.version,
         ):
             return None  # 并发竞争失败，跳过
 
@@ -540,12 +578,15 @@ class Scheduler:
             if merged_count > 1:
                 # merge 策略：payload 携带合并次数和时间窗口
                 import json
-                payload_ref = json.dumps({
-                    "connector_id": schedule.connector_id or "",
-                    "merged_count": merged_count,
-                    "first_missed_at": (fire_at.isoformat() if fire_at else None),
-                    "last_missed_at": (now.isoformat() if now else None),
-                })
+
+                payload_ref = json.dumps(
+                    {
+                        "connector_id": schedule.connector_id or "",
+                        "merged_count": merged_count,
+                        "first_missed_at": (fire_at.isoformat() if fire_at else None),
+                        "last_missed_at": (now.isoformat() if now else None),
+                    }
+                )
 
             # 创建 connector.poll / mcp_connector.poll Task
             task = Task(
@@ -553,7 +594,10 @@ class Scheduler:
                 payload_ref=payload_ref,
                 status=TaskStatus.queued,
                 priority=40,
-                scheduled_at=nxt,
+                # This Task represents the fire that is due now.  ``nxt`` belongs
+                # to the Schedule aggregate and must not delay the current work by
+                # one full interval.
+                scheduled_at=fire_at,
                 idempotency_key=f"{schedule.schedule_id}:{epoch_ms(fire_at)}",
                 origin="scheduler",
             )
@@ -568,14 +612,18 @@ class Scheduler:
 
             # 回填 fire.task_id
             self._fire_repo.update_status(
-                fire.fire_id, FireStatus.fired, task.task_id,
+                fire.fire_id,
+                FireStatus.fired,
+                task.task_id,
             )
 
             uow.commit()
 
         _LOGGER.info(
             "Scheduler: schedule=%s fired at %s, next=%s, task=%s",
-            schedule.schedule_id, fire_at.isoformat(), nxt.isoformat() if nxt else None,
+            schedule.schedule_id,
+            fire_at.isoformat(),
+            nxt.isoformat() if nxt else None,
             task.task_id,
         )
         return task

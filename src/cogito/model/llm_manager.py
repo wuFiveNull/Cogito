@@ -33,6 +33,7 @@ def create_provider(
 
     if adapter == "echo":
         from cogito.model.echo_provider import EchoModelProvider
+
         return EchoModelProvider(model_id=endpoint.model or "echo-model")
 
     # 按适配器补全默认 base_url（Anthropic 有官方默认；OpenAI 兼容层无通用默认）
@@ -42,10 +43,12 @@ def create_provider(
 
     if not (endpoint.model and endpoint.api_key and effective_base_url):
         from cogito.model.stub_provider import StubModelProvider
+
         return StubModelProvider()
 
     if adapter == "anthropic":
         from cogito.model.anthropic_provider import AnthropicProvider
+
         return AnthropicProvider(
             model=endpoint.model,
             api_key=endpoint.api_key,
@@ -55,6 +58,7 @@ def create_provider(
 
     # 默认：OpenAI 兼容（OpenAI / DeepSeek / vLLM / LiteLLM / ...）
     from cogito.model.openai_compat import OpenAICompatProvider
+
     return OpenAICompatProvider(
         model=endpoint.model,
         api_key=endpoint.api_key,
@@ -124,7 +128,7 @@ class LLMManager:
 
         # 至少保证 main 可用
         if "main" not in role_map:
-            _LOGGER.warning(
+            _LOGGER.info(
                 "roles configured but 'main' missing; falling back to [model.main]",
             )
             providers["main"] = create_provider(model_cfg.main, model_cfg.provider)

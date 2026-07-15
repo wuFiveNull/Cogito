@@ -14,33 +14,41 @@ from cogito.model.stub_provider import StubModelProvider
 
 
 def _multi_cfg() -> ModelConfig:
-    return ModelConfig._from_raw({
-        "providers": {
-            "openai": {
-                "provider": "openai_compat",
-                "api_key": "sk-openai",
-                "base_url": "https://api.openai.com/v1",
-                "model": "gpt-4o",
+    return ModelConfig._from_raw(
+        {
+            "providers": {
+                "openai": {
+                    "provider": "openai_compat",
+                    "api_key": "sk-openai",
+                    "base_url": "https://api.openai.com/v1",
+                    "model": "gpt-4o",
+                },
+                "anthropic": {
+                    "provider": "anthropic",
+                    "api_key": "sk-ant",
+                    "model": "claude-sonnet-4-20250514",
+                },
             },
-            "anthropic": {
-                "provider": "anthropic",
-                "api_key": "sk-ant",
-                "model": "claude-sonnet-4-20250514",
+            "roles": {
+                "main": {"provider": "anthropic", "model": "claude-sonnet-4-20250514"},
+                "fast": {"provider": "openai", "model": "gpt-4o-mini"},
+                "vlm": {"provider": "openai", "model": "gpt-4o"},
             },
-        },
-        "roles": {
-            "main": {"provider": "anthropic", "model": "claude-sonnet-4-20250514"},
-            "fast": {"provider": "openai", "model": "gpt-4o-mini"},
-            "vlm": {"provider": "openai", "model": "gpt-4o"},
-        },
-    })
+        }
+    )
 
 
 def _single_cfg() -> ModelConfig:
-    return ModelConfig._from_raw({
-        "provider": "openai_compat",
-        "main": {"model": "deepseek-chat", "api_key": "sk-x", "base_url": "https://api.deepseek.com/v1"},
-    })
+    return ModelConfig._from_raw(
+        {
+            "provider": "openai_compat",
+            "main": {
+                "model": "deepseek-chat",
+                "api_key": "sk-x",
+                "base_url": "https://api.deepseek.com/v1",
+            },
+        }
+    )
 
 
 class TestLLMManagerBuild:
@@ -50,7 +58,9 @@ class TestLLMManagerBuild:
         assert isinstance(mgr.get("fast"), OpenAICompatProvider)
         assert isinstance(mgr.get("vlm"), OpenAICompatProvider)
         assert mgr.router._role_map == {
-            "main": "anthropic", "fast": "openai", "vlm": "openai",
+            "main": "anthropic",
+            "fast": "openai",
+            "vlm": "openai",
         }
 
     def test_shared_provider_key_reuses_instance(self):
@@ -73,9 +83,11 @@ class TestLLMManagerBuild:
     def test_unknown_role_falls_back_to_main(self):
         # 即使 roles 中未配置 main，manager 也会注入 fallback main，
         # 因此未知角色退化到 main 而非抛错（启动鲁棒性）。
-        cfg = ModelConfig._from_raw({
-            "roles": {"fast": {"provider": "openai", "model": "gpt-4o-mini"}},
-        })
+        cfg = ModelConfig._from_raw(
+            {
+                "roles": {"fast": {"provider": "openai", "model": "gpt-4o-mini"}},
+            }
+        )
         mgr = LLMManager.build(cfg)
         assert isinstance(mgr.get("nonexistent"), StubModelProvider)
         assert isinstance(mgr.get("fast"), StubModelProvider)  # openai 未配置完整 → stub

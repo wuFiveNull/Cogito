@@ -3,6 +3,7 @@
 per-source 预算配额，版本化策略。knowledge 不能挤掉 active constraint
 和当前 Task state。未使用额度可转移。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -15,6 +16,7 @@ if TYPE_CHECKING:
 @dataclass
 class TokenBudgetConfig:
     """Token Budget 配额（PLAN-13 §13.4，可评测配置）。"""
+
     version: str = "1"
     # 各源占总预算占比（除 System Policy 和当前输入外）
     recent_messages_ratio: float = 0.30
@@ -53,6 +55,7 @@ class TokenBudgetConfig:
 @dataclass
 class BudgetAllocation:
     """实际分配结果。"""
+
     source: str
     quota: int
     used: int = 0
@@ -81,13 +84,14 @@ def allocate_budget(
     """初始化各源预算分配。"""
     config = config or TokenBudgetConfig()
     sources = [
-        "recent_message", "session_summary", "memory",
-        "goal", "knowledge_segment", "task_state",
+        "recent_message",
+        "session_summary",
+        "memory",
+        "goal",
+        "knowledge_segment",
+        "task_state",
     ]
-    return {
-        s: BudgetAllocation(source=s, quota=config.quota(s, total_budget))
-        for s in sources
-    }
+    return {s: BudgetAllocation(source=s, quota=config.quota(s, total_budget)) for s in sources}
 
 
 def select_candidates(
@@ -123,6 +127,7 @@ def select_candidates(
         key=lambda c: -c.final_score,
     )
     import dataclasses
+
     selected: list[RetrievalCandidate] = list(protected_selected)
     excluded: list[RetrievalCandidate] = []
     for alloc in allocations.values():

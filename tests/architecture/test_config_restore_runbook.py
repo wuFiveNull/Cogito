@@ -1,4 +1,5 @@
 """Track E: Config + Restore + Runbook — Plan 06 M2/M8/M10."""
+
 from __future__ import annotations
 
 from cogito.infrastructure.backup import BackupService
@@ -38,15 +39,18 @@ def test_hot_reload_passes_valid_config() -> None:
 
 def test_cross_field_validation() -> None:
     """跨字段校验（Plan 06 M2）。"""
-    errors = validate_cross_fields({"worker": {"heartbeat_s": 10, "lease_ttl_s": 15},
-                                    "agent": {"max_output_tokens": 4096}})
+    errors = validate_cross_fields(
+        {"worker": {"heartbeat_s": 10, "lease_ttl_s": 15}, "agent": {"max_output_tokens": 4096}}
+    )
     # heartbeat*2=20 < lease_ttl=15 fails
     assert len(errors) >= 1
 
 
 def test_restore_verify_before_restore() -> None:
     """恢复前先 verify。"""
-    import sqlite3, tempfile
+    import sqlite3
+    import tempfile
+
     tmp = tempfile.mkdtemp()
     db_conn = sqlite3.connect(":memory:")
     svc = BackupService(tmp, db_conn)
@@ -57,7 +61,9 @@ def test_restore_verify_before_restore() -> None:
 
 def test_restore_needs_confirmation() -> None:
     """恢复后需人工确认。"""
-    import sqlite3, tempfile
+    import sqlite3
+    import tempfile
+
     tmp = tempfile.mkdtemp()
     db_conn = sqlite3.connect(":memory:")
     db_conn.execute("CREATE TABLE t (id TEXT)")

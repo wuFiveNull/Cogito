@@ -204,18 +204,21 @@ class TestWebDeliveryRouting:
             def __init__(self, text=""):
                 self.text = text
                 self.attachments = ()
+
         gateway._read_message_content = lambda ref: _StubContent("Hi, I am Cogito.")
         msg_id = "assistant-msg-1"
 
-        target_snapshot = json.dumps({
-            "reply_route": {
-                "channel_instance_id": "web",
-                "platform_conversation_id": CONV,
-            },
-            "delivery_id": "d-deliver-1",
-            "adapter_id": "web",
-            "idempotency_key": "delivery_x",
-        })
+        target_snapshot = json.dumps(
+            {
+                "reply_route": {
+                    "channel_instance_id": "web",
+                    "platform_conversation_id": CONV,
+                },
+                "delivery_id": "d-deliver-1",
+                "adapter_id": "web",
+                "idempotency_key": "delivery_x",
+            }
+        )
 
         result = gateway.send_request(target_snapshot, msg_id)
         assert result.status == "sent"
@@ -228,10 +231,12 @@ class TestWebDeliveryRouting:
         """adapter 未注册时返回 temporary（可重试）。"""
         manager = ChannelManager(None)
         gateway = ChannelGateway(in_memory_db, manager)
-        target_snapshot = json.dumps({
-            "reply_route": {"channel_instance_id": "web", "platform_conversation_id": CONV},
-            "adapter_id": "web",
-        })
+        target_snapshot = json.dumps(
+            {
+                "reply_route": {"channel_instance_id": "web", "platform_conversation_id": CONV},
+                "adapter_id": "web",
+            }
+        )
         result = gateway.send_request(target_snapshot, "any-msg")
         assert result.status == "temporary"
         assert result.error_code == "adapter_not_running"
@@ -296,14 +301,18 @@ def test_ws_chat_roundtrip_pushes_reply():
 
     adapter = WebChannelAdapter()
     app = _build_chat_test_app(adapter, None)
-    CID = "web:ws-roundtrip-1"
+    cid = "web:ws-roundtrip-1"
 
     # 离线期间（未订阅）的回复进信箱
     adapter.send_request_sync(
         ChannelSendRequest(
-            delivery_id="d-sim", attempt_id="a-sim", idempotency_key="sim",
-            channel_instance_id="web", target_endpoint_ref="",
-            platform_conversation_id=CID, text="echo: offline",
+            delivery_id="d-sim",
+            attempt_id="a-sim",
+            idempotency_key="sim",
+            channel_instance_id="web",
+            target_endpoint_ref="",
+        platform_conversation_id=cid,
+            text="echo: offline",
             reply_to_platform_message_id=None,
         )
     )
@@ -311,16 +320,16 @@ def test_ws_chat_roundtrip_pushes_reply():
     with TestClient(app) as client:
         with client.websocket_connect("/api/chat/ws") as ws:
             # 协议：浏览器先发 init 帧，handler 收到后回 ready
-            ws.send_json({"conversation_id": CID})
+            ws.send_json({"conversation_id": cid})
             ready = ws.receive_json()
             assert ready["type"] == "ready"
-            assert ready["conversation_id"] == CID
+            assert ready["conversation_id"] == cid
 
             # 订阅时回灌信箱 → assistant 回复经 WS 推回
             reply = ws.receive_json()
             assert reply["type"] == "assistant"
             assert reply["text"] == "echo: offline"
-            assert reply["conversation_id"] == CID
+            assert reply["conversation_id"] == cid
 
             # 浏览器发消息 → 进主链路
             ws.send_json({"text": "ping"})
@@ -336,9 +345,13 @@ def test_ws_chat_unknown_conversation_receives_reply_via_mailbox():
     # 无订阅者时回复进信箱
     adapter.send_request_sync(
         ChannelSendRequest(
-            delivery_id="d-mb", attempt_id="a-mb", idempotency_key="mb",
-            channel_instance_id="web", target_endpoint_ref="",
-            platform_conversation_id=CONV, text="offline reply",
+            delivery_id="d-mb",
+            attempt_id="a-mb",
+            idempotency_key="mb",
+            channel_instance_id="web",
+            target_endpoint_ref="",
+            platform_conversation_id=CONV,
+            text="offline reply",
             reply_to_platform_message_id=None,
         )
     )

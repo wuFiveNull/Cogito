@@ -1,4 +1,5 @@
 """Capability Registry 2.0 — Plan 03 M1."""
+
 from __future__ import annotations
 
 import pytest
@@ -9,8 +10,11 @@ from cogito.capability.registry import CapabilityRegistry
 
 def _make_tool(name: str, **kw: Any) -> ToolDef:
     return ToolDef(
-        name=name, description=f"tool {name}", input_schema={"type": "object"},
-        handler=lambda args, ctx: "", **kw,
+        name=name,
+        description=f"tool {name}",
+        input_schema={"type": "object"},
+        handler=lambda args, ctx: "",
+        **kw,
     )
 
 

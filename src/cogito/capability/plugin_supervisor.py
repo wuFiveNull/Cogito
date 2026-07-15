@@ -1,4 +1,5 @@
 """Subprocess lifecycle and permission gate for third-party plugins."""
+
 from __future__ import annotations
 
 import json
@@ -43,8 +44,7 @@ class PluginPolicyAdapter:
         if permission in self._grants or "*" in self._grants:
             return True
         return any(
-            grant.endswith(".*") and permission.startswith(grant[:-1])
-            for grant in self._grants
+            grant.endswith(".*") and permission.startswith(grant[:-1]) for grant in self._grants
         )
 
 
@@ -58,7 +58,10 @@ class PluginProcessSupervisor:
     """Start, supervise, and terminate isolated plugin host processes."""
 
     def __init__(
-        self, *, startup_timeout_s: float = 5.0, stop_timeout_s: float = 3.0,
+        self,
+        *,
+        startup_timeout_s: float = 5.0,
+        stop_timeout_s: float = 3.0,
     ) -> None:
         self._startup_timeout_s = startup_timeout_s
         self._stop_timeout_s = stop_timeout_s
@@ -166,7 +169,13 @@ class PluginProcessSupervisor:
     @staticmethod
     def _minimal_env(source_path: str) -> dict[str, str]:
         allowed = (
-            "PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "HOME", "USERPROFILE",
+            "PATH",
+            "SYSTEMROOT",
+            "WINDIR",
+            "TEMP",
+            "TMP",
+            "HOME",
+            "USERPROFILE",
         )
         env = {key: os.environ[key] for key in allowed if key in os.environ}
         src_root = str(Path(__file__).resolve().parents[2])

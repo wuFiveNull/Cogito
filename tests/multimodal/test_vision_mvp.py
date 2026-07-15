@@ -29,8 +29,7 @@ from cogito.tools.analyze_multimodal_asset import create_tool_def
 
 # Valid 1x1 PNG. Keeping it inline makes the test independent of Pillow.
 PNG_BYTES = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4"
-    "//8/AAX+Av4N70a4AAAAAElFTkSuQmCC"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC"
 )
 PNG_DATA_URI = "data:image/png;base64," + base64.b64encode(PNG_BYTES).decode()
 
@@ -87,24 +86,26 @@ def _accept_image(conn, tmp_path):
     config = _config()
     asset_service = AssetIngestionService(conn, str(tmp_path), config)
     inbound = InboundService(conn, asset_service=asset_service)
-    result = inbound.accept(ChannelEnvelope(
-        channel_type="web",
-        channel_instance_id="web-test",
-        platform_sender_id="owner",
-        platform_conversation_id="conv-mm",
-        platform_message_id="platform-mm-1",
-        content_parts=[
-            {"content_type": "text", "inline_data": "What is in this image?"},
-            {
-                "content_type": "image",
-                "inline_data": PNG_DATA_URI,
-                "mime": "image/png",
-                "name": "pixel.png",
-                "size": len(PNG_BYTES),
-            },
-        ],
-        trust_label="unverified",
-    ))
+    result = inbound.accept(
+        ChannelEnvelope(
+            channel_type="web",
+            channel_instance_id="web-test",
+            platform_sender_id="owner",
+            platform_conversation_id="conv-mm",
+            platform_message_id="platform-mm-1",
+            content_parts=[
+                {"content_type": "text", "inline_data": "What is in this image?"},
+                {
+                    "content_type": "image",
+                    "inline_data": PNG_DATA_URI,
+                    "mime": "image/png",
+                    "name": "pixel.png",
+                    "size": len(PNG_BYTES),
+                },
+            ],
+            trust_label="unverified",
+        )
+    )
     row = conn.execute(
         "SELECT m.session_id,m.sender_principal_id,l.asset_id,cp.inline_data,cp.payload_ref "
         "FROM messages m JOIN content_parts cp ON cp.message_id=m.message_id "
@@ -136,18 +137,22 @@ def test_schema_and_asset_ingestion_deduplicate(in_memory_db, tmp_path):
         in_memory_db,
         asset_service=AssetIngestionService(in_memory_db, str(tmp_path), _config()),
     )
-    inbound.accept(ChannelEnvelope(
-        channel_type="web",
-        channel_instance_id="web-test",
-        platform_sender_id="owner",
-        platform_conversation_id="conv-mm",
-        platform_message_id="platform-mm-2",
-        content_parts=[{
-            "content_type": "image",
-            "inline_data": PNG_DATA_URI,
-            "mime": "image/png",
-        }],
-    ))
+    inbound.accept(
+        ChannelEnvelope(
+            channel_type="web",
+            channel_instance_id="web-test",
+            platform_sender_id="owner",
+            platform_conversation_id="conv-mm",
+            platform_message_id="platform-mm-2",
+            content_parts=[
+                {
+                    "content_type": "image",
+                    "inline_data": PNG_DATA_URI,
+                    "mime": "image/png",
+                }
+            ],
+        )
+    )
     assert in_memory_db.execute("SELECT COUNT(*) FROM payload_objects").fetchone()[0] == 1
     assert in_memory_db.execute("SELECT COUNT(*) FROM multimodal_assets").fetchone()[0] == 1
 
@@ -166,9 +171,12 @@ async def test_vision_cache_context_and_scoped_tool(in_memory_db, tmp_path):
 
     analyses = service.request_message_assets(result.message_id)
     assert len(analyses) == 1
-    assert in_memory_db.execute(
-        "SELECT COUNT(*) FROM tasks WHERE task_type='vision.analyze'"
-    ).fetchone()[0] == 1
+    assert (
+        in_memory_db.execute(
+            "SELECT COUNT(*) FROM tasks WHERE task_type='vision.analyze'"
+        ).fetchone()[0]
+        == 1
+    )
 
     first = await service.analyze(analyses[0].analysis_id)
     second = await service.analyze(analyses[0].analysis_id)
@@ -189,25 +197,31 @@ async def test_vision_cache_context_and_scoped_tool(in_memory_db, tmp_path):
     assert "A single white pixel." in content
     assert row["asset_id"] in content
     assert "iVBOR" not in content
-    assert "<external_data trust=\"unverified\">" in content
+    assert '<external_data trust="unverified">' in content
 
     tool = create_tool_def(make_service=lambda: service)
-    allowed = await tool.handler({"asset_id": row["asset_id"]}, ToolContext(
-        attempt_id="a1",
-        trace_id="tr1",
-        tool_call_id="tc1",
-        principal_id=row["sender_principal_id"],
-        session_id=row["session_id"],
-    ))
+    allowed = await tool.handler(
+        {"asset_id": row["asset_id"]},
+        ToolContext(
+            attempt_id="a1",
+            trace_id="tr1",
+            tool_call_id="tc1",
+            principal_id=row["sender_principal_id"],
+            session_id=row["session_id"],
+        ),
+    )
     assert '"vision_status": "succeeded"' in allowed
 
-    denied = await tool.handler({"asset_id": row["asset_id"]}, ToolContext(
-        attempt_id="a2",
-        trace_id="tr2",
-        tool_call_id="tc2",
-        principal_id="another-principal",
-        session_id="another-session",
-    ))
+    denied = await tool.handler(
+        {"asset_id": row["asset_id"]},
+        ToolContext(
+            attempt_id="a2",
+            trace_id="tr2",
+            tool_call_id="tc2",
+            principal_id="another-principal",
+            session_id="another-session",
+        ),
+    )
     assert '"vision_status": "denied"' in denied
     assert router.calls == 1
 
@@ -248,17 +262,29 @@ async def test_retryable_vision_task_creates_new_attempt(in_memory_db):
     )
 
     assert await worker.run_once("vision-worker") == TaskRunOutcome.failed
-    assert in_memory_db.execute(
-        "SELECT status FROM tasks WHERE task_id=?", (task.task_id,),
-    ).fetchone()[0] == "scheduled"
+    assert (
+        in_memory_db.execute(
+            "SELECT status FROM tasks WHERE task_id=?",
+            (task.task_id,),
+        ).fetchone()[0]
+        == "scheduled"
+    )
 
     assert await worker.run_once("vision-worker") == TaskRunOutcome.completed
-    assert in_memory_db.execute(
-        "SELECT status FROM tasks WHERE task_id=?", (task.task_id,),
-    ).fetchone()[0] == "completed"
-    assert in_memory_db.execute(
-        "SELECT COUNT(*) FROM task_attempts WHERE task_id=?", (task.task_id,),
-    ).fetchone()[0] == 2
+    assert (
+        in_memory_db.execute(
+            "SELECT status FROM tasks WHERE task_id=?",
+            (task.task_id,),
+        ).fetchone()[0]
+        == "completed"
+    )
+    assert (
+        in_memory_db.execute(
+            "SELECT COUNT(*) FROM task_attempts WHERE task_id=?",
+            (task.task_id,),
+        ).fetchone()[0]
+        == 2
+    )
 
 
 # ── MultimodalMetrics unit tests (PLAN-12 M6) ───────────────────

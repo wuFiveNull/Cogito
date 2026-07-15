@@ -33,10 +33,17 @@ class TestRssFetcher:
 
     @pytest.mark.asyncio
     async def test_fetch_returns_entries(self, fetcher, fake_rss_server):
-        fake_rss_server.set_entries([
-            {"title": "Hello World", "link": "http://x/1", "description": "First post", "guid": "g1"},
-            {"title": "Second", "link": "http://x/2", "description": "More", "guid": "g2"},
-        ])
+        fake_rss_server.set_entries(
+            [
+                {
+                    "title": "Hello World",
+                    "link": "http://x/1",
+                    "description": "First post",
+                    "guid": "g1",
+                },
+                {"title": "Second", "link": "http://x/2", "description": "More", "guid": "g2"},
+            ]
+        )
         conn = _make_connector(fake_rss_server.url)
         result = await fetcher.fetch(conn, None)
 
@@ -49,9 +56,11 @@ class TestRssFetcher:
 
     @pytest.mark.asyncio
     async def test_fetch_304_when_etag_matches(self, fetcher, fake_rss_server):
-        fake_rss_server.set_entries([
-            {"title": "A", "link": "http://x/a", "description": "", "guid": "ga"},
-        ])
+        fake_rss_server.set_entries(
+            [
+                {"title": "A", "link": "http://x/a", "description": "", "guid": "ga"},
+            ]
+        )
         conn = _make_connector(fake_rss_server.url)
 
         # 第一次：拿到 ETag
@@ -67,7 +76,9 @@ class TestRssFetcher:
 
     @pytest.mark.asyncio
     async def test_fetch_etag_sent_in_request(self, fetcher, fake_rss_server):
-        fake_rss_server.set_entries([{"title": "T", "link": "http://x/t", "description": "", "guid": "gt"}])
+        fake_rss_server.set_entries(
+            [{"title": "T", "link": "http://x/t", "description": "", "guid": "gt"}]
+        )
         conn = _make_connector(fake_rss_server.url)
         first = await fetcher.fetch(conn, None)
         etag = first.new_etag
@@ -80,7 +91,9 @@ class TestRssFetcher:
 
     @pytest.mark.asyncio
     async def test_fetch_timeout(self, fetcher, fake_rss_server):
-        fake_rss_server.set_entries([{"title": "T", "link": "http://x/t", "description": "", "guid": "gt"}])
+        fake_rss_server.set_entries(
+            [{"title": "T", "link": "http://x/t", "description": "", "guid": "gt"}]
+        )
         fake_rss_server.set_next_timeout(2.0)  # 2s 超时
         conn = _make_connector(fake_rss_server.url, timeout=1)
 
@@ -117,9 +130,11 @@ class TestRssFetcher:
 
     @pytest.mark.asyncio
     async def test_fetch_uses_link_when_no_guid(self, fetcher, fake_rss_server):
-        fake_rss_server.set_entries([
-            {"title": "No GUID", "link": "http://x/noguid", "description": ""},
-        ])
+        fake_rss_server.set_entries(
+            [
+                {"title": "No GUID", "link": "http://x/noguid", "description": ""},
+            ]
+        )
         conn = _make_connector(fake_rss_server.url)
         result = await fetcher.fetch(conn, None)
         assert isinstance(result, Fetched)

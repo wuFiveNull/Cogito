@@ -7,6 +7,7 @@
 - 熔断器触发 → degraded
 - name 冲突安装拒绝
 """
+
 from __future__ import annotations
 
 import json
@@ -36,9 +37,14 @@ def conn() -> sqlite3.Connection:
 
 
 class TestDiscover:
-    def _write_plugin(self, dir_path: str, pid: str, *,
-                      api_version: str = "1",
-                      permissions: list[str] | None = None) -> str:
+    def _write_plugin(
+        self,
+        dir_path: str,
+        pid: str,
+        *,
+        api_version: str = "1",
+        permissions: list[str] | None = None,
+    ) -> str:
         sub = os.path.join(dir_path, pid)
         os.makedirs(sub, exist_ok=True)
         manifest = {
@@ -51,15 +57,17 @@ class TestDiscover:
         }
         with open(os.path.join(sub, "plugin.yaml"), "w", encoding="utf-8") as f:
             # 手写 YAML 避免依赖
-            f.write(textwrap.dedent(f"""\
+            f.write(
+                textwrap.dedent(f"""\
                 id: {pid}
                 version: "1.0"
                 api_version: "{api_version}"
                 permissions:
-                {''.join(f'  - {p}\n' for p in (permissions or []))}
+                {"".join(f"  - {p}\n" for p in (permissions or []))}
                 entry_point: "{pid}.main:handler"
                 subprocess: true
-            """))
+            """)
+            )
         return sub
 
     def test_discover_builtin_path(self, conn, tmp_path: Path) -> None:
@@ -100,7 +108,9 @@ class TestDiscover:
 class TestPersistence:
     def test_install_persists_and_reload(self, conn, tmp_path: Path) -> None:
         m = PluginManifest(
-            plugin_id="persist", version="1.0", api_version="1",
+            plugin_id="persist",
+            version="1.0",
+            api_version="1",
             permissions=("memory.read", "memory.write"),
             entry_point="persist.main:handler",
         )
@@ -171,8 +181,7 @@ class TestDegradedOnCircuitBreak:
 
 class TestPermission:
     def test_permissions_preserved(self, conn, tmp_path: Path) -> None:
-        self._write_plugin(str(tmp_path), "secured",
-                          permissions=["memory.read", "fs.read"])
+        self._write_plugin(str(tmp_path), "secured", permissions=["memory.read", "fs.read"])
         rt = SqlitePluginRuntime(conn, builtin_paths=[str(tmp_path)])
         m = rt.discover()[0]
         installed = rt.install(m)
@@ -211,7 +220,8 @@ def _runnable_manifest(tmp_path: Path, *, permissions: tuple[str, ...] = ()) -> 
     plugin_dir = tmp_path / "runnable_plugin"
     plugin_dir.mkdir()
     (plugin_dir / "__init__.py").write_text(
-        "def register():\n    return 'ok'\n", encoding="utf-8",
+        "def register():\n    return 'ok'\n",
+        encoding="utf-8",
     )
     return PluginManifest(
         plugin_id="runnable-plugin",
@@ -255,7 +265,8 @@ class TestRuntimeLifecycle:
 
     def test_explicit_permission_grant_allows_start(self, conn, tmp_path: Path) -> None:
         runtime = SqlitePluginRuntime(
-            conn, granted_permissions={"filesystem.read"},
+            conn,
+            granted_permissions={"filesystem.read"},
         )
         runtime.install(_runnable_manifest(tmp_path, permissions=("filesystem.read",)))
         runtime.enable("runnable-plugin")

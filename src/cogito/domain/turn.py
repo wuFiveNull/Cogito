@@ -68,7 +68,9 @@ class Turn:
             "status": self.status.value,
             "priority": self.priority,
             "version": self.version,
-            "cancel_requested_at": self.cancel_requested_at.isoformat() if self.cancel_requested_at else None,
+            "cancel_requested_at": self.cancel_requested_at.isoformat()
+            if self.cancel_requested_at
+            else None,
             "active_attempt_id": self.active_attempt_id,
             "final_message_id": self.final_message_id,
             "created_at": self.created_at.isoformat(),
@@ -85,10 +87,14 @@ class Turn:
             status=TurnStatus(data.get("status", "accepted")),
             priority=data.get("priority", 80),
             version=data.get("version", 1),
-            cancel_requested_at=datetime.fromisoformat(data["cancel_requested_at"]) if data.get("cancel_requested_at") else None,
+            cancel_requested_at=datetime.fromisoformat(data["cancel_requested_at"])
+            if data.get("cancel_requested_at")
+            else None,
             active_attempt_id=data.get("active_attempt_id"),
             final_message_id=data.get("final_message_id"),
-            created_at=datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None,
+            created_at=datetime.fromisoformat(data["created_at"])
+            if data.get("created_at")
+            else None,
         )
 
     def __eq__(self, other: object) -> bool:
@@ -142,7 +148,9 @@ class RunAttempt:
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "worker_id": self.worker_id,
             "lease_version": self.lease_version,
-            "lease_expires_at": self.lease_expires_at.isoformat() if self.lease_expires_at else None,
+            "lease_expires_at": self.lease_expires_at.isoformat()
+            if self.lease_expires_at
+            else None,
             "heartbeat_at": self.heartbeat_at.isoformat() if self.heartbeat_at else None,
             "error_ref": self.error_ref,
         }
@@ -155,12 +163,20 @@ class RunAttempt:
             attempt_no=data.get("attempt_no", 1),
             status=RunAttemptStatus(data.get("status", "created")),
             checkpoint_ref=data.get("checkpoint_ref"),
-            started_at=datetime.fromisoformat(data["started_at"]) if data.get("started_at") else None,
-            finished_at=datetime.fromisoformat(data["finished_at"]) if data.get("finished_at") else None,
+            started_at=datetime.fromisoformat(data["started_at"])
+            if data.get("started_at")
+            else None,
+            finished_at=datetime.fromisoformat(data["finished_at"])
+            if data.get("finished_at")
+            else None,
             worker_id=data.get("worker_id", ""),
             lease_version=data.get("lease_version", 1),
-            lease_expires_at=datetime.fromisoformat(data["lease_expires_at"]) if data.get("lease_expires_at") else None,
-            heartbeat_at=datetime.fromisoformat(data["heartbeat_at"]) if data.get("heartbeat_at") else None,
+            lease_expires_at=datetime.fromisoformat(data["lease_expires_at"])
+            if data.get("lease_expires_at")
+            else None,
+            heartbeat_at=datetime.fromisoformat(data["heartbeat_at"])
+            if data.get("heartbeat_at")
+            else None,
             error_ref=data.get("error_ref", ""),
         )
 
@@ -179,4 +195,6 @@ class RunAttempt:
         return self.attempt_id == other.attempt_id
 
     def __repr__(self) -> str:
-        return f"RunAttempt({self.attempt_id}, turn={self.turn_id}, #{self.attempt_no}, {self.status})"
+        return (
+            f"RunAttempt({self.attempt_id}, turn={self.turn_id}, #{self.attempt_no}, {self.status})"
+        )

@@ -37,15 +37,27 @@ class SideEffectReceiptRepository:
             "request_hash, side_effect_class, status, reconcile_status, raw_ref, summary, "
             "attempt_id, attempt_type, created_at, audit_id) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (record.receipt_id, record.capability_id, record.operation_id,
-             record.request_hash, record.side_effect_class, record.status,
-             record.reconcile_status, record.raw_ref, record.summary,
-             record.attempt_id, record.attempt_type, record.created_at, record.audit_id),
+            (
+                record.receipt_id,
+                record.capability_id,
+                record.operation_id,
+                record.request_hash,
+                record.side_effect_class,
+                record.status,
+                record.reconcile_status,
+                record.raw_ref,
+                record.summary,
+                record.attempt_id,
+                record.attempt_type,
+                record.created_at,
+                record.audit_id,
+            ),
         )
 
     def get(self, receipt_id: str) -> ReceiptRecord | None:
         row = self._conn.execute(
-            "SELECT * FROM side_effect_receipts WHERE receipt_id=?", (receipt_id,),
+            "SELECT * FROM side_effect_receipts WHERE receipt_id=?",
+            (receipt_id,),
         ).fetchone()
         return self._row_to_record(row) if row else None
 
@@ -74,7 +86,9 @@ class SideEffectReceiptRepository:
         )
 
     def update_reconcile(
-        self, receipt_id: str, reconcile_status: str,
+        self,
+        receipt_id: str,
+        reconcile_status: str,
         summary: str | None = None,
     ) -> None:
         self._conn.execute(

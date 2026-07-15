@@ -20,11 +20,10 @@ import sqlite3
 from datetime import datetime
 from typing import NamedTuple
 
+from cogito.contracts.clock import Clock, ProductionClock, epoch_ms, from_epoch_ms
 from cogito.domain.state_machines import validate_transition_turn
 from cogito.domain.turn import RunAttempt, RunAttemptStatus, Turn, TurnStatus
-from cogito.contracts.clock import Clock, ProductionClock
 from cogito.service.unit_of_work import UnitOfWork
-from cogito.contracts.clock import epoch_ms, from_epoch_ms
 
 DEFAULT_LEASE_TTL_S = 120
 
@@ -37,8 +36,12 @@ class ClaimedRun(NamedTuple):
 class Dispatcher:
     """Turn 调度器 —— 领取、运行、完成、心跳。"""
 
-    def __init__(self, conn: sqlite3.Connection, lease_ttl_s: int = DEFAULT_LEASE_TTL_S,
-                 clock: Clock | None = None) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        lease_ttl_s: int = DEFAULT_LEASE_TTL_S,
+        clock: Clock | None = None,
+    ) -> None:
         self._conn = conn
         self._lease_ttl_s = lease_ttl_s
         self._clock = clock or ProductionClock()
@@ -63,7 +66,8 @@ class Dispatcher:
             # 避免高优先级任务永久饥饿低优先级任务
             aging_threshold_ms = 5 * 60 * 1000  # 5 分钟
             now_ms = epoch_ms(now)
-            turn_row = self._conn.execute("""
+            turn_row = self._conn.execute(
+                """
                 SELECT t.* FROM turns t
                 JOIN sessions s ON s.session_id = t.session_id
                 WHERE t.status = 'queued'
@@ -79,7 +83,9 @@ class Dispatcher:
                   END) DESC,
                   t.created_at ASC
                 LIMIT 1
-            """, (now_ms, aging_threshold_ms)).fetchone()
+            """,
+                (now_ms, aging_threshold_ms),
+            ).fetchone()
 
             if turn_row is None:
                 return None
@@ -117,9 +123,9 @@ class Dispatcher:
 
             updated = self._conn.execute(
                 "UPDATE turns SET status=?, active_attempt_id=?, version=version+1 "
-                "WHERE turn_id=? AND version=? AND status IN ('queued','waiting_user','waiting_external')",
-                (TurnStatus.running.value, attempt.attempt_id,
-                 turn.turn_id, turn.version),
+                "WHERE turn_id=? AND version=? "
+                "AND status IN ('queued','waiting_user','waiting_external')",
+                (TurnStatus.running.value, attempt.attempt_id, turn.turn_id, turn.version),
             )
             if updated.rowcount == 0:
                 return None
@@ -132,9 +138,16 @@ class Dispatcher:
                 "INSERT INTO run_attempts (attempt_id, turn_id, attempt_no, status, "
                 "started_at, worker_id, lease_version, lease_expires_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (attempt.attempt_id, attempt.turn_id, attempt.attempt_no,
-                 RunAttemptStatus.running.value, epoch_ms(attempt.started_at),
-                 worker_id, attempt.lease_version, lease_expires_ms),
+                (
+                    attempt.attempt_id,
+                    attempt.turn_id,
+                    attempt.attempt_no,
+                    RunAttemptStatus.running.value,
+                    epoch_ms(attempt.started_at),
+                    worker_id,
+                    attempt.lease_version,
+                    lease_expires_ms,
+                ),
             )
 
             attempt.status = RunAttemptStatus.running
@@ -169,15 +182,25 @@ class Dispatcher:
 
         if _uow is not None:
             return self._complete_internal(
-                _uow, turn_id, attempt_id, expected_turn_version,
-                worker_id, lease_version, now_ms_val,
+                _uow,
+                turn_id,
+                attempt_id,
+                expected_turn_version,
+                worker_id,
+                lease_version,
+                now_ms_val,
                 final_message_id=final_message_id,
             )
 
         with UnitOfWork(self._conn) as uow:
             result = self._complete_internal(
-                uow, turn_id, attempt_id, expected_turn_version,
-                worker_id, lease_version, now_ms_val,
+                uow,
+                turn_id,
+                attempt_id,
+                expected_turn_version,
+                worker_id,
+                lease_version,
+                now_ms_val,
                 final_message_id=final_message_id,
             )
             if result:
@@ -202,8 +225,15 @@ class Dispatcher:
             "WHERE attempt_id=? AND status='running' AND turn_id=? "
             "AND worker_id=? AND lease_version=? "
             "AND lease_expires_at IS NOT NULL AND lease_expires_at > ?",
-            (RunAttemptStatus.succeeded.value, now_ms_val,
-             attempt_id, turn_id, worker_id, lease_version, now_ms_val),
+            (
+                RunAttemptStatus.succeeded.value,
+                now_ms_val,
+                attempt_id,
+                turn_id,
+                worker_id,
+                lease_version,
+                now_ms_val,
+            ),
         )
 
         if attempt_updated.rowcount == 0:
@@ -213,15 +243,26 @@ class Dispatcher:
             turn_updated = self._conn.execute(
                 "UPDATE turns SET status=?, final_message_id=?, version=version+1, completed_at=? "
                 "WHERE turn_id=? AND version=? AND status='running' AND active_attempt_id=?",
-                (TurnStatus.completed.value, final_message_id, now_ms_val,
-                 turn_id, expected_turn_version, attempt_id),
+                (
+                    TurnStatus.completed.value,
+                    final_message_id,
+                    now_ms_val,
+                    turn_id,
+                    expected_turn_version,
+                    attempt_id,
+                ),
             )
         else:
             turn_updated = self._conn.execute(
                 "UPDATE turns SET status=?, version=version+1, completed_at=? "
                 "WHERE turn_id=? AND version=? AND status='running' AND active_attempt_id=?",
-                (TurnStatus.completed.value, now_ms_val,
-                 turn_id, expected_turn_version, attempt_id),
+                (
+                    TurnStatus.completed.value,
+                    now_ms_val,
+                    turn_id,
+                    expected_turn_version,
+                    attempt_id,
+                ),
             )
 
         return turn_updated.rowcount > 0
@@ -244,8 +285,15 @@ class Dispatcher:
                 "WHERE attempt_id=? AND status='running' AND turn_id=? "
                 "AND worker_id=? AND lease_version=? "
                 "AND lease_expires_at IS NOT NULL AND lease_expires_at > ?",
-                (RunAttemptStatus.failed.value, now_ms_val,
-                 attempt_id, turn_id, worker_id, lease_version, now_ms_val),
+                (
+                    RunAttemptStatus.failed.value,
+                    now_ms_val,
+                    attempt_id,
+                    turn_id,
+                    worker_id,
+                    lease_version,
+                    now_ms_val,
+                ),
             )
 
             if attempt_updated.rowcount == 0:
@@ -329,8 +377,7 @@ class Dispatcher:
             updated = self._conn.execute(
                 "UPDATE turns SET status=?, active_attempt_id=?, version=version+1 "
                 "WHERE turn_id=? AND version=? AND active_attempt_id IS NULL",
-                (TurnStatus.running.value, attempt.attempt_id,
-                 turn.turn_id, turn.version),
+                (TurnStatus.running.value, attempt.attempt_id, turn.turn_id, turn.version),
             )
             if updated.rowcount == 0:
                 return None
@@ -343,9 +390,17 @@ class Dispatcher:
                 "INSERT INTO run_attempts (attempt_id, turn_id, attempt_no, status, "
                 "started_at, worker_id, lease_version, lease_expires_at, checkpoint_ref) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (attempt.attempt_id, attempt.turn_id, attempt.attempt_no,
-                 RunAttemptStatus.running.value, epoch_ms(attempt.started_at),
-                 worker_id, attempt.lease_version, lease_expires_ms, checkpoint_ref),
+                (
+                    attempt.attempt_id,
+                    attempt.turn_id,
+                    attempt.attempt_no,
+                    RunAttemptStatus.running.value,
+                    epoch_ms(attempt.started_at),
+                    worker_id,
+                    attempt.lease_version,
+                    lease_expires_ms,
+                    checkpoint_ref,
+                ),
             )
             uow.commit()
 
@@ -373,9 +428,15 @@ class Dispatcher:
                 "WHERE attempt_id=? AND turn_id=? AND worker_id=? AND lease_version=? "
                 "AND status='running' "
                 "AND lease_expires_at IS NOT NULL AND lease_expires_at > ?",
-                (new_expires_ms, epoch_ms(now),
-                 attempt_id, turn_id, worker_id, lease_version,
-                 epoch_ms(now)),
+                (
+                    new_expires_ms,
+                    epoch_ms(now),
+                    attempt_id,
+                    turn_id,
+                    worker_id,
+                    lease_version,
+                    epoch_ms(now),
+                ),
             )
             uow.commit()
             return updated.rowcount > 0

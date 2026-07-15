@@ -1,4 +1,5 @@
 """PR-I4: Command Envelope + Control Plane — Plan 05 M4."""
+
 from __future__ import annotations
 
 import pytest

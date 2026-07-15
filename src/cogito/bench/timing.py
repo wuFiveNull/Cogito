@@ -52,15 +52,11 @@ def finalize() -> None:
     global _active, _last
     if _active is None:
         return
-    _active["total_ms"] = round(
-        (time.perf_counter_ns() - _active["wall_ns"]) / 1_000_000, 3
-    )
+    _active["total_ms"] = round((time.perf_counter_ns() - _active["wall_ns"]) / 1_000_000, 3)
     # 计算相邻 checkpoint 之间的段落耗时
     cps = _active["checkpoints"]
     for i in range(1, len(cps)):
-        cps[i]["segment_ms"] = round(
-            cps[i]["offset_ms"] - cps[i - 1]["offset_ms"], 3
-        )
+        cps[i]["segment_ms"] = round(cps[i]["offset_ms"] - cps[i - 1]["offset_ms"], 3)
     if cps:
         cps[0]["segment_ms"] = cps[0]["offset_ms"]
     _last = _active

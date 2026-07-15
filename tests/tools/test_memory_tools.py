@@ -10,6 +10,7 @@ SqliteMemoryService 具体实现；测试使用协议类型传入。
 - forget_memory 无 writer / 无参数 / 各删除模式
 - recall_memory 检索相关记忆
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -80,7 +81,8 @@ class TestRememberMemoryTool:
 
         tool_def = create_tool_def(writer=None)
         result = await tool_def.handler(
-            {"subject": "user", "predicate": "lang", "value": "Python"}, ctx,
+            {"subject": "user", "predicate": "lang", "value": "Python"},
+            ctx,
         )
         assert "memory writer not available" in result.lower()
 
@@ -128,10 +130,12 @@ class TestRememberMemoryTool:
 
         tool_def = create_tool_def(writer=memory_writer)
         r1 = await tool_def.handler(
-            {"subject": "user", "predicate": "lang", "value": "Python"}, ctx,
+            {"subject": "user", "predicate": "lang", "value": "Python"},
+            ctx,
         )
         r2 = await tool_def.handler(
-            {"subject": "user", "predicate": "lang", "value": "Python"}, ctx,
+            {"subject": "user", "predicate": "lang", "value": "Python"},
+            ctx,
         )
         # 提取 memory_id
         id1 = r1.split("memory_id=")[-1].strip(")")
@@ -195,7 +199,8 @@ class TestForgetMemoryTool:
         # 先创建一条记忆
         remember = create_remember(writer=memory_writer)
         saved = await remember.handler(
-            {"subject": "user", "predicate": "lang", "value": "Python"}, ctx,
+            {"subject": "user", "predicate": "lang", "value": "Python"},
+            ctx,
         )
         memory_id = saved.split("memory_id=")[-1].strip(")")
 
@@ -219,7 +224,8 @@ class TestForgetMemoryTool:
 
         remember = create_remember(writer=memory_writer)
         await remember.handler(
-            {"subject": "user", "predicate": "lang", "value": "Python"}, ctx,
+            {"subject": "user", "predicate": "lang", "value": "Python"},
+            ctx,
         )
 
         from cogito.tools.forget_memory import create_tool_def as create_forget
@@ -234,10 +240,12 @@ class TestForgetMemoryTool:
 
         remember = create_remember(writer=memory_writer)
         await remember.handler(
-            {"subject": "user", "predicate": "lang", "value": "Python"}, ctx,
+            {"subject": "user", "predicate": "lang", "value": "Python"},
+            ctx,
         )
         await remember.handler(
-            {"subject": "user", "predicate": "editor", "value": "VS Code"}, ctx,
+            {"subject": "user", "predicate": "editor", "value": "VS Code"},
+            ctx,
         )
 
         from cogito.tools.forget_memory import create_tool_def as create_forget

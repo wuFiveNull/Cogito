@@ -2,6 +2,7 @@
 
 PLAN-13 MEM-P0-02：文档指数衰减公式 vs 代码乘法因子 → 以文档为准。
 """
+
 from __future__ import annotations
 
 import math
@@ -22,6 +23,7 @@ from cogito.store.memory_repo import MemoryRepository
 
 
 # ── 纯函数数值测试 ──
+
 
 class TestComputeRetrievalWeight:
     def test_deterministic(self):
@@ -74,38 +76,62 @@ class TestComputeRetrievalWeight:
         now = datetime.now(UTC)
         earlier = now - timedelta(days=5)
         w1 = compute_weight_for_item(
-            importance=0.8, explicitness="explicit_user_statement",
-            status="confirmed", kind="fact",
-            last_active_at=earlier, now=now, reinforcement=0,
-            emotional_weight=0.5, policy=MemoryWeightPolicy(),
+            importance=0.8,
+            explicitness="explicit_user_statement",
+            status="confirmed",
+            kind="fact",
+            last_active_at=earlier,
+            now=now,
+            reinforcement=0,
+            emotional_weight=0.5,
+            policy=MemoryWeightPolicy(),
         )
         # 相同时差不同 tz-aware now 应一致
         later = now + timedelta(days=5)
         w2 = compute_weight_for_item(
-            importance=0.8, explicitness="explicit_user_statement",
-            status="confirmed", kind="fact",
-            last_active_at=now, now=later, reinforcement=0,
-            emotional_weight=0.5, policy=MemoryWeightPolicy(),
+            importance=0.8,
+            explicitness="explicit_user_statement",
+            status="confirmed",
+            kind="fact",
+            last_active_at=now,
+            now=later,
+            reinforcement=0,
+            emotional_weight=0.5,
+            policy=MemoryWeightPolicy(),
         )
         assert abs(w1 - w2) < 1e-9
 
 
 # ── Explain / Status ──
 
+
 class TestWeightExplainStatus:
     def test_explain_returns_all_buckets(self):
         now = datetime.now(UTC)
         exp = explain_weight(
-            importance=0.8, explicitness="explicit_user_statement",
-            status="confirmed", kind="fact",
-            last_active_at=now - timedelta(days=10), now=now,
-            reinforcement=2, emotional_weight=0.7,
+            importance=0.8,
+            explicitness="explicit_user_statement",
+            status="confirmed",
+            kind="fact",
+            last_active_at=now - timedelta(days=10),
+            now=now,
+            reinforcement=2,
+            emotional_weight=0.7,
             policy=MemoryWeightPolicy(),
         )
-        for key in ("base_score", "source_trust", "confirmation_score",
-                    "kind_decay_rate", "days_since_last_active", "decay_factor",
-                    "reinforcement", "reinforcement_bonus", "emotional_bonus",
-                    "retrieval_weight", "algorithm_version"):
+        for key in (
+            "base_score",
+            "source_trust",
+            "confirmation_score",
+            "kind_decay_rate",
+            "days_since_last_active",
+            "decay_factor",
+            "reinforcement",
+            "reinforcement_bonus",
+            "emotional_bonus",
+            "retrieval_weight",
+            "algorithm_version",
+        ):
             assert key in exp
 
     def test_weight_status_searchable(self):
@@ -120,12 +146,14 @@ class TestWeightExplainStatus:
 
 # ── Repository recompute ──
 
+
 class TestRecomputeWeight:
     @pytest.fixture
     def db(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         from cogito.store.migration import migrate
+
         migrate(conn)
         return conn
 
@@ -137,9 +165,15 @@ class TestRecomputeWeight:
             "explicitness, confidence, importance, status, created_at, last_retrieved_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?, ?)",
             (
-                mid, kw.get("kind", "fact"), "s", "p", "v", "owner",
+                mid,
+                kw.get("kind", "fact"),
+                "s",
+                "p",
+                "v",
+                "owner",
                 kw.get("explicitness", "explicit_user_statement"),
-                1.0, kw.get("importance", 0.8),
+                1.0,
+                kw.get("importance", 0.8),
                 datetime.now(UTC).isoformat(),
                 kw.get("retrieved_at"),
             ),
@@ -164,10 +198,15 @@ class TestRecomputeWeight:
         now = datetime.now(UTC)
         mid = self._insert(db)
         from cogito.store.signal_repo import SignalRepository
+
         sig_repo = SignalRepository(db)
-        sig_repo.insert(__import__("cogito.store.signal_repo", fromlist=["MemorySignal"]).MemorySignal(
-            signal_id="s1", memory_id=mid, signal_type="user_affirmed",
-        ))
+        sig_repo.insert(
+            __import__("cogito.store.signal_repo", fromlist=["MemorySignal"]).MemorySignal(
+                signal_id="s1",
+                memory_id=mid,
+                signal_type="user_affirmed",
+            )
+        )
         repo = MemoryRepository(db)
         w_with_signals = repo.recompute_weight(memory_id=mid, now=now, signals_repo=sig_repo)
         # 有 affirmed（reinforcement=2）应比纯 importance 高

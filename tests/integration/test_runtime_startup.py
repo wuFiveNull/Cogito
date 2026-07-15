@@ -5,6 +5,7 @@ Drives the runtime end-to-end through the **public Python API**
 (`Config.load`, `RuntimeApplication.build`, `process_terminal_message`),
 replacing the previous `python -m cogito` subprocess approach (PLAN-09 M0).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -82,19 +83,18 @@ class TestNewWorkspaceStubInteractive:
                 assert db_path.exists()
                 conn = _open_db(db_path)
                 try:
-                    row = conn.execute(
-                        "SELECT MAX(version) FROM _schema_version"
-                    ).fetchone()
+                    row = conn.execute("SELECT MAX(version) FROM _schema_version").fetchone()
                     from cogito.store.migration import _discover
+
                     expected = max(mf.version for mf in _discover())
                     assert row[0] == expected, f"expected v{expected}, got v{row[0]}"
 
                     fk = conn.execute("PRAGMA foreign_key_check").fetchall()
                     assert fk == [], f"FK violations: {fk}"
 
-                    u = conn.execute(
-                        "SELECT COUNT(*) FROM messages WHERE role='user'"
-                    ).fetchone()[0]
+                    u = conn.execute("SELECT COUNT(*) FROM messages WHERE role='user'").fetchone()[
+                        0
+                    ]
                     assert u >= 1
 
                     a = conn.execute(
@@ -192,10 +192,9 @@ class TestNewWorkspaceStubInteractive:
                 after = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
                 assert after > before
                 from cogito.store.migration import _discover
+
                 expected = max(mf.version for mf in _discover())
-                v = conn.execute(
-                    "SELECT MAX(version) FROM _schema_version"
-                ).fetchone()[0]
+                v = conn.execute("SELECT MAX(version) FROM _schema_version").fetchone()[0]
                 assert v == expected
             finally:
                 conn.close()
@@ -224,15 +223,17 @@ class TestRecoveryAtStartup:
             try:
                 # Inject a fake owned, running Turn with an expired lease directly
                 inbound = InboundService(conn)
-                res = inbound.accept(ChannelEnvelope(
-                    channel_type="terminal",
-                    channel_instance_id="terminal",
-                    platform_sender_id="owner",
-                    platform_conversation_id="terminal:default",
-                    platform_message_id="test:1",
-                    content_parts=[{"content_type": "text", "inline_data": "hi"}],
-                    received_at=datetime.now(UTC).isoformat(),
-                ))
+                res = inbound.accept(
+                    ChannelEnvelope(
+                        channel_type="terminal",
+                        channel_instance_id="terminal",
+                        platform_sender_id="owner",
+                        platform_conversation_id="terminal:default",
+                        platform_message_id="test:1",
+                        content_parts=[{"content_type": "text", "inline_data": "hi"}],
+                        received_at=datetime.now(UTC).isoformat(),
+                    )
+                )
                 turn_id = res.turn_id
                 attempt_id = turn_id
                 conn.execute(
@@ -244,8 +245,7 @@ class TestRecoveryAtStartup:
                     (attempt_id, turn_id, "stale-worker"),
                 )
                 conn.execute(
-                    "UPDATE turns SET status='running', active_attempt_id=? "
-                    "WHERE turn_id=?",
+                    "UPDATE turns SET status='running', active_attempt_id=? WHERE turn_id=?",
                     (attempt_id, turn_id),
                 )
                 conn.commit()
@@ -259,9 +259,7 @@ class TestRecoveryAtStartup:
 
             conn = _open_db(db_path)
             try:
-                t = conn.execute(
-                    "SELECT status FROM turns WHERE turn_id=?", (turn_id,)
-                ).fetchone()
+                t = conn.execute("SELECT status FROM turns WHERE turn_id=?", (turn_id,)).fetchone()
                 # Accept either reclaimed (queued) or reclaimed-then-completed
                 assert t["status"] != "running"
             finally:
@@ -271,17 +269,22 @@ class TestRecoveryAtStartup:
     def test_close_is_idempotent(self) -> None:
         """Calling close() twice does not raise."""
         from cogito.application import RuntimeApplication
+
         app = RuntimeApplication.build(Config.load(EXAMPLE_CONFIG))
         app.close()
         app.close()  # must not raise
 
     def test_recovery_counts_are_reported(self) -> None:
         from cogito.application import RuntimeApplication
+
         app = RuntimeApplication.build(Config.load(EXAMPLE_CONFIG))
         try:
             counts = app.recovery_counts()
             assert set(counts.keys()) >= {
-                "outbox_leases", "delivery_leases", "stale_turns", "stale_tasks",
+                "outbox_leases",
+                "delivery_leases",
+                "stale_turns",
+                "stale_tasks",
             }
         finally:
             app.close()

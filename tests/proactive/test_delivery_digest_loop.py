@@ -6,14 +6,23 @@
 - SqliteDeliveryService: enqueue 生成 pending Delivery
 - fake schedule 到期 requeue
 """
+
 from __future__ import annotations
 
 import asyncio
 import sqlite3
+from datetime import UTC, datetime
 
 import pytest
 
 from cogito.domain.task import Task, TaskStatus
+from cogito.domain.connector import (
+    Connector,
+    ConnectorItem,
+    ConnectorRawItem,
+    ItemStatus,
+)
+from cogito.config import ProactiveConfig
 from cogito.service.delivery_service import DeliveryRequest
 from cogito.service.event_consumers import SourceEventIngestedConsumer
 from cogito.service.outbox_worker import OutboxLease
@@ -25,6 +34,12 @@ from cogito.service.proactive_delivery_service import (
     prepare_delivery_from_request,
 )
 from cogito.service import task_handlers as th_module
+from cogito.store.connector_repo import (
+    ConnectorItemRepository,
+    ConnectorRawRepository,
+    ConnectorRepository,
+)
+from cogito.store.proactive_repo import ProactivePolicy, ProactivePolicyRepository
 
 
 # ── 测试夹具 ─────────────────────────────────────────────────────────────────
@@ -37,6 +52,7 @@ def _fresh_db():
     conn.execute("PRAGMA busy_timeout=5000;")
     conn.row_factory = sqlite3.Row
     from cogito.store.migration import migrate
+
     migrate(conn)
     return conn
 
@@ -67,10 +83,21 @@ def _seed_candidate(conn, candidate_id="c-1", topic="ai-models"):
         " policy_version, idempotency_key, source_event_ids_json, created_at, status) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
-            candidate_id, "owner", "content", topic,
-            "test: summary", 0.7, 0.8, 0.6, 0.8,
-            "evaluate", 1, f"k-{candidate_id}", '["evt-1"]',
-            1_700_000_000_000, "queued",
+            candidate_id,
+            "owner",
+            "content",
+            topic,
+            "test: summary",
+            0.7,
+            0.8,
+            0.6,
+            0.8,
+            "evaluate",
+            1,
+            f"k-{candidate_id}",
+            '["evt-1"]',
+            1_700_000_000_000,
+            "queued",
         ),
     )
     conn.commit()
@@ -83,16 +110,21 @@ def test_delivery_service_enqueue_creates_pending(memory_db):
     svc = SqliteDeliveryService(memory_db)
 
     async def _do():
-        ref = await svc.enqueue(DeliveryRequest(
-            target={"channel": "web", "principal_id": "owner"},
-            content_ref="hello",
-            idempotency_key="x",
-        ))
+        ref = await svc.enqueue(
+            DeliveryRequest(
+                target={"channel": "web", "principal_id": "owner"},
+                content_ref="hello",
+                idempotency_key="x",
+            )
+        )
         return ref
+
     import asyncio
+
     delivery_ref = asyncio.run(_do())
     row = memory_db.execute(
-        "SELECT status FROM deliveries WHERE delivery_id=?", (delivery_ref.delivery_id,),
+        "SELECT status FROM deliveries WHERE delivery_id=?",
+        (delivery_ref.delivery_id,),
     ).fetchone()
     assert row is not None
     assert row["status"] == "pending"
@@ -112,7 +144,8 @@ def test_scheduled_request_created(memory_db):
         scheduled_at_ms=1_700_000_000_000,
     )
     row = memory_db.execute(
-        "SELECT * FROM scheduled_delivery_requests WHERE request_id=?", (req_id,),
+        "SELECT * FROM scheduled_delivery_requests WHERE request_id=?",
+        (req_id,),
     ).fetchone()
     assert row is not None
     assert row["status"] == "pending"
@@ -175,8 +208,10 @@ def test_proactive_delivery_ready_handler_dry_run():
         scheduled_at_ms=1_700_000_000_000,
     )
     task = Task(
-        task_id="t1", task_type="proactive.delivery.ready",
-        payload_ref=req_id, status=TaskStatus.queued,
+        task_id="t1",
+        task_type="proactive.delivery.ready",
+        payload_ref=req_id,
+        status=TaskStatus.queued,
     )
     ctx = th_module.TaskHandlerContext(
         connection_factory=lambda p=task_db: p,
@@ -191,6 +226,91 @@ def test_proactive_delivery_ready_handler_dry_run():
         task_db.close()
     except Exception:
         pass
+
+
+def test_proactive_delivery_ready_honors_config_dry_run_with_live_service():
+    task_db = _fresh_db()
+    _seed_candidate(task_db)
+    req_id = create_scheduled_request(
+        task_db,
+        candidate_id="c-1",
+        content_ref="must-not-send",
+        suggested_target={"adapter_id": "web", "conversation_id": "proactive:owner"},
+        reason="historical-task",
+        scheduled_at_ms=1_700_000_000_000,
+    )
+
+    class FakeDelivery:
+        def __init__(self):
+            self.requests = []
+
+        async def enqueue(self, request):
+            self.requests.append(request)
+            return "unexpected-delivery"
+
+    delivery = FakeDelivery()
+    task = Task(
+        task_id="t-live-service",
+        task_type="proactive.delivery.ready",
+        payload_ref=req_id,
+        status=TaskStatus.queued,
+    )
+    ctx = th_module.TaskHandlerContext(
+        connection_factory=lambda p=task_db: p,
+        delivery_service=delivery,
+        proactive_config=ProactiveConfig(enabled=True, dry_run=True),
+    )
+
+    result = asyncio.run(th_module._handle_proactive_delivery_ready(task, ctx))
+
+    assert "dry_run" in result
+    assert delivery.requests == []
+
+
+def test_historical_web_request_gets_complete_delivery_target():
+    task_db = _fresh_db()
+    _seed_candidate(task_db)
+    ProactivePolicyRepository(task_db).save(
+        ProactivePolicy(
+            policy_id="policy-live",
+            principal_id="owner",
+            dry_run=False,
+        )
+    )
+    req_id = create_scheduled_request(
+        task_db,
+        candidate_id="c-1",
+        content_ref="historical-content",
+        suggested_target={"channel": "web", "principal_id": "owner"},
+        reason="created-before-complete-targets",
+        scheduled_at_ms=1_700_000_000_000,
+    )
+
+    class FakeDelivery:
+        def __init__(self):
+            self.requests = []
+
+        async def enqueue(self, request):
+            self.requests.append(request)
+            return "delivery-historical"
+
+    delivery = FakeDelivery()
+    result = asyncio.run(
+        th_module._deliver_scheduled_request_async(
+            task_db,
+            req_id,
+            delivery,
+            proactive_config=ProactiveConfig(enabled=True, dry_run=False),
+        )
+    )
+
+    assert result == "converted -> delivery-historical"
+    assert delivery.requests[0].target == {
+        "channel": "web",
+        "adapter_id": "web",
+        "conversation_id": "proactive:owner",
+        "principal_id": "owner",
+    }
 
 
 def test_mark_request_converted_links(memory_db):
@@ -216,13 +336,79 @@ def test_mark_request_converted_links(memory_db):
 
 def test_digest_seeded(memory_db):
     """已迁移后 proactive_candidates / proactive_policies / proactive_decisions_v2
-     和 event_consumptions 表已就位。"""
+    和 event_consumptions 表已就位。"""
     tables = {
-        r[0] for r in memory_db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
+        r[0]
+        for r in memory_db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
     }
-    for t in ("scheduled_delivery_requests", "event_consumptions",
-              "proactive_candidates", "proactive_policies",
-              "proactive_decisions_v2"):
+    for t in (
+        "scheduled_delivery_requests",
+        "event_consumptions",
+        "proactive_candidates",
+        "proactive_policies",
+        "proactive_decisions_v2",
+    ):
         assert t in tables, f"table {t} missing"
+
+
+def test_digest_publish_renders_topic_and_marks_sent(memory_db):
+    connector = Connector(
+        connector_id="c-digest",
+        connector_type="mcp",
+        name="digest-source",
+        url="mcp://digest",
+    )
+    ConnectorRepository(memory_db).insert(connector)
+    raw = ConnectorRawItem(
+        connector_id=connector.connector_id,
+        source_item_id="raw-1",
+        content_hash="raw-hash",
+    )
+    ConnectorRawRepository(memory_db).insert(raw)
+    item = ConnectorItem(
+        connector_id=connector.connector_id,
+        raw_item_id=raw.raw_item_id,
+        source_item_id="item-1",
+        title="Digest item",
+        summary="Digest body",
+        content_hash="item-hash",
+        relevance=0.9,
+        status=ItemStatus.digest,
+        topic="ai-models",
+        created_at=datetime.now(UTC),
+    )
+    ConnectorItemRepository(memory_db).insert(item)
+    ProactivePolicyRepository(memory_db).save(
+        ProactivePolicy(
+            policy_id="policy-live",
+            principal_id="owner",
+            dry_run=False,
+        )
+    )
+    memory_db.commit()
+
+    class FakeDelivery:
+        def __init__(self):
+            self.requests = []
+
+        async def enqueue(self, request):
+            self.requests.append(request)
+            return "delivery-digest"
+
+    delivery = FakeDelivery()
+    result = asyncio.run(
+        th_module._publish_digest_async(
+            memory_db,
+            "owner",
+            datetime.now(UTC).strftime("%Y-%m-%d"),
+            "ai-models",
+            delivery,
+            proactive_config=ProactiveConfig(enabled=True, dry_run=False),
+        )
+    )
+
+    assert result.startswith("sent ->")
+    assert len(delivery.requests) == 1
+    assert delivery.requests[0].target["adapter_id"] == "web"
+    row = memory_db.execute("SELECT status FROM digests LIMIT 1").fetchone()
+    assert row["status"] == "sent"

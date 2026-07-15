@@ -8,9 +8,9 @@ Port（Protocol）允许：
 - 测试注入 Fake 实现。
 - 失败时返回 None（由调用方做 fail-safe 处理，不按最低能量增强主动性）。
 """
+
 from __future__ import annotations
 
-import sqlite3
 from datetime import UTC, datetime
 from typing import Protocol
 

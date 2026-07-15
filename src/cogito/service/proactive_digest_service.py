@@ -7,9 +7,9 @@ Digest 分桶 key: principal_id + digest_date + topic （ACCESS-DELIVERY §4.2�
 本期实现：确定性模板渲染（按 relevance 倒序 + topic 分桶）。
 模型 polishing 占位（按设计可选）。
 """
+
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
 import time
@@ -25,15 +25,16 @@ def assemble_and_render(
     conn: sqlite3.Connection,
     *,
     principal_id: str,
-    digest_date: str,       # YYYY-MM-DD
+    digest_date: str,  # YYYY-MM-DD
     topic: str = "general",
-    model_router=None,      # 可选，本版本未用
+    model_router=None,  # 可选，本版本未用
 ) -> tuple[str, str] | None:
     """把 status='digest' 且未消费的 connector_items 加入/创建 digest 桶，
     渲染 markdown 文本。返回 (digest_id, content_text) 或 None。"""
     conn.row_factory = sqlite3.Row
     # 1. 查找该 (principal, date, topic) 桶
     from cogito.store.digest_repo import DigestRepository
+
     repo = DigestRepository(conn)
     existing = repo.find_by_date_topic(principal_id, digest_date, topic)
 
@@ -44,7 +45,7 @@ def assemble_and_render(
 
     # 3. 取 items
     rows = conn.execute(
-        "SELECT item_id, title, summary_text, summary, relevance, source_item_id "
+        "SELECT item_id, title, summary_text, summary, relevance, source_item_id, topic "
         "FROM connector_items "
         "WHERE connector_id IN (SELECT connector_id FROM connectors WHERE status='active') "
         "  AND status='digest' "
@@ -53,24 +54,11 @@ def assemble_and_render(
         (day_start_ms, day_end_ms),
     ).fetchall()
 
-    # 按 topic 过滤（简单 json topic 字段匹配）
+    # Filter by the normalized topic column written by ConnectorItemRepository.
     items = []
     for r in rows:
-        if topic != "general":
-            # 直接从 topic 列 (M4 已把 topic 写进 topic 列)
-            trow = conn.execute(
-                "SELECT topic_json FROM connector_items WHERE item_id=?",
-                (r["item_id"],),
-            ).fetchone()
-            item_topic = "general"
-            if trow and trow[0]:
-                try:
-                    meta = json.loads(trow[0])
-                    item_topic = meta.get("category", "general")
-                except Exception:
-                    item_topic = "general"
-            if item_topic != topic:
-                continue
+        if topic != "general" and (r["topic"] or "general") != topic:
+            continue
         items.append(r)
 
     if not items:
@@ -89,8 +77,15 @@ def assemble_and_render(
         conn.execute(
             "INSERT INTO digests (digest_id, principal_id, digest_date, status, "
             "item_count, created_at, topic) VALUES (?,?,?,?,?,?,?)",
-            (d.digest_id, d.principal_id, d.digest_date, d.status.value,
-             d.item_count, int(time.time() * 1000), topic),
+            (
+                d.digest_id,
+                d.principal_id,
+                d.digest_date,
+                d.status.value,
+                d.item_count,
+                int(time.time() * 1000),
+                topic,
+            ),
         )
     else:
         digest_id = existing.digest_id
@@ -108,7 +103,11 @@ def assemble_and_render(
 
     # 6. 渲染 markdown（确定性模板）
     return digest_id, render_digest_markdown(
-        conn, digest_id, principal_id, digest_date, topic,
+        conn,
+        digest_id,
+        principal_id,
+        digest_date,
+        topic,
     )
 
 
@@ -159,6 +158,7 @@ def enqueue_digest_publish(
 
     from cogito.domain.task import Task, TaskStatus
     from cogito.store.task_repo import TaskRepository
+
     payload = f"{principal_id}|{digest_date}|{topic}"
     idempotency_key = f"pdp:{payload}"
     task_repo = TaskRepository(conn)
@@ -187,11 +187,12 @@ def enqueue_digest_publish(
 def mark_digest_sent(conn: sqlite3.Connection, digest_id: str) -> None:
     """标记 digest='sent' 并把关联的 connector_items 更新 status='sent'。"""
     conn.execute(
-        "UPDATE digests SET status='_sent', rendered_at=? WHERE digest_id=?",
+        "UPDATE digests SET status='sent', rendered_at=? WHERE digest_id=?",
         (int(time.time() * 1000), digest_id),
     )
     items = conn.execute(
-        "SELECT item_id FROM digest_items WHERE digest_id=?", (digest_id,),
+        "SELECT item_id FROM digest_items WHERE digest_id=?",
+        (digest_id,),
     ).fetchall()
     for it in items:
         conn.execute(

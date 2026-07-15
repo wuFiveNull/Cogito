@@ -25,8 +25,10 @@ from cogito.capability.models import (
 
 def _async_handler(fn):
     """Wrap a sync lambda as an async handler."""
+
     async def wrapper(args, context):
         return fn(args, context)
+
     return wrapper
 
 
@@ -39,59 +41,69 @@ def ctx() -> ToolContext:
 def registry() -> CapabilityRegistry:
     r = CapabilityRegistry()
 
-    r.register(ToolDef(
-        name="greet",
-        description="Greet someone",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Name to greet"},
-            },
-            "required": ["name"],
-        },
-        handler=_async_handler(lambda args, _: f"Hello, {args['name']}!"),
-        risk_level="low",
-    ))
-
-    r.register(ToolDef(
-        name="add",
-        description="Add two numbers",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "a": {"type": "number"},
-                "b": {"type": "number"},
-            },
-            "required": ["a", "b"],
-        },
-        handler=_async_handler(lambda args, _: str(args["a"] + args["b"])),
-        risk_level="low",
-    ))
-
-    r.register(ToolDef(
-        name="fail_tool",
-        description="Always fails",
-        input_schema={"type": "object", "properties": {}},
-        handler=_async_handler(lambda args, _: (_ for _ in ()).throw(RuntimeError("Something broke"))),
-        risk_level="medium",
-    ))
-
-    r.register(ToolDef(
-        name="enum_tool",
-        description="Tool with enum constraint",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "choice": {
-                    "type": "string",
-                    "enum": ["a", "b", "c"],
+    r.register(
+        ToolDef(
+            name="greet",
+            description="Greet someone",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Name to greet"},
                 },
+                "required": ["name"],
             },
-            "required": ["choice"],
-        },
-        handler=_async_handler(lambda args, _: f"Chose {args['choice']}"),
-        risk_level="low",
-    ))
+            handler=_async_handler(lambda args, _: f"Hello, {args['name']}!"),
+            risk_level="low",
+        )
+    )
+
+    r.register(
+        ToolDef(
+            name="add",
+            description="Add two numbers",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "a": {"type": "number"},
+                    "b": {"type": "number"},
+                },
+                "required": ["a", "b"],
+            },
+            handler=_async_handler(lambda args, _: str(args["a"] + args["b"])),
+            risk_level="low",
+        )
+    )
+
+    r.register(
+        ToolDef(
+            name="fail_tool",
+            description="Always fails",
+            input_schema={"type": "object", "properties": {}},
+            handler=_async_handler(
+                lambda args, _: (_ for _ in ()).throw(RuntimeError("Something broke"))
+            ),
+            risk_level="medium",
+        )
+    )
+
+    r.register(
+        ToolDef(
+            name="enum_tool",
+            description="Tool with enum constraint",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "choice": {
+                        "type": "string",
+                        "enum": ["a", "b", "c"],
+                    },
+                },
+                "required": ["choice"],
+            },
+            handler=_async_handler(lambda args, _: f"Chose {args['choice']}"),
+            risk_level="low",
+        )
+    )
 
     return r
 

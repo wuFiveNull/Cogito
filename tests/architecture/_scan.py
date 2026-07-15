@@ -3,6 +3,7 @@
 Reusable by CI to reproduce docs/architecture/current-dependency-map.py.
 Avoids third-party tools so the test suite stays hermetic.
 """
+
 from __future__ import annotations
 
 import ast
@@ -101,6 +102,7 @@ def forbidden_edges(
 
 class _State:
     """DFS node visitation state (avoids N806 uppercase local constants)."""
+
     UNVISITED = 0
     IN_PROGRESS = 1
     DONE = 2

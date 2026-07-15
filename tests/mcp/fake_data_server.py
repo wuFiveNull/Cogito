@@ -14,6 +14,7 @@
   "items": [{ "id", "title", "summary", "url", "category", "publishedAt" }]
 }
 """
+
 from __future__ import annotations
 
 import json
@@ -23,8 +24,8 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
-PAGE1_IDS = [f"fake-{i:02d}" for i in range(1, 6)]   # 5 条
-PAGE2_IDS = [f"fake-{i:02d}" for i in range(6, 9)]   # 3 条（最后一页）
+PAGE1_IDS = [f"fake-{i:02d}" for i in range(1, 6)]  # 5 条
+PAGE2_IDS = [f"fake-{i:02d}" for i in range(6, 9)]  # 3 条（最后一页）
 
 # 包含一条故意缺失 id 的 item：id=""（用于 quarantine 测试）
 PAGE1_IDS_QUARANTINE = ["", "fake-quarantine-ok"]
@@ -36,14 +37,18 @@ server = Server("fake-data-server")
 def _build_items(ids: list[str]) -> list[dict[str, Any]]:
     items = []
     for id_ in ids:
-        items.append({
-            "id": id_,
-            "title": f"Fake item {id_ or '<empty>'}",
-            "summary": "Fake summary for testing MCP connector pipeline.",
-            "url": f"https://example.test/items/{id_ or 'quarantine'}",
-            "category": "industry" if not id_ else ("ai-models" if id_.endswith(("01", "02", "03", "06", "07")) else "industry"),
-            "publishedAt": "2026-07-08T08:00:00.000Z",
-        })
+        items.append(
+            {
+                "id": id_,
+                "title": f"Fake item {id_ or '<empty>'}",
+                "summary": "Fake summary for testing MCP connector pipeline.",
+                "url": f"https://example.test/items/{id_ or 'quarantine'}",
+                "category": "industry"
+                if not id_
+                else ("ai-models" if id_.endswith(("01", "02", "03", "06", "07")) else "industry"),
+                "publishedAt": "2026-07-08T08:00:00.000Z",
+            }
+        )
     return items
 
 
@@ -113,4 +118,5 @@ async def run() -> None:
 
 if __name__ == "__main__":
     import asyncio
+
     asyncio.run(run())

@@ -8,6 +8,7 @@ t = (now - last_user_at) 分钟，τ 为半衰期参数。
 首期取三档惯性 (30min, 240min, 2880min) 权重 (0.50, 0.35, 0.15)。
 能量只调整 urgency 权重和 novelty/relevance 阈值 —— 不直接决定 alert。
 """
+
 from __future__ import annotations
 
 import math

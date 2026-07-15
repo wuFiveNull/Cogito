@@ -18,28 +18,44 @@ def test_schedule_commands_are_exactly_idempotent(in_memory_db) -> None:
     second = service.create_schedule(args, actor="owner", tool_call_id="call-create")
 
     assert first.schedule_id == second.schedule_id
-    assert in_memory_db.execute(
-        "SELECT COUNT(*) FROM schedules WHERE task_type='agent.prompt'",
-    ).fetchone()[0] == 1
-    assert in_memory_db.execute(
-        "SELECT COUNT(*) FROM agent_tool_command_results "
-        "WHERE command_name='CreateAgentSchedule'",
-    ).fetchone()[0] == 1
+    assert (
+        in_memory_db.execute(
+            "SELECT COUNT(*) FROM schedules WHERE task_type='agent.prompt'",
+        ).fetchone()[0]
+        == 1
+    )
+    assert (
+        in_memory_db.execute(
+            "SELECT COUNT(*) FROM agent_tool_command_results "
+            "WHERE command_name='CreateAgentSchedule'",
+        ).fetchone()[0]
+        == 1
+    )
 
     service.cancel_schedule(
-        first.schedule_id, first.version, actor="owner", tool_call_id="call-cancel",
+        first.schedule_id,
+        first.version,
+        actor="owner",
+        tool_call_id="call-cancel",
     )
     service.cancel_schedule(
-        first.schedule_id, first.version, actor="owner", tool_call_id="call-cancel",
+        first.schedule_id,
+        first.version,
+        actor="owner",
+        tool_call_id="call-cancel",
     )
     row = in_memory_db.execute(
-        "SELECT enabled,version FROM schedules WHERE schedule_id=?", (first.schedule_id,),
+        "SELECT enabled,version FROM schedules WHERE schedule_id=?",
+        (first.schedule_id,),
     ).fetchone()
     assert (row["enabled"], row["version"]) == (0, first.version + 1)
-    assert in_memory_db.execute(
-        "SELECT COUNT(*) FROM audit_records WHERE action IN "
-        "('CreateAgentSchedule','CancelAgentSchedule')",
-    ).fetchone()[0] == 2
+    assert (
+        in_memory_db.execute(
+            "SELECT COUNT(*) FROM audit_records WHERE action IN "
+            "('CreateAgentSchedule','CancelAgentSchedule')",
+        ).fetchone()[0]
+        == 2
+    )
 
 
 def test_skill_create_is_idempotent_and_version_bound(in_memory_db, tmp_path) -> None:
@@ -78,9 +94,15 @@ Review the requested files.
 
     assert first == second
     assert (tmp_path / "review" / "SKILL.md").read_text(encoding="utf-8") == raw
-    assert in_memory_db.execute(
-        "SELECT COUNT(*) FROM skills WHERE name='review'",
-    ).fetchone()[0] == 1
-    assert in_memory_db.execute(
-        "SELECT COUNT(*) FROM agent_tool_command_results WHERE command_name='CreateSkill'",
-    ).fetchone()[0] == 1
+    assert (
+        in_memory_db.execute(
+            "SELECT COUNT(*) FROM skills WHERE name='review'",
+        ).fetchone()[0]
+        == 1
+    )
+    assert (
+        in_memory_db.execute(
+            "SELECT COUNT(*) FROM agent_tool_command_results WHERE command_name='CreateSkill'",
+        ).fetchone()[0]
+        == 1
+    )

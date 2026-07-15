@@ -3,19 +3,19 @@
 PLAN-13 P13-05: 提供 explain_weight（Explain API）等上层功能。
 基础纯函数与策略定义位于 store/weight_policy.py（避免循环导入）。
 """
+
 from __future__ import annotations
 
 from datetime import datetime
 
 from cogito.store.weight_policy import (
     MemoryWeightPolicy,
-    _source_trust,
     _confirmation_score,
+    _source_trust,
     compute_retrieval_weight,
     compute_weight_for_item,
     weight_status,
 )
-
 
 __all__ = [
     "MemoryWeightPolicy",
@@ -40,6 +40,7 @@ def explain_weight(
 ) -> dict[str, float]:
     """返回权重分项解释（用于 Explain API）。"""
     import math
+
     source_trust = _source_trust(explicitness)
     confirmation_score = _confirmation_score(status, policy)
     days = 0.0

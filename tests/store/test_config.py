@@ -42,7 +42,7 @@ class TestDefaultConfig:
 class TestConfigValidation:
     def test_unknown_section_raises(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
-            f.write('[unknown_section]\nfoo = 1\n')
+            f.write("[unknown_section]\nfoo = 1\n")
             tmp = f.name
         try:
             with pytest.raises(ConfigError, match=r"unknown sections/keys: unknown_section"):
@@ -52,7 +52,7 @@ class TestConfigValidation:
 
     def test_unknown_field_in_storage_raises(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
-            f.write('[storage]\nunknown_field = 1\n')
+            f.write("[storage]\nunknown_field = 1\n")
             tmp = f.name
         try:
             with pytest.raises(ConfigError, match=r"unknown fields: unknown_field"):
@@ -147,15 +147,16 @@ class TestProactiveConfig:
 
     def test_proactive_parses_custom(self):
         """自定义 [proactive] 节正确解析字段值。"""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False,
-                                         encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".toml", delete=False, encoding="utf-8"
+        ) as f:
             f.write(
-                '[proactive]\n'
-                'enabled = true\n'
-                'dry_run = false\n'
-                'minimum_relevance = 0.7\n'
-                'max_pushes_per_day = 20\n'
-                'quiet_hours.enabled = false\n'
+                "[proactive]\n"
+                "enabled = true\n"
+                "dry_run = false\n"
+                "minimum_relevance = 0.7\n"
+                "max_pushes_per_day = 20\n"
+                "quiet_hours.enabled = false\n"
                 'quiet_hours.start = "22:00"\n'
             )
             tmp = f.name
@@ -172,9 +173,10 @@ class TestProactiveConfig:
 
     def test_proactive_unknown_field_raises(self):
         """[proactive] 节未知字段报错并列出字段名。"""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False,
-                                         encoding="utf-8") as f:
-            f.write('[proactive]\nexperimental_abc = true\n')
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".toml", delete=False, encoding="utf-8"
+        ) as f:
+            f.write("[proactive]\nexperimental_abc = true\n")
             tmp = f.name
         try:
             with pytest.raises(ConfigError, match=r"unknown fields: experimental_abc"):
@@ -184,9 +186,10 @@ class TestProactiveConfig:
 
     def test_proactive_quiet_hours_unknown_field_raises(self):
         """[proactive.quiet_hours] 节未知字段报错。"""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False,
-                                         encoding="utf-8") as f:
-            f.write('[proactive.quiet_hours]\noffset_minutes = 5\n')
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".toml", delete=False, encoding="utf-8"
+        ) as f:
+            f.write("[proactive.quiet_hours]\noffset_minutes = 5\n")
             tmp = f.name
         try:
             with pytest.raises(ConfigError, match=r"unknown fields: offset_minutes"):
@@ -206,12 +209,15 @@ class TestProactiveConfig:
 class TestPluginConfig:
     def test_top_level_plugins_alias_parses_runtime_policy(self):
         with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".toml", delete=False, encoding="utf-8",
+            mode="w",
+            suffix=".toml",
+            delete=False,
+            encoding="utf-8",
         ) as f:
             f.write(
-                '[plugins]\n'
-                'enabled = true\n'
-                'auto_start = true\n'
+                "[plugins]\n"
+                "enabled = true\n"
+                "auto_start = true\n"
                 'project_paths = [".cogito/plugins"]\n'
                 'granted_permissions = ["filesystem.read"]\n'
             )

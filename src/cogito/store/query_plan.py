@@ -17,6 +17,7 @@ _LOGGER = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class QueryRewriteRequest:
     """轻型改写请求 (PLAN-10 M1: 隔离 store 对 model.contracts.ModelRequest 的依赖)。"""
+
     messages: tuple[dict[str, Any], ...] = ()
     response_format: str | None = "json"
 
@@ -24,6 +25,7 @@ class QueryRewriteRequest:
 @dataclass
 class QueryPlan:
     """检索查询计划。"""
+
     query_text: str = ""
     kinds: list[str] = field(default_factory=list)
     scope_type: str = ""
@@ -81,18 +83,22 @@ async def _call_rewriter(
     """调用轻量模型改写 query（E2, 可选）。"""
     try:
         messages = (
-            {"role": "system", "content": (
-                "Rewrite the user's query for memory retrieval. "
-                "Return JSON: {\"query\": \"rewritten query\", "
-                "\"kinds\": [\"preference\"|\"fact\"|\"goal\"|\"constraint\"|\"episode\"], "
-                "\"needs_episodic\": bool, \"needs_procedure\": bool}"
-            )},
+            {
+                "role": "system",
+                "content": (
+                    "Rewrite the user's query for memory retrieval. "
+                    'Return JSON: {"query": "rewritten query", '
+                    '"kinds": ["preference"|"fact"|"goal"|"constraint"|"episode"], '
+                    '"needs_episodic": bool, "needs_procedure": bool}'
+                ),
+            },
             {"role": "user", "content": query},
         )
         request = QueryRewriteRequest(messages=messages, response_format="json")
         response = await model_router.generate(request, model_role="query_rewriter")
 
         import json
+
         text = response.text.strip()
         json_match = __import__("re").search(r"\{.*\}", text, __import__("re").DOTALL)
         if json_match:

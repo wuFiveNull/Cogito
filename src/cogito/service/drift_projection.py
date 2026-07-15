@@ -7,6 +7,7 @@ Candidate；可生成多个 internal result item。
 dry_run 仅保存 preview，不创建真实 Candidate/Delivery —— 保留 Quiet Hours、
 budget、cooldown、Endpoint 选择与 dry-run 控制。
 """
+
 from __future__ import annotations
 
 import logging
@@ -27,8 +28,9 @@ class DriftProjectionService:
         self._conn = conn
         self._dry_run = dry_run
 
-    def project(self, *, drift_run_id: str, draft: DriftCandidateDraft,
-                principal_id: str = "owner") -> str | None:
+    def project(
+        self, *, drift_run_id: str, draft: DriftCandidateDraft, principal_id: str = "owner"
+    ) -> str | None:
         """从 draft 生成 ProactiveCandidate(origin=drift)。
 
         Returns candidate_id 或 None（dry_run / 重复投影 / run 未完成）。
@@ -42,8 +44,9 @@ class DriftProjectionService:
             _LOGGER.warning("drift_project: run %s not found", drift_run_id)
             return None
         if row["status"] != DriftRunStatus.completed.value:
-            _LOGGER.warning("drift_project: run %s not completed (status=%s)",
-                            drift_run_id, row["status"])
+            _LOGGER.warning(
+                "drift_project: run %s not completed (status=%s)", drift_run_id, row["status"]
+            )
             return None
         if row["principal_id"] != principal_id:
             _LOGGER.warning("drift_project: principal mismatch")
@@ -61,9 +64,11 @@ class DriftProjectionService:
 
         if self._dry_run:
             _LOGGER.info(
-                "[dry_run] drift_project would create candidate: "
-                "run=%s topic=%s summary=%s",
-                drift_run_id, draft.topic, draft.summary[:80])
+                "[dry_run] drift_project would create candidate: run=%s topic=%s summary=%s",
+                drift_run_id,
+                draft.topic,
+                draft.summary[:80],
+            )
             return None
 
         # 幂等键
@@ -98,10 +103,10 @@ class DriftProjectionService:
             status="evaluating",
         )
         from cogito.store.proactive_repo import ProactiveCandidateRepository
+
         ProactiveCandidateRepository(self._conn).insert(cand)
         self._conn.commit()
-        _LOGGER.info("drift_project: created candidate %s for run %s",
-                     candidate_id, drift_run_id)
+        _LOGGER.info("drift_project: created candidate %s for run %s", candidate_id, drift_run_id)
         return candidate_id
 
     def preview(self, *, drift_run_id: str, draft: DriftCandidateDraft) -> dict[str, Any]:

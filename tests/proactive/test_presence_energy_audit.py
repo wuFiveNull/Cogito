@@ -5,11 +5,13 @@
 - PA-P0-02: energy 使用真实用户活动（PresenceReader）；同批固定 activity snapshot
 - PresenceReader 失败 / 无活动时 fail-safe（不按最低能量增强主动性）
 """
+
 from __future__ import annotations
 
 import asyncio
 import sqlite3
 import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -21,8 +23,10 @@ from cogito.service.presence import SqlitePresenceReader
 from cogito.service.proactive_decision import persist_decision
 from cogito.store.proactive_repo import (
     ProactiveCandidate,
+    ProactiveCandidateRepository,
     ProactiveDecisionRepository,
     ProactivePolicy,
+    ProactivePolicyRepository,
 )
 from cogito.store.migration import migrate
 
@@ -103,7 +107,9 @@ def _seed_user_message(conn, principal_id="owner", age_minutes=0, msg_id="m1"):
 
 def _policy() -> ProactivePolicy:
     return ProactivePolicy(
-        policy_id="p1", principal_id="owner", version=1,
+        policy_id="p1",
+        principal_id="owner",
+        version=1,
         quiet_hours={"enabled": False},
         cooldown_minutes_same_topic=360,
         max_pushes_per_hour=3,
@@ -116,11 +122,19 @@ def _policy() -> ProactivePolicy:
 
 def _candidate(cid="c1", **over) -> ProactiveCandidate:
     base = dict(
-        candidate_id=cid, principal_id="owner",
-        stream_type="content", topic="ai-models",
-        summary="test", novelty=0.7, relevance=0.8, urgency=0.6,
-        confidence=0.8, policy_version=1, idempotency_key=f"k-{cid}",
-        created_at=0, status="evaluating",
+        candidate_id=cid,
+        principal_id="owner",
+        stream_type="content",
+        topic="ai-models",
+        summary="test",
+        novelty=0.7,
+        relevance=0.8,
+        urgency=0.6,
+        confidence=0.8,
+        policy_version=1,
+        idempotency_key=f"k-{cid}",
+        created_at=0,
+        status="evaluating",
     )
     base.update(over)
     return ProactiveCandidate(**base)
@@ -160,6 +174,7 @@ class TestPresenceReader:
     def test_failure_returns_none_not_raise(self):
         def _boom():
             raise RuntimeError("db down")
+
         reader = SqlitePresenceReader(connection_factory=_boom)
         # 内部捕获异常，返回 None（fail-safe）
         assert reader.get_last_user_activity("owner") is None
@@ -215,6 +230,16 @@ class TestEnergyBands:
 
 
 class TestPersistDecisionAudit:
+    def test_policy_save_persists_non_null_updated_at(self, memory_db):
+        repo = ProactivePolicyRepository(memory_db)
+        repo.save(_policy())
+        memory_db.commit()
+        row = memory_db.execute(
+            "SELECT updated_at FROM proactive_policies WHERE policy_id='p1'"
+        ).fetchone()
+        assert row is not None
+        assert isinstance(row["updated_at"], int)
+
     def test_dry_run_true_recorded(self, memory_db):
         c = _candidate()
         conn = memory_db
@@ -225,15 +250,34 @@ class TestPersistDecisionAudit:
             " novelty, relevance, urgency, confidence, recommended_action, "
             " policy_version, idempotency_key, source_event_ids_json, created_at, status) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (c.candidate_id, c.principal_id, c.stream_type, c.topic, c.summary,
-             c.novelty, c.relevance, c.urgency, c.confidence, c.recommended_action,
-             c.policy_version, c.idempotency_key, "[]", 0, "evaluating"),
+            (
+                c.candidate_id,
+                c.principal_id,
+                c.stream_type,
+                c.topic,
+                c.summary,
+                c.novelty,
+                c.relevance,
+                c.urgency,
+                c.confidence,
+                c.recommended_action,
+                c.policy_version,
+                c.idempotency_key,
+                "[]",
+                0,
+                "evaluating",
+            ),
         )
         conn.commit()
         from cogito.service.proactive_decision import decide
+
         action, trace = decide(c, _policy())
         d = persist_decision(
-            conn, c, _policy(), action, trace,
+            conn,
+            c,
+            _policy(),
+            action,
+            trace,
             dry_run=True,
             energy_value=0.5,
             last_user_at=1_700_000_000_000,
@@ -263,15 +307,34 @@ class TestPersistDecisionAudit:
             " novelty, relevance, urgency, confidence, recommended_action, "
             " policy_version, idempotency_key, source_event_ids_json, created_at, status) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (c.candidate_id, c.principal_id, c.stream_type, c.topic, c.summary,
-             c.novelty, c.relevance, c.urgency, c.confidence, c.recommended_action,
-             c.policy_version, c.idempotency_key, "[]", 0, "evaluating"),
+            (
+                c.candidate_id,
+                c.principal_id,
+                c.stream_type,
+                c.topic,
+                c.summary,
+                c.novelty,
+                c.relevance,
+                c.urgency,
+                c.confidence,
+                c.recommended_action,
+                c.policy_version,
+                c.idempotency_key,
+                "[]",
+                0,
+                "evaluating",
+            ),
         )
         conn.commit()
         from cogito.service.proactive_decision import decide
+
         action, trace = decide(c, _policy())
         d = persist_decision(
-            conn, c, _policy(), action, trace,
+            conn,
+            c,
+            _policy(),
+            action,
+            trace,
             dry_run=False,
             energy_value=0.8,
         )
@@ -282,6 +345,104 @@ class TestPersistDecisionAudit:
 
 
 class TestEvaluateCandidates:
+    class FakeDelivery:
+        def __init__(self):
+            self.requests = []
+
+        async def enqueue(self, request):
+            self.requests.append(request)
+            return "delivery-test"
+
+    def test_dry_run_send_later_creates_no_followup_task(self, memory_db):
+        policy = replace(
+            _policy(),
+            quiet_hours={"enabled": True, "start": "00:00", "end": "23:59"},
+            minimum_relevance=0.1,
+            minimum_novelty=0.1,
+            digest_max_delay_minutes=0,
+        )
+        ProactivePolicyRepository(memory_db).save(policy)
+        ProactiveCandidateRepository(memory_db).insert(
+            _candidate(urgency=0.95, novelty=0.9, relevance=0.9, created_at=1)
+        )
+        memory_db.commit()
+        delivery = self.FakeDelivery()
+        from cogito.config import ProactiveConfig
+
+        ctx = th_module.TaskHandlerContext(
+            proactive_config=ProactiveConfig(enabled=True, dry_run=True),
+            delivery_service=delivery,
+        )
+
+        asyncio.run(th_module._evaluate_candidates_async(memory_db, ctx))
+
+        assert delivery.requests == []
+        assert (
+            memory_db.execute("SELECT COUNT(*) FROM scheduled_delivery_requests").fetchone()[0] == 0
+        )
+        assert (
+            memory_db.execute(
+                "SELECT COUNT(*) FROM tasks WHERE task_type='proactive.delivery.ready'"
+            ).fetchone()[0]
+            == 0
+        )
+
+    def test_dry_run_digest_creates_no_publish_task(self, memory_db):
+        policy = replace(
+            _policy(),
+            minimum_relevance=0.8,
+            minimum_novelty=0.1,
+            quiet_hours={"enabled": False},
+        )
+        ProactivePolicyRepository(memory_db).save(policy)
+        ProactiveCandidateRepository(memory_db).insert(
+            _candidate(relevance=0.2, novelty=0.9, created_at=1)
+        )
+        memory_db.commit()
+        from cogito.config import ProactiveConfig
+
+        ctx = th_module.TaskHandlerContext(
+            proactive_config=ProactiveConfig(enabled=True, dry_run=True),
+            delivery_service=self.FakeDelivery(),
+        )
+
+        asyncio.run(th_module._evaluate_candidates_async(memory_db, ctx))
+
+        assert (
+            memory_db.execute(
+                "SELECT COUNT(*) FROM tasks WHERE task_type='proactive.digest.publish'"
+            ).fetchone()[0]
+            == 0
+        )
+
+    def test_live_send_now_uses_complete_web_target_snapshot(self, memory_db):
+        policy = replace(
+            _policy(),
+            dry_run=False,
+            quiet_hours={"enabled": False},
+            minimum_relevance=0.1,
+            minimum_novelty=0.1,
+        )
+        ProactivePolicyRepository(memory_db).save(policy)
+        ProactiveCandidateRepository(memory_db).insert(
+            _candidate(urgency=0.95, novelty=0.9, relevance=0.9, created_at=1)
+        )
+        memory_db.commit()
+        delivery = self.FakeDelivery()
+        from cogito.config import ProactiveConfig
+
+        ctx = th_module.TaskHandlerContext(
+            proactive_config=ProactiveConfig(enabled=True, dry_run=False),
+            delivery_service=delivery,
+        )
+
+        asyncio.run(th_module._evaluate_candidates_async(memory_db, ctx))
+
+        assert len(delivery.requests) == 1
+        target = delivery.requests[0].target
+        assert target["adapter_id"] == "web"
+        assert target["conversation_id"] == "proactive:owner"
+
     def test_same_batch_uses_same_energy_snapshot(self, memory_db):
         """同批 2 个 Candidate 必须使用同一 energy/activity 快照。"""
         conn = memory_db
@@ -293,8 +454,23 @@ class TestEvaluateCandidates:
                 " novelty, relevance, urgency, confidence, recommended_action, "
                 " policy_version, idempotency_key, source_event_ids_json, created_at, status) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (cid, "owner", "content", "ai", "s",
-                 0.7, 0.8, 0.6, 0.8, "evaluate", 1, key, "[]", 0, "evaluating"),
+                (
+                    cid,
+                    "owner",
+                    "content",
+                    "ai",
+                    "s",
+                    0.7,
+                    0.8,
+                    0.6,
+                    0.8,
+                    "evaluate",
+                    1,
+                    key,
+                    "[]",
+                    0,
+                    "evaluating",
+                ),
             )
         conn.commit()
         # seed 真实用户活动（供 PresenceReader 读取）
@@ -302,6 +478,7 @@ class TestEvaluateCandidates:
 
         from cogito.config import ProactiveConfig
         from cogito.service.presence import SqlitePresenceReader
+
         ctx = th_module.TaskHandlerContext(
             connection_factory=lambda p=conn: _factory_for(p)(),
             workspace_path="",
@@ -334,16 +511,33 @@ class TestEvaluateCandidates:
             " novelty, relevance, urgency, confidence, recommended_action, "
             " policy_version, idempotency_key, source_event_ids_json, created_at, status) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("c1", "owner", "content", "ai", "s end now high urgency",
-             0.8, 0.9, 0.95, 0.8, "evaluate", 1, "k1", "[]", 0, "evaluating"),
+            (
+                "c1",
+                "owner",
+                "content",
+                "ai",
+                "s end now high urgency",
+                0.8,
+                0.9,
+                0.95,
+                0.8,
+                "evaluate",
+                1,
+                "k1",
+                "[]",
+                0,
+                "evaluating",
+            ),
         )
         conn.commit()
         from cogito.config import ProactiveConfig
+
         ctx = th_module.TaskHandlerContext(
             connection_factory=lambda p=conn: _factory_for(p),
             workspace_path="",
-            proactive_config=ProactiveConfig(dry_run=True, max_pushes_per_hour=99,
-                                             max_pushes_per_day=99),
+            proactive_config=ProactiveConfig(
+                dry_run=True, max_pushes_per_hour=99, max_pushes_per_day=99
+            ),
             presence_reader=SqlitePresenceReader(connection_factory=lambda p=conn: _factory_for(p)),
         )
         asyncio.run(th_module._evaluate_candidates_async(conn, ctx))
@@ -363,8 +557,23 @@ class TestEvaluateCandidates:
             " novelty, relevance, urgency, confidence, recommended_action, "
             " policy_version, idempotency_key, source_event_ids_json, created_at, status) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("c1", "owner", "content", "ai", "s",
-             0.8, 0.9, 0.95, 0.8, "evaluate", 1, "k1", "[]", 0, "evaluating"),
+            (
+                "c1",
+                "owner",
+                "content",
+                "ai",
+                "s",
+                0.8,
+                0.9,
+                0.95,
+                0.8,
+                "evaluate",
+                1,
+                "k1",
+                "[]",
+                0,
+                "evaluating",
+            ),
         )
         conn.commit()
 
@@ -373,6 +582,7 @@ class TestEvaluateCandidates:
                 raise RuntimeError("dbDown")
 
         from cogito.config import ProactiveConfig
+
         ctx = th_module.TaskHandlerContext(
             connection_factory=lambda p=conn: _factory_for(p),
             workspace_path="",

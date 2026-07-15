@@ -8,6 +8,7 @@ Protected fields (trace_id, principal_id, conversation_id, turn_id, attempt_id,
 origin, reply_route, schema_version, idempotency_key) cannot be patched and
 attempts to do so must fail with an Audit entry.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -21,6 +22,7 @@ from cogito.contracts.envelope import PROTECTED_FIELDS
 @dataclass(frozen=True)
 class SetField:
     """Set a top-level field to a new value."""
+
     field: str
     value: Any
 
@@ -28,18 +30,21 @@ class SetField:
 @dataclass(frozen=True)
 class RemoveField:
     """Remove an optional top-level field."""
+
     field: str
 
 
 @dataclass(frozen=True)
 class AppendContentPart:
     """Append a ContentPart to the content list."""
+
     content_part: dict[str, Any]
 
 
 @dataclass(frozen=True)
 class AppendPromptSection:
     """Append a section to the assembled prompt."""
+
     section: str
     content: str
 
@@ -47,6 +52,7 @@ class AppendPromptSection:
 @dataclass(frozen=True)
 class AddMetadata:
     """Add or overwrite a single metadata key."""
+
     key: str
     value: Any
 
@@ -54,12 +60,14 @@ class AddMetadata:
 @dataclass(frozen=True)
 class AddTag:
     """Append a tag to the metadata tag list."""
+
     tag: str
 
 
 @dataclass(frozen=True)
 class Reject:
     """Reject the request/operation outright with a reason code."""
+
     reason_code: str
     message: str = ""
 
@@ -67,13 +75,20 @@ class Reject:
 @dataclass(frozen=True)
 class RequireApproval:
     """Route the operation through approval before proceeding."""
+
     approval_type: str
     payload: dict[str, Any] = field(default_factory=dict)
 
 
 Patch = (
-    SetField | RemoveField | AppendContentPart | AppendPromptSection
-    | AddMetadata | AddTag | Reject | RequireApproval
+    SetField
+    | RemoveField
+    | AppendContentPart
+    | AppendPromptSection
+    | AddMetadata
+    | AddTag
+    | Reject
+    | RequireApproval
 )
 
 
@@ -83,6 +98,7 @@ Patch = (
 @dataclass(frozen=True)
 class PatchResult:
     """Outcome of applying a Patch sequence."""
+
     applied: tuple[Patch, ...]
     rejected: tuple[tuple[Patch, str], ...]
 
@@ -126,9 +142,7 @@ def apply_patches(target: dict[str, Any], patches: list[Patch]) -> PatchResult:
             applied.append(patch)
         elif isinstance(patch, AppendPromptSection):
             # Stored under metadata.prompt_sections as a deterministic list.
-            sections = target.setdefault("metadata", {}).setdefault(
-                "prompt_sections", []
-            )
+            sections = target.setdefault("metadata", {}).setdefault("prompt_sections", [])
             sections.append({"section": patch.section, "content": patch.content})
             applied.append(patch)
         elif isinstance(patch, AddMetadata):
@@ -141,10 +155,12 @@ def apply_patches(target: dict[str, Any], patches: list[Patch]) -> PatchResult:
             applied.append(patch)
         elif isinstance(patch, (Reject, RequireApproval)):
             # These are control-flow signals, not data mutations: record + reject.
-            rejected.append((
-                patch,
-                "control-flow patch rejected by applier; middleware must handle",
-            ))
+            rejected.append(
+                (
+                    patch,
+                    "control-flow patch rejected by applier; middleware must handle",
+                )
+            )
         else:
             rejected.append((patch, f"unknown patch type: {type(patch).__name__}"))
 

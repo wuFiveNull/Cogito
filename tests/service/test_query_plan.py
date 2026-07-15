@@ -65,12 +65,18 @@ class TestRetrievalService:
 
         service = SqliteMemoryService(db)
         service.remember(
-            kind="preference", subject="user", predicate="lang",
-            value="Python", principal_id="p1",
+            kind="preference",
+            subject="user",
+            predicate="lang",
+            value="Python",
+            principal_id="p1",
         )
         service.remember(
-            kind="preference", subject="user", predicate="editor",
-            value="VS Code", principal_id="p1",
+            kind="preference",
+            subject="user",
+            predicate="editor",
+            value="VS Code",
+            principal_id="p1",
         )
         db.commit()
 
@@ -87,8 +93,11 @@ class TestRetrievalService:
 
         service = SqliteMemoryService(db)
         service.remember(
-            kind="preference", subject="用户", predicate="偏好",
-            value="暗色主题", principal_id="p1",
+            kind="preference",
+            subject="用户",
+            predicate="偏好",
+            value="暗色主题",
+            principal_id="p1",
         )
         db.commit()
 
@@ -103,8 +112,11 @@ class TestRetrievalService:
 
         service = SqliteMemoryService(db)
         service.remember(
-            kind="fact", subject="project", predicate="name",
-            value="CogitoAgent", principal_id="p1",
+            kind="fact",
+            subject="project",
+            predicate="name",
+            value="CogitoAgent",
+            principal_id="p1",
         )
         db.commit()
 
@@ -120,12 +132,18 @@ class TestRetrievalService:
 
         service = SqliteMemoryService(db)
         service.remember(
-            kind="preference", subject="user", predicate="secret",
-            value="p1 secret", principal_id="p1",
+            kind="preference",
+            subject="user",
+            predicate="secret",
+            value="p1 secret",
+            principal_id="p1",
         )
         service.remember(
-            kind="preference", subject="user", predicate="secret",
-            value="p2 secret", principal_id="p2",
+            kind="preference",
+            subject="user",
+            predicate="secret",
+            value="p2 secret",
+            principal_id="p2",
         )
         db.commit()
 
@@ -143,12 +161,18 @@ class TestRetrievalService:
         service = SqliteMemoryService(db)
         # 写入 → supersede 旧
         service.remember(
-            kind="preference", subject="user", predicate="theme",
-            value="dark", principal_id="p1",
+            kind="preference",
+            subject="user",
+            predicate="theme",
+            value="dark",
+            principal_id="p1",
         )
         service.remember(
-            kind="preference", subject="user", predicate="theme",
-            value="light", principal_id="p1",
+            kind="preference",
+            subject="user",
+            predicate="theme",
+            value="light",
+            principal_id="p1",
         )
         db.commit()
 
@@ -166,8 +190,11 @@ class TestRetrievalService:
 
         service = SqliteMemoryService(db)
         service.remember(
-            kind="preference", subject="user", predicate="lang",
-            value="Python", principal_id="p1",
+            kind="preference",
+            subject="user",
+            predicate="lang",
+            value="Python",
+            principal_id="p1",
         )
         db.commit()
 
@@ -183,15 +210,20 @@ class TestRetrievalService:
 
         service = SqliteMemoryService(db)
         service.remember(
-            kind="preference", subject="user", predicate="lang",
-            value="Python", principal_id="p1",
+            kind="preference",
+            subject="user",
+            predicate="lang",
+            value="Python",
+            principal_id="p1",
         )
         db.commit()
 
         retriever = RetrievalService(db)
         results, ids = retriever.retrieve_for_context(
-            principal_id="p1", query="Python",
-            session_id="s1", conversation_id="c1",
+            principal_id="p1",
+            query="Python",
+            session_id="s1",
+            conversation_id="c1",
         )
         assert len(results) == len(ids)
         if results:
@@ -204,8 +236,11 @@ class TestRetrievalService:
 
         service = SqliteMemoryService(db)
         service.remember(
-            kind="preference", subject="user", predicate="lang",
-            value="Python", principal_id="p1",
+            kind="preference",
+            subject="user",
+            predicate="lang",
+            value="Python",
+            principal_id="p1",
         )
         db.commit()
 
