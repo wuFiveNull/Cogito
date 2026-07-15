@@ -1,0 +1,4 @@
+version = 66
+name = "agent_tool_command_results"
+online_safe = true
+requires_downtime = false

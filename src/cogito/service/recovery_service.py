@@ -291,6 +291,26 @@ class RecoveryService:
                 uow.commit()
         return count
 
+    def recover_stale_ingestion_batches(self, clock: datetime | None = None) -> int:
+        """收尾崩溃遗留的 MCP ingestion batch。
+
+        合法的 started batch 必须仍有 running Task。启动恢复发生在 Worker 开始
+        领取新任务之前，因此没有 running Task 的 started 行可安全标记为 failed。
+        """
+        now_ms_val = epoch_ms(self._now(clock))
+        with UnitOfWork(self._conn) as uow:
+            updated = self._conn.execute(
+                "UPDATE ingestion_batches SET status='failed', "
+                "error_ref=CASE WHEN error_ref='' THEN 'startup_recovery' ELSE error_ref END, "
+                "completed_at=? WHERE status='started' AND (task_id IS NULL OR task_id='' "
+                "OR NOT EXISTS (SELECT 1 FROM tasks t WHERE t.task_id=ingestion_batches.task_id "
+                "AND t.status='running'))",
+                (now_ms_val,),
+            )
+            if updated.rowcount:
+                uow.commit()
+            return int(updated.rowcount)
+
     def recover_all(self, clock: datetime | None = None) -> dict[str, int]:
         return {
             "outbox_leases": self.recover_outbox_leases(clock),
@@ -298,4 +318,5 @@ class RecoveryService:
             "stale_turns": self.recover_stale_turns(clock),
             "stale_tasks": self.recover_stale_tasks(clock),
             "streaming_deliveries": self.recover_streaming_deliveries(clock),
+            "stale_ingestion_batches": self.recover_stale_ingestion_batches(clock),
         }

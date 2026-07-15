@@ -3,8 +3,12 @@
 PLAN-13 P13-07：Resource/Document/Segment/Embedding CRUD、Scope、软删、索引。
 其他模块不能直接 CRUD knowledge 表。
 """
+
 from __future__ import annotations
 
+import json
+import logging
+import math
 import sqlite3
 from datetime import UTC, datetime
 from typing import Any
@@ -17,6 +21,7 @@ from cogito.domain.knowledge import (
 
 # ── 辅助 ──
 
+
 def _row_as_dict(row: Any) -> dict[str, Any]:
     """兼容 sqlite3.Row 与 tuple。"""
     if row is None:
@@ -27,7 +32,36 @@ def _row_as_dict(row: Any) -> dict[str, Any]:
     return {}
 
 
+def _resolve_segment_text(
+    segment_row: dict[str, Any],
+    make_payload_store: Any = None,
+) -> str:
+    payload_ref = str(segment_row.get("payload_ref") or "").strip()
+    if payload_ref and make_payload_store is not None:
+        try:
+            data = make_payload_store().get(payload_ref)
+            if data is not None:
+                return data.decode("utf-8", errors="replace")
+        except Exception as exc:
+            logging.getLogger("cogito.knowledge_repo").warning(
+                "resolve payload_ref %s failed: %s",
+                payload_ref,
+                exc,
+            )
+    return str(segment_row.get("text_ref_or_inline") or "")
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    return dot / (norm_a * norm_b) if norm_a and norm_b else 0.0
+
+
 # ── Resource ──
+
 
 def insert_resource(conn: sqlite3.Connection, r: KnowledgeResource) -> KnowledgeResource:
     conn.execute(
@@ -37,11 +71,22 @@ def insert_resource(conn: sqlite3.Connection, r: KnowledgeResource) -> Knowledge
         "  source_version, status, retention_class, created_at, updated_at, deleted_at"
         ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            r.resource_id, r.principal_id, r.connector_id, r.source_uri_hash,
-            r.source_kind, r.media_type, r.payload_ref, r.content_hash,
-            r.trust_label, r.scope_type, r.scope_id, r.source_version,
-            r.status, r.retention_class,
-            r.created_at.isoformat(), r.updated_at.isoformat() if r.updated_at else None,
+            r.resource_id,
+            r.principal_id,
+            r.connector_id,
+            r.source_uri_hash,
+            r.source_kind,
+            r.media_type,
+            r.payload_ref,
+            r.content_hash,
+            r.trust_label,
+            r.scope_type,
+            r.scope_id,
+            r.source_version,
+            r.status,
+            r.retention_class,
+            r.created_at.isoformat(),
+            r.updated_at.isoformat() if r.updated_at else None,
             r.deleted_at.isoformat() if r.deleted_at else None,
         ),
     )
@@ -50,23 +95,32 @@ def insert_resource(conn: sqlite3.Connection, r: KnowledgeResource) -> Knowledge
 
 def get_resource(conn: sqlite3.Connection, resource_id: str) -> KnowledgeResource | None:
     row = conn.execute(
-        "SELECT * FROM knowledge_resources WHERE resource_id=?", (resource_id,),
+        "SELECT * FROM knowledge_resources WHERE resource_id=?",
+        (resource_id,),
     ).fetchone()
     if not row:
         return None
     d = _row_as_dict(row)
     if d:
         return KnowledgeResource(
-            resource_id=d["resource_id"], principal_id=d.get("principal_id", ""),
-            connector_id=d.get("connector_id", ""), source_uri_hash=d.get("source_uri_hash", ""),
-            source_kind=d.get("source_kind", ""), media_type=d.get("media_type", ""),
-            payload_ref=d.get("payload_ref", ""), content_hash=d.get("content_hash", ""),
-            trust_label=d.get("trust_label", ""), scope_type=d.get("scope_type", ""),
-            scope_id=d.get("scope_id", ""), source_version=d.get("source_version", ""),
-            status=d.get("status", ""), retention_class=d.get("retention_class", ""),
+            resource_id=d["resource_id"],
+            principal_id=d.get("principal_id", ""),
+            connector_id=d.get("connector_id", ""),
+            source_uri_hash=d.get("source_uri_hash", ""),
+            source_kind=d.get("source_kind", ""),
+            media_type=d.get("media_type", ""),
+            payload_ref=d.get("payload_ref", ""),
+            content_hash=d.get("content_hash", ""),
+            trust_label=d.get("trust_label", ""),
+            scope_type=d.get("scope_type", ""),
+            scope_id=d.get("scope_id", ""),
+            source_version=d.get("source_version", ""),
+            status=d.get("status", ""),
+            retention_class=d.get("retention_class", ""),
         )
     return KnowledgeResource(
-        resource_id=row[0], status=row[12] if len(row) > 12 else "",
+        resource_id=row[0],
+        status=row[12] if len(row) > 12 else "",
         content_hash=row[7] if len(row) > 7 else "",
     )
 
@@ -80,6 +134,7 @@ def update_resource_status(conn: sqlite3.Connection, resource_id: str, status: s
 
 # ── Document ──
 
+
 def insert_document(conn: sqlite3.Connection, doc: KnowledgeDocument) -> KnowledgeDocument:
     conn.execute(
         "INSERT OR REPLACE INTO knowledge_documents ("
@@ -87,17 +142,26 @@ def insert_document(conn: sqlite3.Connection, doc: KnowledgeDocument) -> Knowled
         "  parser_id, parser_version, content_version, status, created_at, updated_at"
         ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            doc.document_id, doc.resource_id, doc.title, doc.normalized_text_ref,
-            doc.summary, doc.language, doc.parser_id, doc.parser_version,
-            doc.content_version, doc.status,
-            doc.created_at.isoformat(), doc.updated_at.isoformat() if doc.updated_at else None,
+            doc.document_id,
+            doc.resource_id,
+            doc.title,
+            doc.normalized_text_ref,
+            doc.summary,
+            doc.language,
+            doc.parser_id,
+            doc.parser_version,
+            doc.content_version,
+            doc.status,
+            doc.created_at.isoformat(),
+            doc.updated_at.isoformat() if doc.updated_at else None,
         ),
     )
     return doc
 
 
 def list_documents_for_resource(
-    conn: sqlite3.Connection, resource_id: str,
+    conn: sqlite3.Connection,
+    resource_id: str,
 ) -> list[KnowledgeDocument]:
     rows = conn.execute(
         "SELECT * FROM knowledge_documents WHERE resource_id=? AND status='active'",
@@ -108,15 +172,21 @@ def list_documents_for_resource(
 
 def _row_to_document(d: dict[str, Any]) -> KnowledgeDocument:
     return KnowledgeDocument(
-        document_id=d["document_id"], resource_id=d.get("resource_id", ""),
-        title=d.get("title", ""), normalized_text_ref=d.get("normalized_text_ref", ""),
-        summary=d.get("summary", ""), language=d.get("language", "zh"),
-        parser_id=d.get("parser_id", ""), parser_version=d.get("parser_version", ""),
-        content_version=d.get("content_version", ""), status=d.get("status", ""),
+        document_id=d["document_id"],
+        resource_id=d.get("resource_id", ""),
+        title=d.get("title", ""),
+        normalized_text_ref=d.get("normalized_text_ref", ""),
+        summary=d.get("summary", ""),
+        language=d.get("language", "zh"),
+        parser_id=d.get("parser_id", ""),
+        parser_version=d.get("parser_version", ""),
+        content_version=d.get("content_version", ""),
+        status=d.get("status", ""),
     )
 
 
 # ── Segment ──
+
 
 def insert_segment(conn: sqlite3.Connection, seg: KnowledgeSegment) -> KnowledgeSegment:
     conn.execute(
@@ -126,10 +196,19 @@ def insert_segment(conn: sqlite3.Connection, seg: KnowledgeSegment) -> Knowledge
         "  end_offset, embedding_status, created_at, updated_at, deleted_at"
         ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            seg.segment_id, seg.document_id, seg.ordinal, seg.segment_kind,
-            seg.text_ref_or_inline, seg.payload_ref, seg.content_hash, seg.token_count,
-            seg.heading_path, seg.start_offset, seg.end_offset,
-            seg.embedding_status, seg.created_at.isoformat(),
+            seg.segment_id,
+            seg.document_id,
+            seg.ordinal,
+            seg.segment_kind,
+            seg.text_ref_or_inline,
+            seg.payload_ref,
+            seg.content_hash,
+            seg.token_count,
+            seg.heading_path,
+            seg.start_offset,
+            seg.end_offset,
+            seg.embedding_status,
+            seg.created_at.isoformat(),
             seg.updated_at.isoformat() if seg.updated_at else None,
             seg.deleted_at.isoformat() if seg.deleted_at else None,
         ),
@@ -138,7 +217,8 @@ def insert_segment(conn: sqlite3.Connection, seg: KnowledgeSegment) -> Knowledge
 
 
 def list_segments_for_document(
-    conn: sqlite3.Connection, document_id: str,
+    conn: sqlite3.Connection,
+    document_id: str,
 ) -> list[KnowledgeSegment]:
     rows = conn.execute(
         "SELECT * FROM knowledge_segments "
@@ -150,7 +230,9 @@ def list_segments_for_document(
 
 
 def list_unembedded_segments(
-    conn: sqlite3.Connection, model: str = "", limit: int = 100,
+    conn: sqlite3.Connection,
+    model: str = "",
+    limit: int = 100,
 ) -> list[str]:
     """列出尚未为当前模型生成 Embedding 的段落地 ID。"""
     try:
@@ -161,14 +243,16 @@ def list_unembedded_segments(
                 "  ON ke.segment_id=ks.segment_id AND ke.embedding_model=? "
                 "WHERE ks.deleted_at IS NULL AND ks.embedding_status!='ready' "
                 "AND ke.segment_id IS NULL "
-                "LIMIT ?", (model, limit),
+                "LIMIT ?",
+                (model, limit),
             ).fetchall()
         else:
             rows = conn.execute(
                 "SELECT ks.segment_id FROM knowledge_segments ks "
                 "LEFT JOIN knowledge_embeddings ke ON ke.segment_id=ks.segment_id "
                 "WHERE ks.deleted_at IS NULL AND ke.segment_id IS NULL "
-                "LIMIT ?", (limit,),
+                "LIMIT ?",
+                (limit,),
             ).fetchall()
         return [r["segment_id"] for r in rows]
     except sqlite3.OperationalError:
@@ -177,7 +261,8 @@ def list_unembedded_segments(
 
 def _row_to_segment(d: dict[str, Any]) -> KnowledgeSegment:
     return KnowledgeSegment(
-        segment_id=d["segment_id"], document_id=d.get("document_id", ""),
+        segment_id=d["segment_id"],
+        document_id=d.get("document_id", ""),
         ordinal=int(d.get("ordinal", 0)),
         segment_kind=d.get("segment_kind", "paragraph"),
         text_ref_or_inline=d.get("text_ref_or_inline", ""),
@@ -201,6 +286,7 @@ def write_embedding(
     if not vector:
         return
     import json
+
     blob = json.dumps(vector).encode("utf-8")
     conn.execute(
         "INSERT OR REPLACE INTO knowledge_embeddings "
@@ -212,6 +298,7 @@ def write_embedding(
 
 def get_embedding(conn: sqlite3.Connection, segment_id: str, model: str = "") -> list[float] | None:
     import json
+
     try:
         sql = "SELECT vector FROM knowledge_embeddings WHERE segment_id=?"
         params: list[Any] = [segment_id]
@@ -228,6 +315,7 @@ def get_embedding(conn: sqlite3.Connection, segment_id: str, model: str = "") ->
 
 # ── FTS5 知识全文索引 ──
 
+
 def ensure_knowledge_fts(conn: sqlite3.Connection) -> bool:
     try:
         conn.execute(
@@ -243,13 +331,10 @@ def ensure_knowledge_fts(conn: sqlite3.Connection) -> bool:
 def rebuild_knowledge_fts(conn: sqlite3.Connection, make_payload_store=None) -> None:
     """全量重建知识 FTS 索引（幂等，仅含未删段落地）。PLAN-13 P13-09 + PLAN-16 完整。"""
     try:
-        from cogito.service.knowledge.resolver import resolve_segment_text
         conn.execute("DELETE FROM knowledge_fts")
-        rows = conn.execute(
-            "SELECT * FROM knowledge_segments WHERE deleted_at IS NULL"
-        ).fetchall()
+        rows = conn.execute("SELECT * FROM knowledge_segments WHERE deleted_at IS NULL").fetchall()
         for r in rows:
-            text = resolve_segment_text(conn, dict(r), make_payload_store)
+            text = _resolve_segment_text(dict(r), make_payload_store)
             if text:
                 conn.execute(
                     "INSERT INTO knowledge_fts (segment_id, text) VALUES (?, ?)",
@@ -260,7 +345,8 @@ def rebuild_knowledge_fts(conn: sqlite3.Connection, make_payload_store=None) -> 
 
 
 def purge_segments_for_resource(
-    conn: sqlite3.Connection, resource_id: str,
+    conn: sqlite3.Connection,
+    resource_id: str,
 ) -> int:
     """擦除资源的所有段落地（PLAN-16 M5 KNOW-08）。
 
@@ -283,18 +369,22 @@ def purge_segments_for_resource(
                 (now, sid),
             )
             conn.execute(
-                "DELETE FROM knowledge_embeddings WHERE segment_id=?", (sid,),
+                "DELETE FROM knowledge_embeddings WHERE segment_id=?",
+                (sid,),
             )
             count += 1
         ensure_knowledge_fts(conn)
     except sqlite3.OperationalError as e:
         logging.getLogger("cogito.knowledge_repo").warning(
-            "purge_segments_for_resource partial failure: %s", e)
+            "purge_segments_for_resource partial failure: %s", e
+        )
     return count
 
 
 def search_knowledge_fts(
-    conn: sqlite3.Connection, query: str, limit: int = 8,
+    conn: sqlite3.Connection,
+    query: str,
+    limit: int = 8,
     make_payload_store=None,
 ) -> list[tuple[str, float]]:
     """全文检索知识段落，返回 (segment_id, score)。
@@ -302,6 +392,7 @@ def search_knowledge_fts(
     PLAN-16 完整：make_payload_store 提供时 resolver 化 payload 段落。
     """
     import re
+
     if not query:
         return []
     tokens = re.findall(r"[-\w一-鿿鿿㐀-䶿]+", query, re.UNICODE)
@@ -330,13 +421,12 @@ def search_knowledge_fts(
     # LIKE 降级（PLAN-16 完整：resolver 化 payload 段落后匹配）
     like = f"%{query}%"
     try:
-        from cogito.service.knowledge.resolver import resolve_segment_text
         candidates = conn.execute(
             "SELECT * FROM knowledge_segments WHERE deleted_at IS NULL",
         ).fetchall()
         out = []
         for r in candidates:
-            text = resolve_segment_text(conn, dict(r), make_payload_store)
+            text = _resolve_segment_text(dict(r), make_payload_store)
             if text and like.strip("%") in text:
                 out.append((r["segment_id"], 0.5))
             if len(out) >= limit:
@@ -357,9 +447,6 @@ def search_knowledge_vector(
     """Brute-force cosine recall over active, authorized knowledge segments."""
     if not query_vector:
         return []
-    import json
-    from cogito.service.embedding import cosine_similarity
-
     conditions = ["ks.deleted_at IS NULL", "kr.deleted_at IS NULL", "kr.status='active'"]
     params: list[Any] = []
     if principal_id:
@@ -383,7 +470,7 @@ def search_knowledge_vector(
             vector = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
             continue
-        score = cosine_similarity(query_vector, vector)
+        score = _cosine_similarity(query_vector, vector)
         if score > 0:
             scored.append((row["segment_id"], score))
     scored.sort(key=lambda item: item[1], reverse=True)

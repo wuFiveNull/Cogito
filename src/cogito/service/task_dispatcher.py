@@ -128,6 +128,7 @@ class TaskDispatcher:
         with UnitOfWork(self._conn) as uow:
             ok = self._task_repo.complete(
                 task.task_id, worker_id, attempt.lease_version, now_ms=now_ms,
+                result_ref=task.result_ref,
             )
             if not ok:
                 return False

@@ -1,5 +1,7 @@
 """Command API 测试 —— 验证命令走服务层并写 audit。"""
 
+from types import SimpleNamespace
+
 
 def _audit_count(client):
     # 偷看 audit_records 数量需要 DB 访问；直接通过公共接口行为断言即可。
@@ -124,3 +126,37 @@ def test_delete_sessions_by_conversation(client):
     # query 不返回
     r3 = client.post("/api/commands/delete-session", json={"session_id": "s1"})
     assert r3.json()["status"] == "failed"  # 已软删除
+
+
+def test_fetch_proactive_data_is_fixed_to_aihot_and_idempotent(client):
+    provider = client.app.state._provider
+    provider.config.capability.proactive.enabled = True
+    conn = provider.open_conn()
+    conn.execute(
+        "INSERT INTO connectors "
+        "(connector_id, connector_type, name, url, status, created_at) "
+        "VALUES ('connector-aihot-items','mcp','AIHOT','mcp://aihot','active',1700000000000)"
+    )
+    conn.commit()
+    conn.close()
+    client.app.state.runtime.mcp_manager = SimpleNamespace(
+        get_client=lambda server_id: SimpleNamespace(connected=server_id == "aihot")
+    )
+
+    payload = {"idempotency_key": "fetch-test-1"}
+    first = client.post("/api/commands/fetch-proactive-data", json=payload)
+    second = client.post("/api/commands/fetch-proactive-data", json=payload)
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_details = first.json()["details"]
+    second_details = second.json()["details"]
+    assert first_details["connector_id"] == "connector-aihot-items"
+    assert first_details["dry_run"] is True
+    assert second_details["poll_task_id"] == first_details["poll_task_id"]
+    assert second_details["idempotent"] is True
+
+    run = client.get(
+        f"/api/proactive/fetch-runs/{first_details['poll_task_id']}"
+    )
+    assert run.status_code == 200
+    assert run.json()["poll_status"] == "queued"

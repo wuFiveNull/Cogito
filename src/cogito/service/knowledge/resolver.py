@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from typing import Any
 
 
@@ -34,15 +35,15 @@ def resolve_segment_text(
                 return data.decode("utf-8", errors="replace")
         except Exception as e:  # 解析失败降级到 inline（不应发生，但保持鲁棒）
             import logging
-            _LOGGER = logging.getLogger("cogito.knowledge.resolver")
-            _LOGGER.warning("resolve payload_ref %s failed: %s", payload_ref, e)
+            logger = logging.getLogger("cogito.knowledge.resolver")
+            logger.warning("resolve payload_ref %s failed: %s", payload_ref, e)
     return str(segment_row.get("text_ref_or_inline") or "")
 
 
 def resolve_payload_ref(payload_ref: str, store=None) -> str:
     """从 PayloadStore 解析 payload_ref 为文本（PLAN-16 完整）。"""
-    if not store:
-        store = _shared_payload_store()
+    if store is None:
+        return ""
     try:
         data = store.get(payload_ref)
         if data is not None:

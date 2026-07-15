@@ -217,6 +217,7 @@ class ContextSnapshot:
     """
     snapshot_id: str = ""
     turn_id: str = ""
+    attempt_id: str = ""
     input_message_id: str = ""
     session_id: str = ""
     conversation_id: str = ""

@@ -1,6 +1,6 @@
 import requests
 
-from cogito.channel.vendor.langbot.pkg.utils import httpclient
+from cogito.channel.utils import httpclient
 
 
 def post_json(base_url, token, data=None):

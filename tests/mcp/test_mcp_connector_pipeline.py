@@ -118,6 +118,7 @@ def fake_mcp_config(fake_server_path: str) -> MCPServerConfig:
         command=sys.executable,
         args=[fake_server_path],
         transport="stdio",
+        isolation="host_trusted",
         toolset="connector",
     )
 

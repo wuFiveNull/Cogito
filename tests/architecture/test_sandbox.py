@@ -1,4 +1,4 @@
-"""PR-C4: Sandbox 5 Profile — Plan 03 M4."""
+"""PR-C4: Sandbox profiles — Plan 03 M4."""
 from __future__ import annotations
 
 import pytest
@@ -6,7 +6,6 @@ import pytest
 from cogito.capability.sandbox import (
     PLUGIN_PROCESS,
     READ_ONLY,
-    SHELL_ISOLATED,
     WORKSPACE_WRITE,
     SandboxProfile,
     get_profile,
@@ -30,22 +29,15 @@ def test_network_restricted_requires_allowlist() -> None:
     assert len(NETWORK_RESTRICTED.allowed_hosts) >= 1
 
 
-def test_shell_isolated_no_global_env() -> None:
-    """Shell 隔离：默认不继承全局环境。"""
-    assert SHELL_ISOLATED.allow_shell is True
-    assert "PATH" in SHELL_ISOLATED.env_whitelist
-
-
 def test_plugin_process_is_subprocess() -> None:
     """第三方默认进程外。"""
     assert PLUGIN_PROCESS.subprocess is True
     assert PLUGIN_PROCESS.max_processes == 1
 
 
-def test_get_profile_all_five() -> None:
-    """5 Profile 全部可解析。"""
-    for name in ["read_only", "workspace_write", "network_restricted",
-                 "shell_isolated", "plugin_process"]:
+def test_get_profile_all_supported() -> None:
+    """All supported profiles can be resolved."""
+    for name in ["read_only", "workspace_write", "network_restricted", "plugin_process"]:
         p = get_profile(name)
         assert p.name == name
 

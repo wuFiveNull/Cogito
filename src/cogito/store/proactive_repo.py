@@ -39,6 +39,7 @@ class ProactiveCandidate:
     consumed_at: int | None = None
     expires_at: int | None = None  # epoch ms
     status: str = "evaluating"
+    critical_override: bool = False
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,7 @@ class ProactivePolicy:
     cooldown_minutes_same_topic: int = 360
     max_pushes_per_hour: int = 3
     max_pushes_per_day: int = 10
+    alert_max_per_hour: int = 5
     filters: dict[str, Any] = field(default_factory=dict)
     dry_run: bool = True
     energy_half_life_minutes: tuple[float, ...] = (30.0, 240.0, 2880.0)
@@ -98,8 +100,8 @@ class ProactiveCandidateRepository:
             "(candidate_id, principal_id, stream_type, topic, summary, "
             " novelty, relevance, urgency, confidence, recommended_action, "
             " policy_version, idempotency_key, source_event_ids_json, "
-            " source_payload_ref, origin, expires_at_value, created_at, status) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " source_payload_ref, origin, expires_at_value, created_at, status,critical_override) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 c.candidate_id, c.principal_id, c.stream_type, c.topic,
                 c.summary, c.novelty, c.relevance, c.urgency, c.confidence,
@@ -107,7 +109,7 @@ class ProactiveCandidateRepository:
                 json.dumps(list(c.source_event_ids), ensure_ascii=False),
                 c.source_payload_ref, c.origin,
                 c.created_at + c.candidate_ttl_hours * 3600 * 1000 if False else None,
-                c.created_at, c.status,
+                c.created_at, c.status, 1 if c.critical_override else 0,
             ),
         )
 
@@ -207,6 +209,8 @@ def _row_to_candidate(row: Any) -> ProactiveCandidate:
         created_at=row["created_at"],
         consumed_at=row["consumed_at"],
         status=row["status"],
+        critical_override=bool(row["critical_override"])
+        if "critical_override" in row.keys() else False,
     )
 
 
@@ -256,6 +260,11 @@ class ProactivePolicyRepository:
                 json.dumps({
                     "max_pushes_per_hour": p.max_pushes_per_hour,
                     "max_pushes_per_day": p.max_pushes_per_day,
+                    "alert_max_per_hour": p.alert_max_per_hour,
+                    "minimum_relevance": p.minimum_relevance,
+                    "minimum_novelty": p.minimum_novelty,
+                    "digest_max_delay_minutes": p.digest_max_delay_minutes,
+                    "candidate_ttl_hours": p.candidate_ttl_hours,
                 }, ensure_ascii=False),
                 1 if p.dry_run else 0,
                 json.dumps(p.filters, ensure_ascii=False),
@@ -282,8 +291,13 @@ def _row_to_policy(row: Any) -> ProactivePolicy:
         cooldown_minutes_same_topic=bc.get("same_topic_minutes", 360),
         max_pushes_per_hour=bud.get("max_pushes_per_hour", 3),
         max_pushes_per_day=bud.get("max_pushes_per_day", 10),
+        alert_max_per_hour=bud.get("alert_max_per_hour", 5),
         filters=_safe_json(row["filters_json"], {}),
         dry_run=bool(row["dry_run"]),
+        minimum_relevance=bud.get("minimum_relevance", 0.55),
+        minimum_novelty=bud.get("minimum_novelty", 0.60),
+        digest_max_delay_minutes=bud.get("digest_max_delay_minutes", 360),
+        candidate_ttl_hours=bud.get("candidate_ttl_hours", 48),
     )
 
 
@@ -354,6 +368,15 @@ class ProactiveDecisionRepository:
             "WHERE principal_id=? AND dry_run=0 "
             "AND decided_at >= ?",
             (principal_id, epoch_day * 86400 * 1000),
+        ).fetchone()[0]
+
+    def count_alert_hourly_sent(self, principal_id: str, epoch_hour: int) -> int:
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM proactive_decisions_v2 d "
+            "JOIN proactive_candidates c ON c.candidate_id=d.candidate_id "
+            "WHERE d.principal_id=? AND d.dry_run=0 AND d.action='send_now' "
+            "AND c.stream_type='alert' AND d.decided_at >= ?",
+            (principal_id, epoch_hour * 3600 * 1000),
         ).fetchone()[0]
 
 

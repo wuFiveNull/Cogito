@@ -11,11 +11,13 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
 import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import UTC, datetime
 
 _lock = threading.Lock()
 
@@ -61,11 +63,14 @@ class PayloadStore:
             # 临时文件 + 原子 rename
             fd, tmp = tempfile.mkstemp(dir=str(cpath.parent), prefix=".tmp_")
             try:
-                import os
                 os.write(fd, data)
                 os.fsync(fd)
                 os.close(fd)
-                Path(tmp).rename(cpath)
+                os.replace(tmp, cpath)
+                if retention_class == "secret":
+                    # Best effort on Windows; strict owner-only permissions on
+                    # POSIX. Secret payloads must never inherit a permissive umask.
+                    os.chmod(cpath, 0o600)
             except Exception:
                 try:
                     Path(tmp).unlink(missing_ok=True)
@@ -73,14 +78,27 @@ class PayloadStore:
                     pass
                 raise
 
-        return PayloadObject(
+        created_at = datetime.now(UTC).isoformat()
+        obj = PayloadObject(
             payload_id=sha,
             storage_uri=str(cpath),
             sha256=sha,
             content_type=content_type,
             size_bytes=size,
             retention_class=retention_class,
+            created_at=created_at,
         )
+        try:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO payload_objects "
+                "(payload_ref,sha256,content_type,size,storage_path,created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (obj.payload_id, obj.sha256, obj.content_type, obj.size_bytes,
+                 obj.storage_uri, created_at),
+            )
+        except sqlite3.OperationalError:
+            pass
+        return obj
 
     def get(self, payload_id: str) -> bytes | None:
         """按 ID 读取 + hash 校验。"""

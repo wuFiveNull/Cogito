@@ -117,7 +117,7 @@ class Dispatcher:
 
             updated = self._conn.execute(
                 "UPDATE turns SET status=?, active_attempt_id=?, version=version+1 "
-                "WHERE turn_id=? AND version=? AND status='queued'",
+                "WHERE turn_id=? AND version=? AND status IN ('queued','waiting_user','waiting_external')",
                 (TurnStatus.running.value, attempt.attempt_id,
                  turn.turn_id, turn.version),
             )

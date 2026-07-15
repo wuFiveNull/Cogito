@@ -162,6 +162,20 @@ CREATE TABLE IF NOT EXISTS task_attempts (
     UNIQUE(task_id, attempt_no)
 );
 
+CREATE TABLE IF NOT EXISTS agent_delegations (
+    delegation_id TEXT PRIMARY KEY,
+    parent_turn_id TEXT NOT NULL DEFAULT '',
+    parent_attempt_id TEXT NOT NULL DEFAULT '',
+    principal_id TEXT NOT NULL DEFAULT '',
+    depth INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'queued',
+    budget_json TEXT NOT NULL DEFAULT '{}',
+    prompt TEXT NOT NULL DEFAULT '',
+    result_text TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+);
+
 -- ── Delivery ──────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS deliveries (
@@ -295,6 +309,17 @@ CREATE TABLE IF NOT EXISTS audit_records (
     changes       TEXT NOT NULL DEFAULT '{}',
     trace_id      TEXT NOT NULL DEFAULT '',
     occurred_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_tool_command_results (
+    command_name    TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    action_hash     TEXT NOT NULL,
+    actor_id        TEXT NOT NULL,
+    aggregate_id    TEXT NOT NULL,
+    result_json     TEXT NOT NULL DEFAULT '{}',
+    created_at      TEXT NOT NULL,
+    PRIMARY KEY(command_name, idempotency_key)
 );
 
 -- ── Plugin (PLAN-10 M5) ───────────────────────────────────

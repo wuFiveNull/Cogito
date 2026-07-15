@@ -18,7 +18,7 @@ import sqlite3
 import pytest
 
 from cogito.domain.memory import MemoryStatus
-from cogito.service.memory_extractor import MemoryExtractor
+from cogito.service.memory_extractor import MemoryExtractionParseError, MemoryExtractor
 from cogito.service.memory_service import SqliteMemoryService, _make_canonical_key, _normalize_text
 from cogito.store.migration import migrate
 
@@ -235,8 +235,8 @@ class TestParseResponse:
 
     def test_parse_invalid_json(self):
         """无效 JSON。"""
-        result = MemoryExtractor._parse_response("not json")
-        assert result == []
+        with pytest.raises(MemoryExtractionParseError):
+            MemoryExtractor._parse_response("not json")
 
     def test_parse_extra_text_around_json(self):
         """JSON 前后有额外文本。"""

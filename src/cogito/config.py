@@ -50,7 +50,7 @@ STORAGE_FIELDS = frozenset({"db_path", "enable_wal", "busy_timeout", "payload_di
 RUNTIME_FIELDS = frozenset({"profile", "timezone", "instance_id"})
 INTERACTION_FIELDS = frozenset({"bind_host", "allow_remote", "validate_origin", "port"})
 WORKER_FIELDS = frozenset({
-    "concurrency", "lease_duration_seconds", "heartbeat_interval_seconds",
+    "concurrency", "poll_interval_seconds", "lease_duration_seconds", "heartbeat_interval_seconds",
     "outbox_lease_ttl_seconds", "delivery_lease_ttl_seconds",
     "recovery_grace_period_seconds",
 })
@@ -264,6 +264,7 @@ class WorkerConfig:
     """Worker、Lease 和恢复相关配置。"""
 
     concurrency: int = 1
+    poll_interval_seconds: float = 1.0
     lease_duration_seconds: int = 300
     heartbeat_interval_seconds: int = 60
     outbox_lease_ttl_seconds: int = 120
@@ -274,6 +275,11 @@ class WorkerConfig:
         self._validate()
 
     def _validate(self) -> None:
+        if self.poll_interval_seconds <= 0:
+            raise ConfigError(
+                section="worker", field="poll_interval_seconds",
+                reason="poll_interval_seconds must be > 0",
+            )
         if self.lease_duration_seconds <= self.heartbeat_interval_seconds:
             raise ConfigError(
                 section="worker",
@@ -316,6 +322,7 @@ class WorkerConfig:
         _check_unknown(raw, WORKER_FIELDS, "worker")
         return cls(
             concurrency=int(raw.get("concurrency", 1)),
+            poll_interval_seconds=float(raw.get("poll_interval_seconds", 1.0)),
             lease_duration_seconds=int(raw.get("lease_duration_seconds", 300)),
             heartbeat_interval_seconds=int(raw.get("heartbeat_interval_seconds", 60)),
             outbox_lease_ttl_seconds=int(raw.get("outbox_lease_ttl_seconds", 120)),
@@ -608,6 +615,25 @@ class MCPServerEntry:
     url: str = ""
     enabled: bool = True
     toolset: str = "mcp"
+    cwd: str = ""
+    include_tools: list[str] = field(default_factory=list)
+    exclude_tools: list[str] = field(default_factory=list)
+    timeout_seconds: float = 30.0
+    max_output_chars: int = 50_000
+    allow_resources: bool = False
+    allow_prompts: bool = False
+    allow_roots: bool = False
+    allow_sampling: bool = False
+    isolation: str = "disabled"
+    env: dict[str, str] = field(default_factory=dict)
+    headers: dict[str, str] = field(default_factory=dict)
+    oauth_enabled: bool = False
+    oauth_token_file: str = ""
+    oauth_redirect_uri: str = "http://127.0.0.1:33418/callback"
+    oauth_scope: str = ""
+    secret_root: str = ""
+    tool_policy: dict[str, dict[str, Any]] = field(default_factory=dict)
+    roots: list[str] = field(default_factory=list)
 
 
 # ── Proactive 配置 ───────────────────────────────────────────────────────────
@@ -619,7 +645,7 @@ KNOWN_PROACTIVE_FIELDS = frozenset({
     "enabled", "dry_run", "default_principal_id",
     "minimum_relevance", "minimum_novelty",
     "same_topic_cooldown_minutes",
-    "max_pushes_per_hour", "max_pushes_per_day",
+    "max_pushes_per_hour", "max_pushes_per_day", "alert_max_per_hour",
     "digest_max_delay_minutes", "candidate_ttl_hours",
     "quiet_hours", "cadence",
 })
@@ -660,13 +686,13 @@ class ProactiveQuietHours:
 class ProactiveCadenceConfig:
     """Proactive 自适应节拍配置 (PROACTIVE-IDLE / 3. 能量模型)。
 
-    高能量 (用户活跃) → 更短间隔更频繁评估；低能量 → 拉长间隔节省资源。
+    高能量 (用户活跃) → 更长间隔保持安静；低能量 → 缩短间隔提高主动性。
     """
     min_interval_seconds: int = 60
     max_interval_seconds: int = 1800
-    high_energy_interval_seconds: int = 60
+    high_energy_interval_seconds: int = 480
     medium_energy_interval_seconds: int = 240
-    low_energy_interval_seconds: int = 480
+    low_energy_interval_seconds: int = 60
     jitter_ratio: float = 0.10
     misfire_policy: str = "coalesce"
 
@@ -686,9 +712,9 @@ class ProactiveCadenceConfig:
         return cls(
             min_interval_seconds=int(raw.get("min_interval_seconds", 60)),
             max_interval_seconds=int(raw.get("max_interval_seconds", 1800)),
-            high_energy_interval_seconds=int(raw.get("high_energy_interval_seconds", 60)),
+            high_energy_interval_seconds=int(raw.get("high_energy_interval_seconds", 480)),
             medium_energy_interval_seconds=int(raw.get("medium_energy_interval_seconds", 240)),
-            low_energy_interval_seconds=int(raw.get("low_energy_interval_seconds", 480)),
+            low_energy_interval_seconds=int(raw.get("low_energy_interval_seconds", 60)),
             jitter_ratio=float(raw.get("jitter_ratio", 0.10)),
             misfire_policy=str(raw.get("misfire_policy", "coalesce")),
         )
@@ -708,6 +734,7 @@ class ProactiveConfig:
     same_topic_cooldown_minutes: int = 360
     max_pushes_per_hour: int = 3
     max_pushes_per_day: int = 10
+    alert_max_per_hour: int = 5
     digest_max_delay_minutes: int = 360
     candidate_ttl_hours: int = 48
     quiet_hours: ProactiveQuietHours = field(default_factory=ProactiveQuietHours)
@@ -743,6 +770,7 @@ class ProactiveConfig:
             same_topic_cooldown_minutes=int(raw.get("same_topic_cooldown_minutes", 360)),
             max_pushes_per_hour=int(raw.get("max_pushes_per_hour", 3)),
             max_pushes_per_day=int(raw.get("max_pushes_per_day", 10)),
+            alert_max_per_hour=int(raw.get("alert_max_per_hour", 5)),
             digest_max_delay_minutes=int(raw.get("digest_max_delay_minutes", 360)),
             candidate_ttl_hours=int(raw.get("candidate_ttl_hours", 48)),
             quiet_hours=quiet,
@@ -859,25 +887,167 @@ class PluginConfig:
 
 
 @dataclass
+class AutoModeConfig:
+    """Automatic tool-call review layered after deterministic policy."""
+
+    enabled: bool = False
+    model_role: str = "fast"
+    stage1_timeout_seconds: float = 10.0
+    stage2_timeout_seconds: float = 30.0
+    max_argument_chars: int = 8_000
+    safe_tools: list[str] = field(default_factory=list)
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> AutoModeConfig:
+        known = frozenset({
+            "enabled", "model_role", "stage1_timeout_seconds",
+            "stage2_timeout_seconds", "max_argument_chars", "safe_tools",
+        })
+        _check_unknown(raw, known, "capability.auto_mode")
+        cfg = cls(
+            enabled=bool(raw.get("enabled", False)),
+            model_role=str(raw.get("model_role", "fast")),
+            stage1_timeout_seconds=float(raw.get("stage1_timeout_seconds", 10.0)),
+            stage2_timeout_seconds=float(raw.get("stage2_timeout_seconds", 30.0)),
+            max_argument_chars=int(raw.get("max_argument_chars", 8_000)),
+            safe_tools=[str(v) for v in raw.get("safe_tools", [])],
+        )
+        if cfg.stage1_timeout_seconds <= 0 or cfg.stage2_timeout_seconds <= 0:
+            raise ConfigError("capability.auto_mode", "timeout", "timeouts must be positive")
+        if cfg.max_argument_chars < 256:
+            raise ConfigError(
+                "capability.auto_mode", "max_argument_chars", "must be at least 256",
+            )
+        if not cfg.model_role:
+            raise ConfigError("capability.auto_mode", "model_role", "must not be empty")
+        return cfg
+
+
+@dataclass
+class WorkspaceToolConfig:
+    root: str = ""
+    protected_paths: list[str] = field(default_factory=lambda: [
+        ".git", ".env", ".workspace", "config.toml",
+    ])
+    max_read_bytes: int = 1_000_000
+    max_write_bytes: int = 1_000_000
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> WorkspaceToolConfig:
+        _check_unknown(
+            raw,
+            frozenset({"root", "protected_paths", "max_read_bytes", "max_write_bytes"}),
+            "capability.workspace",
+        )
+        cfg = cls(
+            root=str(raw.get("root", "")),
+            protected_paths=[str(v) for v in raw.get(
+                "protected_paths", cls().protected_paths,
+            )],
+            max_read_bytes=int(raw.get("max_read_bytes", 1_000_000)),
+            max_write_bytes=int(raw.get("max_write_bytes", 1_000_000)),
+        )
+        if cfg.max_read_bytes < 1024 or cfg.max_write_bytes < 1024:
+            raise ConfigError("capability.workspace", "limits", "limits must be >= 1024")
+        return cfg
+
+
+@dataclass
+class SkillToolConfig:
+    """Mutable user Skill storage. Empty root keeps management tools hidden."""
+
+    root: str = ""
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> SkillToolConfig:
+        _check_unknown(raw, frozenset({"root"}), "capability.skills")
+        return cls(root=str(raw.get("root", "")))
+
+
+@dataclass
+class ReadOnlyMCPConfig:
+    principal_id: str = "owner"
+    page_size: int = 50
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> ReadOnlyMCPConfig:
+        _check_unknown(raw, frozenset({"principal_id", "page_size"}), "capability.read_only_mcp")
+        value = cls(
+            principal_id=str(raw.get("principal_id", "owner")),
+            page_size=int(raw.get("page_size", 50)),
+        )
+        if not value.principal_id or not 1 <= value.page_size <= 100:
+            raise ConfigError("capability.read_only_mcp", "page_size", "must be between 1 and 100")
+        return value
+
+
+@dataclass
 class CapabilityConfig:
     """Capability 配置（MCP servers + proactive 等）。"""
     mcp_servers: list[MCPServerEntry] = field(default_factory=list)
     proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
     plugins: PluginConfig = field(default_factory=PluginConfig)
+    auto_mode: AutoModeConfig = field(default_factory=AutoModeConfig)
+    workspace: WorkspaceToolConfig = field(default_factory=WorkspaceToolConfig)
+    skills: SkillToolConfig = field(default_factory=SkillToolConfig)
+    mcp_aliases: dict[str, str] = field(default_factory=dict)
+    read_only_mcp: ReadOnlyMCPConfig = field(default_factory=ReadOnlyMCPConfig)
 
     @classmethod
     def _from_raw(cls, raw: dict[str, Any]) -> CapabilityConfig:
         servers_raw = raw.get("mcp", {}).get("servers", {})
         servers = []
         for name, cfg in servers_raw.items():
+            transport = str(cfg.get("transport", "stdio"))
+            isolation = str(cfg.get("isolation", "disabled"))
+            if transport not in {"stdio", "sse", "streamable_http"}:
+                raise ConfigError(
+                    f"capability.mcp.servers.{name}.transport",
+                    transport,
+                    "must be stdio, sse, or streamable_http",
+                )
+            if (
+                bool(cfg.get("enabled", True))
+                and transport == "stdio"
+                and isolation != "host_trusted"
+            ):
+                raise ConfigError(
+                    f"capability.mcp.servers.{name}.isolation",
+                    isolation,
+                    "stdio MCP requires an explicit host_trusted declaration",
+                )
             servers.append(MCPServerEntry(
                 name=str(name),
-                transport=str(cfg.get("transport", "stdio")),
+                transport=transport,
                 command=str(cfg.get("command", "")),
                 args=list(cfg.get("args", [])),
                 url=str(cfg.get("url", "")),
                 enabled=bool(cfg.get("enabled", True)),
                 toolset=str(cfg.get("toolset", "mcp")),
+                cwd=str(cfg.get("cwd", "")),
+                include_tools=[str(v) for v in cfg.get("include_tools", [])],
+                exclude_tools=[str(v) for v in cfg.get("exclude_tools", [])],
+                timeout_seconds=float(cfg.get("timeout_seconds", 30)),
+                max_output_chars=int(cfg.get("max_output_chars", 50_000)),
+                allow_resources=bool(cfg.get("allow_resources", False)),
+                allow_prompts=bool(cfg.get("allow_prompts", False)),
+                allow_roots=bool(cfg.get("allow_roots", False)),
+                allow_sampling=bool(cfg.get("allow_sampling", False)),
+                isolation=isolation,
+                env={str(k): str(v) for k, v in cfg.get("env", {}).items()},
+                headers={str(k): str(v) for k, v in cfg.get("headers", {}).items()},
+                oauth_enabled=bool(cfg.get("oauth_enabled", False)),
+                oauth_token_file=str(cfg.get("oauth_token_file", "")),
+                oauth_redirect_uri=str(cfg.get(
+                    "oauth_redirect_uri", "http://127.0.0.1:33418/callback",
+                )),
+                oauth_scope=str(cfg.get("oauth_scope", "")),
+                secret_root=str(cfg.get("secret_root", "")),
+                tool_policy={
+                    str(tool): dict(policy)
+                    for tool, policy in dict(cfg.get("tool_policy", {})).items()
+                },
+                roots=[str(value) for value in cfg.get("roots", [])],
             ))
         proactive_raw = raw.get("proactive")
         proactive = (
@@ -891,7 +1061,33 @@ class CapabilityConfig:
             if isinstance(plugins_raw, dict)
             else PluginConfig()
         )
-        return cls(mcp_servers=servers, proactive=proactive, plugins=plugins)
+        auto_mode_raw = raw.get("auto_mode")
+        auto_mode = (
+            AutoModeConfig._from_raw(auto_mode_raw)
+            if isinstance(auto_mode_raw, dict)
+            else AutoModeConfig()
+        )
+        workspace = WorkspaceToolConfig._from_raw(dict(raw.get("workspace", {})))
+        skills = SkillToolConfig._from_raw(dict(raw.get("skills", {})))
+        if "shell" in raw:
+            raise ConfigError(
+                "capability.shell", "", "Shell and process tools have been removed",
+            )
+        read_only_mcp = ReadOnlyMCPConfig._from_raw(dict(raw.get("read_only_mcp", {})))
+        mcp_aliases = {
+            str(k): str(v)
+            for k, v in raw.get("mcp", {}).get("aliases", {}).items()
+        }
+        return cls(
+            mcp_servers=servers,
+            proactive=proactive,
+            plugins=plugins,
+            auto_mode=auto_mode,
+            workspace=workspace,
+            skills=skills,
+            mcp_aliases=mcp_aliases,
+            read_only_mcp=read_only_mcp,
+        )
 
 
 
@@ -1255,6 +1451,7 @@ port = {self.interaction.port}
 
 [worker]
 concurrency = {self.worker.concurrency}
+poll_interval_seconds = {self.worker.poll_interval_seconds}
 lease_duration_seconds = {self.worker.lease_duration_seconds}
 heartbeat_interval_seconds = {self.worker.heartbeat_interval_seconds}
 outbox_lease_ttl_seconds = {self.worker.outbox_lease_ttl_seconds}

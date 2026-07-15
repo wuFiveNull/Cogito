@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -41,6 +42,8 @@ from cogito.domain.state_machines import validate_transition_turn
 from cogito.domain.turn import Turn, TurnStatus
 from cogito.service.unit_of_work import UnitOfWork
 from cogito.store.repositories import InboxRecord
+
+_LOGGER = logging.getLogger("cogito.inbound")
 
 
 @dataclass

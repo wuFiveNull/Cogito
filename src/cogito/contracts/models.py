@@ -35,6 +35,9 @@ class RetryTaskPayload(BaseModel):
 
 class ApprovalPayload(BaseModel):
     approval_id: str
+    expected_version: int | None = None
+    action_hash: str = ""
+    response_reason: str = ""
     # decision 由路径决定 (approve / reject)
 
 
@@ -222,6 +225,11 @@ class RebuildProactiveContextPayload(BaseCommandPayload):
 
 class ForceConnectorPollPayload(BaseCommandPayload):
     connector_id: str
+
+
+class FetchProactiveDataPayload(BaseCommandPayload):
+    """手动触发固定 AIHOT 主动数据源；不允许前端指定任意 Connector。"""
+    pass
 
 
 class ArchiveSkillPayload(BaseCommandPayload):

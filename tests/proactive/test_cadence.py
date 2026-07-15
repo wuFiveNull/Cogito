@@ -162,7 +162,7 @@ class TestSchedulerCadence:
         assert sched.tick_proactive_evaluate() == []
 
     def test_energy_band_drives_interval(self, memory_db):
-        """高能量 → 间隔更短；低能量 → 间隔更长。"""
+        """按 PROACTIVE-IDLE 3.3：高能量降低主动性，低能量提高主动性。"""
         conn = memory_db
         from cogito.config import ProactiveConfig
         cfg = ProactiveConfig(enabled=True, dry_run=True)
@@ -194,7 +194,7 @@ class TestSchedulerCadence:
             "SELECT interval_s FROM proactive_cadence_state WHERE id=1"
         ).fetchone()[0]
 
-        assert high_iv < low_iv
+        assert high_iv > low_iv
 
 
 class TaskListScheduler:

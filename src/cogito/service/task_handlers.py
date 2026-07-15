@@ -12,17 +12,19 @@ DOMAIN-CONTRACTS / 1.13 MemoryItem：状态转换规则
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import sqlite3
-from collections.abc import Callable
+import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 from cogito.domain.task import Task
+from cogito.infrastructure.metrics_access import _metrics  # OPS-04: 任务级指标
 from cogito.service.memory_views import MemoryViewsGenerator
-from cogito.service.unit_of_work import UnitOfWork
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -111,6 +113,9 @@ class TaskHandlerContext:
     declared_memory_dependencies: list[str] = field(default_factory=list)
     # PLAN-16 M4 完整 payload 边界：PayloadStore 工厂（提供时 resolver 化段落文本）
     payload_store_factory: Callable[[], Any] | None = None
+    capability_registry: Any = None
+    tool_executor: Any = None
+    parent_toolsets: set[str] = field(default_factory=set)
 
     def declare_memory_dependencies(self, memory_ids: list[str]) -> None:
         """声明本 Task 使用并强化的记忆（PLAN-16 M3 MEM-01）。
@@ -121,8 +126,16 @@ class TaskHandlerContext:
             self.declared_memory_dependencies = list(memory_ids)
 
 
-# Handler 签名：async 函数，接收 Task 和上下文，返回结果文本
-TaskHandler = Callable[[Task, TaskHandlerContext], str]
+# Handler 签名：同步或 async 函数，接收 Task 和上下文，返回结果文本。
+# 调用异步模型/httpx 的 handler 必须为 async def，由 worker 在主 loop 上 await，
+# 以复用主 loop 的 httpx 连接池（避免 loop 不匹配）。
+TaskHandler = Callable[[Task, TaskHandlerContext], Awaitable[str] | str]
+
+
+@dataclass(frozen=True)
+class TaskHandlerWait:
+    status: str
+    waiting_id: str
 
 
 class TaskHandlerRegistry:
@@ -164,7 +177,272 @@ def _build_registry(ctx: TaskHandlerContext) -> TaskHandlerRegistry:
     registry.register("proactive.evaluate", _handle_proactive_evaluate)
     registry.register("drift.run", _handle_drift_run)
     registry.register("vision.analyze", _handle_vision_analyze)
+    registry.register("agent.prompt", _handle_agent_prompt)
+    registry.register("tool.reconcile", _handle_tool_reconcile)
+    registry.register("agent.delegate", _handle_agent_delegate)
     return registry
+
+
+async def _handle_agent_delegate(
+    task: Task, ctx: TaskHandlerContext,
+) -> str | TaskHandlerWait:
+    if (
+        ctx.connection_factory is None or ctx.model_router is None
+        or ctx.capability_registry is None or ctx.tool_executor is None
+    ):
+        raise RuntimeError("agent.delegate runtime is not configured")
+    try:
+        payload = json.loads(task.payload_ref or "{}")
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid agent.delegate payload") from exc
+    from cogito.contracts.clock import epoch_ms
+    from cogito.contracts.context import ContextItem, ContextSnapshot
+    from cogito.runtime.loop import AgentLoop, LoopResultType, ResourceBudget
+    from cogito.store.checkpoint_repo import CheckpointRepository
+
+    conn = ctx.connection_factory()
+    try:
+        link = conn.execute(
+            "SELECT * FROM child_task_links WHERE task_id=?", (task.task_id,),
+        ).fetchone()
+        if link is None:
+            raise ValueError("child task link not found")
+        turn_id = link["turn_id"] or uuid.uuid4().hex
+        attempt_id = uuid.uuid4().hex
+        now = epoch_ms(datetime.now(UTC))
+        if not link["turn_id"]:
+            conn.execute(
+                "INSERT INTO turns(turn_id,session_id,input_message_id,status,priority,version,"
+                "active_attempt_id,created_at) VALUES (?,?,?,'running',40,1,?,?)",
+                (turn_id, payload.get("session_id", ""), payload.get("input_message_id", ""),
+                 attempt_id, now),
+            )
+            attempt_no = 1
+            conn.execute(
+                "UPDATE child_task_links SET turn_id=?,status='running',version=version+1 "
+                "WHERE task_id=?",
+                (turn_id, task.task_id),
+            )
+        else:
+            attempt_no = int(conn.execute(
+                "SELECT COALESCE(MAX(attempt_no),0)+1 FROM run_attempts WHERE turn_id=?",
+                (turn_id,),
+            ).fetchone()[0])
+            conn.execute(
+                "UPDATE turns SET status='running',active_attempt_id=?,version=version+1 "
+                "WHERE turn_id=? AND status IN ('queued','waiting_user','failed')",
+                (attempt_id, turn_id),
+            )
+            conn.execute(
+                "UPDATE child_task_links SET status='running',version=version+1 WHERE task_id=?",
+                (task.task_id,),
+            )
+        conn.execute(
+            "INSERT INTO run_attempts(attempt_id,turn_id,attempt_no,status,started_at,worker_id,"
+            "lease_version) VALUES (?,?,?,'running',?,'agent-delegate-task',1)",
+            (attempt_id, turn_id, attempt_no, now),
+        )
+        conn.commit()
+        budget = ResourceBudget(**dict(payload.get("budget") or {}))
+
+        def save_checkpoint(data: dict[str, Any]) -> None:
+            CheckpointRepository(conn).save(turn_id, data)
+            conn.commit()
+
+        loop = AgentLoop(
+            ctx.model_router,
+            registry=ctx.capability_registry,
+            executor=ctx.tool_executor,
+            toolsets=set(payload.get("toolsets", [])),
+            budget=budget,
+            checkpoint_callback=save_checkpoint,
+            checkpoint_loader=CheckpointRepository(conn).load_latest,
+            agent_mode="reactive",
+        )
+        snapshot = ContextSnapshot(
+            snapshot_id=f"delegation:{payload['delegation_id']}:{payload['client_id']}",
+            turn_id=turn_id, attempt_id=attempt_id,
+            input_message_id=str(payload.get("input_message_id", "")),
+            session_id=str(payload.get("session_id", "")),
+            conversation_id=str(payload.get("conversation_id", "")),
+            principal_id=str(payload.get("principal_id", "")),
+            items=(
+                ContextItem(
+                    item_type="system_policy", item_id=f"{turn_id}:system", source="system",
+                    role="system", trust_label="system",
+                    content=("You are a bounded child Agent. Return a concise structured result "
+                             "to the parent only. Never address the end user or send messages."),
+                ),
+                ContextItem(
+                    item_type="message", item_id=f"{turn_id}:prompt",
+                    source=str(payload.get("session_id", "")), role="user",
+                    trust_label="user", content=str(payload["prompt"]),
+                ),
+            ),
+        )
+        def child_cancelled() -> bool:
+            row = conn.execute(
+                "SELECT status FROM agent_delegations WHERE delegation_id=?",
+                (payload["delegation_id"],),
+            ).fetchone()
+            return row is None or row["status"] not in {"queued", "running"}
+
+        result = await loop.run(snapshot, cancel_flag=child_cancelled)
+        finished = epoch_ms(datetime.now(UTC))
+        if result.result_type == LoopResultType.waiting_approval:
+            conn.execute(
+                "UPDATE run_attempts SET status='succeeded',finished_at=? WHERE attempt_id=?",
+                (finished, attempt_id),
+            )
+            conn.execute(
+                "UPDATE turns SET status='waiting_user',active_attempt_id=NULL,version=version+1 "
+                "WHERE turn_id=?",
+                (turn_id,),
+            )
+            conn.execute(
+                "UPDATE child_task_links SET status='waiting_user',version=version+1 WHERE task_id=?",
+                (task.task_id,),
+            )
+            conn.commit()
+            return TaskHandlerWait("waiting_user", result.approval_id)
+        status = (
+            "completed" if result.is_success
+            else ("cancelled" if result.result_type == LoopResultType.cancelled else "failed")
+        )
+        conn.execute(
+            "UPDATE run_attempts SET status=?,finished_at=? WHERE attempt_id=?",
+            ("succeeded" if result.is_success else "failed", finished, attempt_id),
+        )
+        conn.execute(
+            "UPDATE turns SET status=?,active_attempt_id=NULL,version=version+1 WHERE turn_id=?",
+            ("cancelled" if status == "cancelled" else status, turn_id),
+        )
+        result_payload = {
+            "result_summary": result.text[:2_000], "result": result.text,
+            "usage": {
+                "input_tokens": result.usage.input_tokens,
+                "output_tokens": result.usage.output_tokens,
+                "total_tokens": result.usage.total_tokens,
+            },
+            "error": result.error_message,
+        }
+        result_json = json.dumps(result_payload, ensure_ascii=False)
+        result_ref = result_json
+        if ctx.payload_store_factory is not None:
+            store = ctx.payload_store_factory()
+            stored = store.put(
+                result_json.encode("utf-8"),
+                content_type="application/json",
+                retention_class="hot",
+            )
+            result_ref = str(getattr(stored, "payload_id", "")) or result_json
+        task_result = json.dumps(
+            {
+                "result_summary": result.text[:2_000],
+                "result_ref": result_ref,
+                "usage": result_payload["usage"],
+                "error": result.error_message,
+            },
+            ensure_ascii=False,
+        )
+        conn.execute(
+            "UPDATE child_task_links SET status=?,result_summary=?,result_ref=?,usage_json=?,"
+            "error=?,completed_at=?,version=version+1 WHERE task_id=?",
+            (status, result.text[:2_000], result_ref,
+             json.dumps(result_payload["usage"]), result.error_message,
+             datetime.now(UTC).isoformat(), task.task_id),
+        )
+        conn.commit()
+        if not result.is_success:
+            raise RuntimeError(result.error_message or result.text or "child Agent failed")
+        return task_result
+    finally:
+        conn.close()
+
+
+async def _handle_tool_reconcile(task: Task, ctx: TaskHandlerContext) -> str:
+    """Classify an uncertain side effect for explicit/manual reconciliation.
+
+    This handler deliberately never invokes the original Tool. A capability-
+    specific reconciler can later resolve the receipt; absent one, the receipt is
+    moved to ``manual_required`` so automatic retries remain impossible.
+    """
+    try:
+        payload = json.loads(task.payload_ref or "{}")
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid tool.reconcile payload") from exc
+    receipt_id = str(payload.get("receipt_id", ""))
+    if not receipt_id or ctx.connection_factory is None:
+        raise ValueError("tool.reconcile requires receipt_id and connection")
+    conn = ctx.connection_factory()
+    try:
+        from cogito.store.receipt_repo import SideEffectReceiptRepository
+
+        receipt = SideEffectReceiptRepository(conn).get(receipt_id)
+        if receipt is None:
+            raise ValueError(f"receipt {receipt_id} not found")
+        if receipt.status != "unknown" or receipt.reconcile_status != "pending":
+            return f"receipt {receipt_id} already reconciled"
+        repository = SideEffectReceiptRepository(conn)
+        registry = ctx.capability_registry
+        capability = registry.get(receipt.capability_id) if registry is not None else None
+        reconciler = capability.reconcile_fn if capability is not None else None
+        if reconciler is None:
+            repository.update_reconcile(
+                receipt_id,
+                "manual_required",
+                "No capability-specific reconciler is registered",
+            )
+            conn.commit()
+            return f"receipt {receipt_id} requires manual reconciliation"
+        outcome = reconciler(
+            {
+                "receipt_id": receipt.receipt_id,
+                "capability_id": receipt.capability_id,
+                "operation_id": receipt.operation_id,
+                "request_hash": receipt.request_hash,
+                "attempt_id": receipt.attempt_id,
+                "summary": receipt.summary,
+            }
+        )
+        if inspect.isawaitable(outcome):
+            outcome = await outcome
+        if isinstance(outcome, dict):
+            status = str(outcome.get("status", "manual_required"))
+            summary = str(outcome.get("summary", ""))
+        else:
+            status, summary = str(outcome), ""
+        if status == "succeeded":
+            repository.update_status(receipt_id, "succeeded")
+            repository.update_reconcile(receipt_id, "reconciled", summary)
+        elif status == "not_executed":
+            repository.update_status(receipt_id, "failed")
+            repository.update_reconcile(receipt_id, "not_executed", summary)
+        else:
+            repository.update_reconcile(
+                receipt_id, "manual_required", summary or "Reconciler was inconclusive",
+            )
+        conn.commit()
+        return f"receipt {receipt_id} reconcile outcome: {status}"
+    finally:
+        conn.close()
+
+
+async def _handle_agent_prompt(task: Task, ctx: TaskHandlerContext) -> str:
+    """Execute a scheduled background prompt without direct Channel delivery."""
+    from cogito.model.contracts import ModelRequest
+
+    payload = _task_json(task)
+    prompt = str(payload.get("prompt", "")).strip()
+    if not prompt:
+        raise ValueError("agent.prompt requires a prompt")
+    if ctx.model_router is None:
+        raise RuntimeError("model router unavailable")
+    response = await ctx.model_router.generate(ModelRequest(messages=(
+        {"role": "system", "content": "You are a bounded background Cogito agent."},
+        {"role": "user", "content": prompt},
+    )), model_role=str(payload.get("model_role", "main")))
+    return response.text
 
 
 def _knowledge_service(ctx: TaskHandlerContext, conn: sqlite3.Connection):
@@ -251,15 +529,15 @@ def _handle_knowledge_ingest(task: Task, ctx: TaskHandlerContext) -> str:
         conn.close()
 
 
-def _handle_knowledge_embed(task: Task, ctx: TaskHandlerContext) -> str:
+async def _handle_knowledge_embed(task: Task, ctx: TaskHandlerContext) -> str:
     if not ctx.connection_factory:
         return "knowledge embed (skipped: no connection_factory)"
     conn = ctx.connection_factory()
     try:
-        import asyncio
         svc = _knowledge_service(ctx, conn)
         # PLAN-16 M4 完整：传入 payload_store_factory resolver 化段落文本
-        count = asyncio.run(svc.embed_pending(make_payload_store=ctx.payload_store_factory))
+        # 在主 loop 上 await，复用 httpx 连接池
+        count = await svc.embed_pending(make_payload_store=ctx.payload_store_factory)
         # OPS-04 完整：记录 knowledge embedding 指标
         _metrics().record_knowledge_embedding(status="ok" if count else "empty")
         # PLAN-16 完整：处理达到上限仍有 pending 排水循环（embed_pending 幂等安全）
@@ -374,7 +652,7 @@ def _handle_drift_run(task: Task, ctx: TaskHandlerContext) -> str:
         raise
 
 
-def _handle_vision_analyze(task: Task, ctx: TaskHandlerContext) -> str:
+async def _handle_vision_analyze(task: Task, ctx: TaskHandlerContext) -> str:
     """Execute one durable vision analysis attempt through the shared cache service."""
     if ctx.vision_service_factory is None:
         raise RuntimeError("vision service is not configured")
@@ -386,10 +664,9 @@ def _handle_vision_analyze(task: Task, ctx: TaskHandlerContext) -> str:
     if not analysis_id:
         raise ValueError("vision.analyze payload missing analysis_id")
 
-    import asyncio
-
     service = ctx.vision_service_factory()
-    result = asyncio.run(service.analyze(analysis_id))
+    # 在主 loop 上 await，复用 httpx 连接池
+    result = await service.analyze(analysis_id)
     return f"vision analysis {result.analysis_id}: {result.status.value}"
 
 
@@ -409,16 +686,15 @@ def _handle_mcp_connector_poll(task: Task, ctx: TaskHandlerContext) -> str:
 
     # 注入 task meta，handler 用 getattr 默认值兼容缺失情形
     ctx._task_id = task.task_id
-    ctx._attempt_id = getattr(task, "task_id", "")
 
     return handle_mcp_connector_poll(task, ctx)
 
 
-def _handle_proactive_delivery_ready(task: Task, ctx: TaskHandlerContext) -> str:
+async def _handle_proactive_delivery_ready(task: Task, ctx: TaskHandlerContext) -> str:
     """proactive.delivery.ready: scheduled_delivery_request 到期 → Delivery。
 
     payload_ref=request_id。取 content_factory 创建 new Delivery 实例，入
-    DeliveryWorker 队列（async enqueue via sync wrapper）。
+    DeliveryWorker 队列（async enqueue，在主 loop 上 await）。
     """
     request_id = task.payload_ref
     if not request_id:
@@ -429,7 +705,7 @@ def _handle_proactive_delivery_ready(task: Task, ctx: TaskHandlerContext) -> str
         return "delivery.ready skipped: no connection"
 
     try:
-        result = _deliver_scheduled_request_sync(
+        result = await _deliver_scheduled_request_async(
             conn, request_id, ctx.delivery_service,
         )
         try:
@@ -446,7 +722,7 @@ def _handle_proactive_delivery_ready(task: Task, ctx: TaskHandlerContext) -> str
         raise
 
 
-def _deliver_scheduled_request_sync(conn, request_id, delivery_service) -> str:
+async def _deliver_scheduled_request_async(conn, request_id, delivery_service) -> str:
     from cogito.service.proactive_delivery_service import (
         mark_request_converted,
         prepare_delivery_from_request,
@@ -465,33 +741,19 @@ def _deliver_scheduled_request_sync(conn, request_id, delivery_service) -> str:
         mark_request_converted(conn, request_id, "dry-run-noop")
         return "converted (dry_run)"
 
-    import asyncio
-
     from cogito.service.delivery_service import DeliveryRequest
 
-    async def _do():
-        return await delivery_service.enqueue(DeliveryRequest(
-            target=info["suggested_target"],
-            content_ref=content_ref or "",
-            idempotency_key=f"proactive-scheduled:{request_id}",
-        ))
-
-    # delivery_service 是 async handler，在 sync handler 跑
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop and loop.is_running():
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(1) as p:
-            delivery_id = p.submit(asyncio.run, _do()).result()
-    else:
-        delivery_id = asyncio.run(_do())
+    # 在主 loop 上 await，避免跨 loop
+    delivery_id = await delivery_service.enqueue(DeliveryRequest(
+        target=info["suggested_target"],
+        content_ref=content_ref or "",
+        idempotency_key=f"proactive-scheduled:{request_id}",
+    ))
     mark_request_converted(conn, request_id, delivery_id)
     return f"converted -> {delivery_id}"
 
 
-def _handle_proactive_digest_publish(task: Task, ctx: TaskHandlerContext) -> str:
+async def _handle_proactive_digest_publish(task: Task, ctx: TaskHandlerContext) -> str:
     """proactive.digest.publish: 封桶 → 渲染 → enqueue Delivery。
 
     payload_ref 格式: "<principal_id>|<digest_date>|<topic>"。
@@ -506,7 +768,7 @@ def _handle_proactive_digest_publish(task: Task, ctx: TaskHandlerContext) -> str
     if conn is None:
         return "digest.publish skipped: no connection"
     try:
-        result = _publish_digest_sync(
+        result = await _publish_digest_async(
             conn, principal_id, digest_date, topic, ctx.delivery_service,
         )
         try:
@@ -523,7 +785,7 @@ def _handle_proactive_digest_publish(task: Task, ctx: TaskHandlerContext) -> str
         raise
 
 
-def _publish_digest_sync(conn, principal_id, digest_date, topic, delivery_service) -> str:
+async def _publish_digest_async(conn, principal_id, digest_date, topic, delivery_service) -> str:
     from cogito.service.proactive_digest_service import assemble_and_render, mark_digest_sent
     rendered = assemble_and_render(
         conn, principal_id=principal_id, digest_date=digest_date, topic=topic,
@@ -539,27 +801,14 @@ def _publish_digest_sync(conn, principal_id, digest_date, topic, delivery_servic
         mark_digest_sent(conn, digest_id)
         return f"sent (dry_run): {digest_id}"
 
-    import asyncio
-
     from cogito.service.delivery_service import DeliveryRequest
 
-    async def _do():
-        return await delivery_service.enqueue(DeliveryRequest(
-            target={"channel": "web", "principal_id": principal_id},
-            content_ref=text,
-            idempotency_key=f"proactive-digest:{digest_id}",
-        ))
-
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop and loop.is_running():
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(1) as p:
-            delivery_id = p.submit(asyncio.run, _do()).result()
-    else:
-        delivery_id = asyncio.run(_do())
+    # 在主 loop 上 await，避免跨 loop 复用 httpx 连接池
+    delivery_id = await delivery_service.enqueue(DeliveryRequest(
+        target={"channel": "web", "principal_id": principal_id},
+        content_ref=text,
+        idempotency_key=f"proactive-digest:{digest_id}",
+    ))
     mark_digest_sent(conn, digest_id)
     return f"sent -> {delivery_id}"
 
@@ -568,7 +817,13 @@ def _publish_digest_sync(conn, principal_id, digest_date, topic, delivery_servic
 
 
 def _handle_memory_extract(task: Task, ctx: TaskHandlerContext) -> str:
-    """Run one durable, idempotent memory extraction window."""
+    """Run one durable, idempotent memory extraction window.
+
+    保持同步签名：handler 由 worker 通过 to_thread 在线程池运行，
+    避免阻塞主 loop（主 loop 还要服务 API / WebSocket / httpx）。
+    内部的异步模型调用（extract_from_messages）通过 ThreadPoolExecutor +
+    asyncio.run() 隔离到独立 loop，避免与主 loop 的 httpx 连接池冲突。
+    """
     payload = MemoryExtractionPayload.from_payload_ref(task.payload_ref or "{}")
     _LOGGER.info(
         "Task memory.extract: %s session=%s range=[%d..%d]",
@@ -630,12 +885,30 @@ def _handle_memory_extract(task: Task, ctx: TaskHandlerContext) -> str:
             conn, service, ctx.model_router,
             model_role=payload.model_role, strict=True,
         )
+        # 异步模型调用：隔离到独立 loop（在线程池内 asyncio.run），
+        # 避免与主 loop 的 httpx 连接池冲突（解决 cross-loop 错误），
+        # 同时也避免阻塞主 loop（解决 database is locked）
         import asyncio
-        written = asyncio.run(extractor.extract_from_messages(
-            messages, principal_id=payload.principal_id,
-            session_id=payload.session_id,
-            from_sequence=payload.from_sequence, to_sequence=payload.to_sequence,
-        ))
+        import concurrent.futures
+
+        async def _extract():
+            return await extractor.extract_from_messages(
+                messages, principal_id=payload.principal_id,
+                session_id=payload.session_id,
+                from_sequence=payload.from_sequence, to_sequence=payload.to_sequence,
+            )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop and loop.is_running():
+            # 在主 loop 上下文中（理论上不会走到这里，因为 handler 已被 to_thread），
+            # 用线程池隔离
+            with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                written = pool.submit(asyncio.run, _extract()).result()
+        else:
+            written = asyncio.run(_extract())
 
         # MEM-01: 声明本 Task 实际创建的记忆（成功后写 task_succeeded 信号）
         ctx.declare_memory_dependencies(extractor.created_memory_ids)
@@ -860,7 +1133,7 @@ def _handle_summary_generate(task: Task, ctx: TaskHandlerContext) -> str:
     )
 
 
-def _handle_proactive_evaluate(task: Task, ctx: TaskHandlerContext) -> str:
+async def _handle_proactive_evaluate(task: Task, ctx: TaskHandlerContext) -> str:
     """proactive.evaluate: 批量评估 evaluating candidates → 决策 + 持久化。
 
     流程：
@@ -878,7 +1151,7 @@ def _handle_proactive_evaluate(task: Task, ctx: TaskHandlerContext) -> str:
     if conn is None:
         return "evaluate skipped: no connection"
     try:
-        result = _evaluate_candidates_sync(conn, ctx)
+        result = await _evaluate_candidates_async(conn, ctx)
         try:
             conn.close()
         except Exception:
@@ -893,7 +1166,7 @@ def _handle_proactive_evaluate(task: Task, ctx: TaskHandlerContext) -> str:
         raise
 
 
-def _evaluate_candidates_sync(conn, ctx) -> str:
+async def _evaluate_candidates_async(conn, ctx) -> str:
     import time
 
     from cogito.service.energy_model import compute_energy
@@ -937,8 +1210,8 @@ def _evaluate_candidates_sync(conn, ctx) -> str:
         return "evaluate: no candidates"
 
     actions = {"send_now": 0, "send_later": 0, "digest": 0, "silent": 0, "discard": 0, "other": 0}
-    # 本批 dry_run 取自 config 不可变快照；real mode 下才创建真实副作用
-    dry_run = bool(config.dry_run)
+    # global/config 与 Principal policy 任一要求 dry-run 都禁止真实副作用。
+    dry_run = bool(config.dry_run or policy.dry_run)
     energy_model_version = "v1"
 
     for c in candidates:
@@ -950,6 +1223,9 @@ def _evaluate_candidates_sync(conn, ctx) -> str:
             ),
             existing_daily_sent=ProactiveDecisionRepository(conn).count_daily_sent(
                 config.default_principal_id, now // (86400 * 1000),
+            ),
+            existing_alert_hourly_sent=ProactiveDecisionRepository(conn).count_alert_hourly_sent(
+                config.default_principal_id, now // (3600 * 1000),
             ),
         )
         # 持久化 decision（显式 dry_run + 审计字段）
@@ -966,25 +1242,13 @@ def _evaluate_candidates_sync(conn, ctx) -> str:
             if dry_run or ctx.delivery_service is None:
                 pass  # dry_run: 仅记录，不创建真实 Delivery
             else:
-                import asyncio
-
                 from cogito.service.delivery_service import DeliveryRequest
-                async def _do():
-                    return await ctx.delivery_service.enqueue(DeliveryRequest(
-                        target={"channel": "web", "principal_id": c.principal_id},
-                        content_ref=c.summary,
-                        idempotency_key=f"proactive-now:{c.candidate_id}",
-                    ))
-                try:
-                    loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    loop = None
-                if loop and loop.is_running():
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor(1) as p:
-                        p.submit(asyncio.run, _do()).result()
-                else:
-                    asyncio.run(_do())
+                # 在主 loop 上 await，避免跨 loop 复用 httpx 连接池
+                await ctx.delivery_service.enqueue(DeliveryRequest(
+                    target={"channel": "web", "principal_id": c.principal_id},
+                    content_ref=c.summary,
+                    idempotency_key=f"proactive-now:{c.candidate_id}",
+                ))
             ProactiveCandidateRepository(conn).update_status(
                 c.candidate_id, "decided", consumed_at=now,
             )
@@ -1025,6 +1289,26 @@ def _evaluate_candidates_sync(conn, ctx) -> str:
             )
             actions["other"] += 1
 
+    # 每次 handler 有界处理 10 条；若仍有 evaluating 候选，创建下一段 drain
+    # Task，避免一次 AIHOT 拉取超过 Outbox/handler batch 后永久滞留。
+    remaining = ProactiveCandidateRepository(conn).count_by_principal(
+        config.default_principal_id, status="evaluating",
+    )
+    if remaining > 0:
+        from cogito.domain.task import Task, TaskStatus
+        from cogito.store.task_repo import TaskRepository
+        drain_key = f"proactive-evaluate-drain:{getattr(ctx, '_task_id', 'manual')}"
+        task_repo = TaskRepository(conn)
+        if not task_repo.exists_by_idempotency(drain_key):
+            task_repo.insert(Task(
+                task_id=f"task-pe-drain-{uuid.uuid4().hex[:16]}",
+                task_type="proactive.evaluate",
+                payload_ref="",
+                status=TaskStatus.queued,
+                priority=15,
+                idempotency_key=drain_key,
+                origin="proactive-evaluate-drain",
+            ))
     conn.commit()
     return f"evaluate: {actions}"
 

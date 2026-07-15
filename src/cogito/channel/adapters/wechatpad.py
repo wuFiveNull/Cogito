@@ -22,13 +22,10 @@ from cogito.channel.vendor.langbot.compatibility import entities as platform_ent
 from cogito.channel.vendor.langbot.compatibility import events as platform_events
 from cogito.channel.vendor.langbot.compatibility import message as platform_message
 from cogito.channel.vendor.langbot.compatibility.logger import EventLogger
-from cogito.channel.vendor.langbot.compatibility.logger import (
-    EventLogger as abstract_platform_logger,
-)
 
 
 class WeChatPadMessageConverter(abstract_platform_adapter.AbstractMessageConverter):
-    def __init__(self, config: dict, logger: abstract_platform_logger.AbstractEventLogger):
+    def __init__(self, config: dict, logger: EventLogger):
         self.bot = WeChatPadClient(config['wechatpad_url'], config['token'])
         self.config = config
         self.logger = logger

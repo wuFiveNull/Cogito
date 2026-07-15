@@ -9,28 +9,45 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
-from cogito.capability.models import ToolDef
+from cogito.capability.models import ConstraintSet, ToolDef
 
 
 class PolicyDecision(StrEnum):
     """策略决策结果。"""
+
     allow = "allow"
     deny = "deny"
+    require_approval = "require_approval"
+    allow_with_constraints = "allow_with_constraints"
 
 
 class PolicyResult:
     """策略评估结果。"""
+
     def __init__(
         self,
         decision: PolicyDecision = PolicyDecision.allow,
         reason: str = "",
+        constraints: ConstraintSet | dict[str, Any] | None = None,
     ) -> None:
         self.decision = decision
         self.reason = reason
+        self.constraints = (
+            constraints
+            if isinstance(constraints, ConstraintSet)
+            else ConstraintSet.from_dict(constraints)
+        )
 
     @property
     def is_allowed(self) -> bool:
-        return self.decision == PolicyDecision.allow
+        return self.decision in (
+            PolicyDecision.allow,
+            PolicyDecision.allow_with_constraints,
+        )
+
+    @property
+    def requires_approval(self) -> bool:
+        return self.decision == PolicyDecision.require_approval
 
 
 class ToolPolicy:
@@ -84,4 +101,63 @@ class ToolPolicy:
                 f"High-risk tool '{tool_name}' not allowed in maintenance mode",
             )
 
-        return PolicyResult(PolicyDecision.allow)
+        if tool_def and tool_def.approval_policy == "always":
+            return PolicyResult(
+                PolicyDecision.require_approval,
+                f"Tool '{tool_name}' requires explicit approval",
+            )
+
+        if (
+            tool_def
+            and tool_def.namespace.startswith("mcp:")
+            and tool_def.risk_level == "high"
+        ):
+            return PolicyResult(
+                PolicyDecision.require_approval,
+                f"High-risk MCP Tool '{tool_name}' requires explicit approval",
+            )
+
+        # 参数级确定性危险规则。模型分类只能在这些规则之后运行。
+        if tool_name in {"skill_manage"} and str(
+            (arguments or {}).get("action", ""),
+        ) in {"archive", "delete"}:
+            return PolicyResult(
+                PolicyDecision.require_approval,
+                "archiving or deleting a skill requires approval",
+            )
+
+        if tool_name == "apply_patch" and "patch" in (arguments or {}):
+            patch = str((arguments or {}).get("patch", ""))
+            file_count = max(patch.count("diff --git "), patch.count("\n--- "))
+            if "/dev/null" in patch or file_count > 10:
+                return PolicyResult(
+                    PolicyDecision.require_approval,
+                    "deleting or bulk-modifying workspace files requires approval",
+                )
+
+        requirements = dict(tool_def.resource_requirements) if tool_def else {}
+        file_reads = {"read_file", "list_directory", "glob", "grep"}
+        file_writes = {"write_file", "edit_file", "apply_patch"}
+        if tool_name in file_reads | file_writes:
+            path = str((arguments or {}).get("path", "."))
+            requirements.setdefault("allowed_paths", [path])
+            requirements.setdefault("mount_mode", "rw" if tool_name in file_writes else "ro")
+        elif tool_name == "web_fetch":
+            requirements.setdefault("network_enabled", True)
+        constraints = ConstraintSet.from_dict(requirements)
+        constrained_tools = {
+            "read_file",
+            "list_directory",
+            "glob",
+            "grep",
+            "write_file",
+            "edit_file",
+            "apply_patch",
+            "web_fetch",
+        }
+        return PolicyResult(
+            PolicyDecision.allow_with_constraints
+            if tool_name in constrained_tools
+            else PolicyDecision.allow,
+            constraints=constraints,
+        )

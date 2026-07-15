@@ -59,6 +59,8 @@ class Schedule:
         connector_id: str | None = None,
         created_at: datetime | None = None,
         dst_policy: str = "post",
+        task_type: str = "connector.poll",
+        task_payload: str = "",
     ) -> None:
         self.schedule_id = schedule_id or uuid.uuid4().hex
         self.schedule_type = ScheduleType(schedule_type)
@@ -73,6 +75,8 @@ class Schedule:
         self.connector_id = connector_id
         self.created_at = created_at or datetime.now(UTC)
         self.dst_policy = dst_policy
+        self.task_type = task_type
+        self.task_payload = task_payload
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -88,6 +92,8 @@ class Schedule:
             "version": self.version,
             "connector_id": self.connector_id,
             "created_at": self.created_at.isoformat(),
+            "task_type": self.task_type,
+            "task_payload": self.task_payload,
         }
 
     def __repr__(self) -> str:

@@ -234,6 +234,26 @@ export interface ProactiveStatus {
   daily_budget: number;
   energy_value: number;
   policy_version: string;
+  global_dry_run: boolean;
+  fetch_available: boolean;
+  fetch_unavailable_reason: string;
+}
+
+export interface ProactiveFetchRun {
+  poll_task_id: string;
+  poll_status: string;
+  ingestion_status: string;
+  batch_id: string | null;
+  fetched_count: number;
+  accepted_count: number;
+  duplicate_count: number;
+  quarantined_count: number;
+  candidate_count: number;
+  decision_count: number;
+  evaluating_count: number;
+  done: boolean;
+  failed: boolean;
+  error: string;
 }
 
 export interface ProactiveCandidate {
@@ -504,6 +524,13 @@ export const api = {
     request<{ items: ScheduledRequest[] }>("/proactive/scheduled-requests"),
   proactiveDigests: () => request<{ items: DigestBucket[] }>("/proactive/digests"),
   proactiveFeedback: () => request<ProactiveFeedback>("/proactive/feedback"),
+  fetchProactiveData: (idempotencyKey: string) =>
+    request<CommandResponse>("/commands/fetch-proactive-data", {
+      method: "POST",
+      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    }),
+  proactiveFetchRun: (pollTaskId: string) =>
+    request<ProactiveFetchRun>(`/proactive/fetch-runs/${encodeURIComponent(pollTaskId)}`),
   proactiveContext: () => request<{ content: string; policy_version: number; dry_run: boolean; file_exists: boolean }>("/proactive/context"),
   proactiveContextDiff: (content: string) =>
     request<{ has_changes: boolean; diff_lines: string[]; added_lines: number; removed_lines: number }>(

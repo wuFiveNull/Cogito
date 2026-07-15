@@ -1,0 +1,4 @@
+version = 64
+name = "proactive_critical_override"
+online_safe = true
+requires_downtime = false

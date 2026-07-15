@@ -145,6 +145,61 @@ class QueryService:
         attempts = self._attempt_repo.list_for_task(task_id)
         return {"task": task.to_dict(), "attempts": [a.to_dict() for a in attempts]}
 
+    def list_tasks_for_principal(
+        self,
+        principal_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Return only Agent tasks whose canonical payload binds the Principal.
+
+        Legacy/system tasks without a structured ``principal_id`` are deliberately
+        invisible to the read-only MCP facade.
+        """
+        predicate = (
+            "json_valid(payload_ref)=1 "
+            "AND json_extract(payload_ref, '$.principal_id')=?"
+        )
+        params: list[Any] = [principal_id]
+        if status is not None:
+            predicate += " AND status=?"
+            params.append(status)
+        total_row = self._conn.execute(
+            f"SELECT COUNT(*) FROM tasks WHERE {predicate}", params,
+        ).fetchone()
+        rows = self._conn.execute(
+            f"SELECT task_id FROM tasks WHERE {predicate} "
+            "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (*params, max(1, min(limit, 100)), max(0, offset)),
+        ).fetchall()
+        items = []
+        for row in rows:
+            task = self._task_repo.get(str(row["task_id"]))
+            if task is not None:
+                items.append(_public_task(task.to_dict()))
+        return {"items": items, "total": int(total_row[0]) if total_row else 0}
+
+    def get_task_for_principal(
+        self, task_id: str, principal_id: str,
+    ) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT 1 FROM tasks WHERE task_id=? AND json_valid(payload_ref)=1 "
+            "AND json_extract(payload_ref, '$.principal_id')=?",
+            (task_id, principal_id),
+        ).fetchone()
+        if row is None:
+            return None
+        task = self._task_repo.get(task_id)
+        if task is None:
+            return None
+        attempts = self._attempt_repo.list_for_task(task_id)
+        return {
+            "task": _public_task(task.to_dict()),
+            "attempts": [_public_task_attempt(item.to_dict()) for item in attempts],
+        }
+
     # ── memory ─────────────────────────────────────────────────
 
     def search_memory(
@@ -174,19 +229,48 @@ class QueryService:
                 placeholders = ",".join("?" for _ in statuses)
                 rows = self._conn.execute(
                     f"SELECT * FROM memory_items "
-                    f"WHERE deleted_at IS NULL AND status IN ({placeholders}) "
+                    f"WHERE principal_id=? AND deleted_at IS NULL AND status IN ({placeholders}) "
                     f"ORDER BY importance DESC, created_at DESC LIMIT ?",
-                    (*statuses, limit),
+                    (principal_id, *statuses, limit),
                 ).fetchall()
             else:
                 rows = self._conn.execute(
                     "SELECT * FROM memory_items "
-                    "WHERE deleted_at IS NULL "
+                    "WHERE principal_id=? AND deleted_at IS NULL "
                     "ORDER BY importance DESC, created_at DESC LIMIT ?",
-                    (limit,),
+                    (principal_id, limit),
                 ).fetchall()
             items = [dict(r) for r in rows]
         return {"items": items, "query": q, "count": len(items), "status": status}
+
+    def search_memory_page(
+        self,
+        q: str,
+        *,
+        principal_id: str,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        escaped = q.replace("%", "\\%").replace("_", "\\_")
+        where = (
+            "principal_id=? AND deleted_at IS NULL AND status='confirmed' "
+            "AND (subject LIKE ? ESCAPE '\\' OR predicate LIKE ? ESCAPE '\\' "
+            "OR value LIKE ? ESCAPE '\\')"
+        )
+        like = f"%{escaped}%"
+        params = (principal_id, like, like, like)
+        total_row = self._conn.execute(
+            f"SELECT COUNT(*) FROM memory_items WHERE {where}", params,
+        ).fetchone()
+        rows = self._conn.execute(
+            f"SELECT * FROM memory_items WHERE {where} "
+            "ORDER BY importance DESC,created_at DESC LIMIT ? OFFSET ?",
+            (*params, max(1, min(limit, 100)), max(0, offset)),
+        ).fetchall()
+        return {
+            "items": [dict(row) for row in rows],
+            "total": int(total_row[0]) if total_row else 0,
+        }
 
     # ── connectors ─────────────────────────────────────────────
 
@@ -227,7 +311,28 @@ class QueryService:
         """按会话取消息（含文本），用于聊天历史回放。
 
         一条消息的文本由 content_parts.inline_data 拼接；按 receive_sequence 升序。
+
+        同时支持内部 conversation_id (UUID) 和 platform_conversation_id
+        (如 web:xxxxx)。前端 localStorage 存的是 platform_conversation_id，
+        若直接按 messages.conversation_id 匹配会查不到（那是内部 UUID），
+        导致刷新后历史消息为空。
         """
+        # 先尝试作为内部 UUID 直接匹配；若无效则回退到 platform_conversation_id 查找
+        internal_id = self._conn.execute(
+            "SELECT conversation_id FROM conversations WHERE conversation_id=?",
+            (conversation_id,),
+        ).fetchone()
+        resolved = internal_id["conversation_id"] if internal_id else None
+        if resolved is None:
+            row = self._conn.execute(
+                "SELECT conversation_id FROM conversations "
+                "WHERE platform_conversation_id=?",
+                (conversation_id,),
+            ).fetchone()
+            resolved = row["conversation_id"] if row else None
+        if resolved is None:
+            return {"conversation_id": conversation_id, "items": []}
+
         rows = self._conn.execute(
             "SELECT m.message_id, m.role, m.created_at, m.receive_sequence, "
             "       cp.inline_data AS text "
@@ -235,7 +340,7 @@ class QueryService:
             "LEFT JOIN content_parts cp ON cp.message_id = m.message_id "
             "WHERE m.conversation_id = ? "
             "ORDER BY m.receive_sequence ASC LIMIT ?",
-            (conversation_id, limit),
+            (resolved, limit),
         ).fetchall()
         items: list[dict[str, Any]] = []
         for r in rows:
@@ -912,6 +1017,7 @@ class QueryService:
     def proactive_status(self) -> dict[str, Any]:
         """主动系统当前状态。"""
         from datetime import UTC, datetime as _dt
+        cfg = self._config
         now_ms = int(_dt.now(UTC).timestamp() * 1000)
         # 直接读 policy，避免 repo.get_current() 的 NOT NULL 约束问题
         row = self._conn.execute(
@@ -920,9 +1026,9 @@ class QueryService:
             ("owner",),
         ).fetchone()
         if row is None:
-            dry_run, version, qh_json, hourly, daily = True, 1, None, 3, 10
+            policy_dry_run, version, qh_json, hourly, daily = True, 1, None, 3, 10
         else:
-            dry_run = bool(row["dry_run"])
+            policy_dry_run = bool(row["dry_run"])
             version = row["version"]
             qh_json = row["quiet_hours_json"]
             import json
@@ -957,8 +1063,9 @@ class QueryService:
             (now_ms - 86400000,),
         ).fetchone()[0]
         return {
-            "enabled": True,
-            "dry_run": dry_run,
+            "enabled": bool(cfg.capability.proactive.enabled),
+            "dry_run": bool(cfg.capability.proactive.dry_run or policy_dry_run),
+            "global_dry_run": bool(cfg.capability.proactive.dry_run),
             "default_principal_id": "owner",
             "quiet_hours_start": int(str(qh.get("start", "23:00")).split(":")[0]),
             "quiet_hours_end": int(str(qh.get("end", "08:00")).split(":")[0]),
@@ -972,13 +1079,82 @@ class QueryService:
             "quiet_hours_active": quiet_active,
         }
 
+    def proactive_fetch_run(self, poll_task_id: str) -> dict[str, Any] | None:
+        task = self._conn.execute(
+            "SELECT task_id, status, attempt_count, created_at FROM tasks WHERE task_id=? "
+            "AND task_type='mcp_connector.poll'",
+            (poll_task_id,),
+        ).fetchone()
+        if task is None:
+            return None
+        batch = self._conn.execute(
+            "SELECT * FROM ingestion_batches WHERE task_id=? ORDER BY started_at DESC LIMIT 1",
+            (poll_task_id,),
+        ).fetchone()
+        batch_id = batch["batch_id"] if batch is not None else None
+        candidate_count = 0
+        decision_count = 0
+        evaluating_count = 0
+        if batch_id:
+            candidate_count = self._conn.execute(
+                "SELECT COUNT(*) FROM proactive_candidates c WHERE c.source_payload_ref IN "
+                "(SELECT payload_ref FROM outbox_events WHERE correlation_id=? "
+                "AND event_type='SourceEventIngested')",
+                (batch_id,),
+            ).fetchone()[0]
+            decision_count = self._conn.execute(
+                "SELECT COUNT(*) FROM proactive_decisions_v2 d JOIN proactive_candidates c "
+                "ON c.candidate_id=d.candidate_id WHERE c.source_payload_ref IN "
+                "(SELECT payload_ref FROM outbox_events WHERE correlation_id=? "
+                "AND event_type='SourceEventIngested')",
+                (batch_id,),
+            ).fetchone()[0]
+            evaluating_count = self._conn.execute(
+                "SELECT COUNT(*) FROM proactive_candidates c WHERE c.status='evaluating' "
+                "AND c.source_payload_ref IN (SELECT payload_ref FROM outbox_events "
+                "WHERE correlation_id=? AND event_type='SourceEventIngested')",
+                (batch_id,),
+            ).fetchone()[0]
+        poll_status = task["status"]
+        ingestion_status = batch["status"] if batch is not None else "pending"
+        failed = poll_status == "failed" or ingestion_status == "failed"
+        done = failed or (
+            poll_status == "completed"
+            and ingestion_status == "committed"
+            and evaluating_count == 0
+            and decision_count >= candidate_count
+        )
+        return {
+            "poll_task_id": poll_task_id,
+            "poll_status": poll_status,
+            "ingestion_status": ingestion_status,
+            "batch_id": batch_id,
+            "fetched_count": int(batch["fetched_count"] if batch is not None else 0),
+            "accepted_count": int(batch["accepted_count"] if batch is not None else 0),
+            "duplicate_count": int(batch["duplicate_count"] if batch is not None else 0),
+            "quarantined_count": int(batch["quarantined_count"] if batch is not None else 0),
+            "candidate_count": int(candidate_count),
+            "decision_count": int(decision_count),
+            "evaluating_count": int(evaluating_count),
+            "done": bool(done),
+            "failed": bool(failed),
+            "error": str(batch["error_ref"] or "") if batch is not None else "",
+        }
+
     def list_proactive_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
         rows = self._conn.execute(
             "SELECT * FROM proactive_candidates "
             "ORDER BY created_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [{
+            **dict(r),
+            "source_type": r["origin"] or "connector",
+            "source_ref": r["source_payload_ref"] or "",
+            "relevance_score": float(r["relevance"] or 0),
+            "freshness_score": 1.0,
+            "novelty_score": float(r["novelty"] or 0),
+        } for r in rows]
 
     def list_proactive_decisions(self, limit: int = 50) -> list[dict[str, Any]]:
         rows = self._conn.execute(
@@ -986,7 +1162,10 @@ class QueryService:
             "ORDER BY decided_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [{
+            **dict(r),
+            "rule_trace": r["rule_results_json"] or "{}",
+        } for r in rows]
 
     def list_scheduled_requests(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
@@ -1369,6 +1548,101 @@ class QueryService:
         except Exception:
             return []
 
+    def get_capability(self, capability_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM capabilities WHERE capability_id=?", (capability_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_skill(self, name: str) -> dict[str, Any] | None:
+        try:
+            row = self._conn.execute(
+                "SELECT * FROM skills WHERE name=?", (name,),
+            ).fetchone()
+            return dict(row) if row else None
+        except Exception:
+            return None
+
+    def list_schedules(self, limit: int = 100) -> dict[str, Any]:
+        items = [schedule.to_dict() for schedule in self._schedule_repo.find_all(
+            max(1, min(limit, 100)),
+        )]
+        return {"items": items, "total": len(items), "limit": min(limit, 100)}
+
+    def list_schedules_for_principal(
+        self, principal_id: str, *, limit: int, offset: int,
+    ) -> dict[str, Any]:
+        where = (
+            "task_type='agent.prompt' AND json_valid(task_payload)=1 "
+            "AND json_extract(task_payload, '$.principal_id')=?"
+        )
+        total_row = self._conn.execute(
+            f"SELECT COUNT(*) FROM schedules WHERE {where}", (principal_id,),
+        ).fetchone()
+        rows = self._conn.execute(
+            f"SELECT schedule_id FROM schedules WHERE {where} "
+            "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (principal_id, max(1, min(limit, 100)), max(0, offset)),
+        ).fetchall()
+        repo = self._schedule_repo
+        items = [repo.get(str(row["schedule_id"])) for row in rows]
+        return {
+            "items": [
+                _public_schedule(item.to_dict()) for item in items if item is not None
+            ],
+            "total": int(total_row[0]) if total_row else 0,
+        }
+
+    def search_knowledge(
+        self, query: str, *, principal_id: str = "owner", limit: int = 20,
+    ) -> dict[str, Any]:
+        """Safe lexical search over inline knowledge segments."""
+        escaped = query.replace("%", "\\%").replace("_", "\\_")
+        rows = self._conn.execute(
+            "SELECT s.segment_id,s.document_id,s.heading_path,s.text_ref_or_inline,"
+            "r.trust_label FROM knowledge_segments s "
+            "JOIN knowledge_documents d ON d.document_id=s.document_id "
+            "JOIN knowledge_resources r ON r.resource_id=d.resource_id "
+            "WHERE r.principal_id=? AND r.status='active' AND s.deleted_at IS NULL "
+            "AND s.text_ref_or_inline LIKE ? ESCAPE '\\' "
+            "ORDER BY s.document_id,s.ordinal LIMIT ?",
+            (principal_id, f"%{escaped}%", max(1, min(limit, 50))),
+        ).fetchall()
+        return {"items": [dict(row) for row in rows], "query": query}
+
+    def search_knowledge_page(
+        self,
+        query: str,
+        *,
+        principal_id: str,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        escaped = query.replace("%", "\\%").replace("_", "\\_")
+        joins = (
+            " FROM knowledge_segments s "
+            "JOIN knowledge_documents d ON d.document_id=s.document_id "
+            "JOIN knowledge_resources r ON r.resource_id=d.resource_id "
+        )
+        where = (
+            "WHERE r.principal_id=? AND r.status='active' AND s.deleted_at IS NULL "
+            "AND s.text_ref_or_inline LIKE ? ESCAPE '\\'"
+        )
+        params = (principal_id, f"%{escaped}%")
+        total_row = self._conn.execute(
+            "SELECT COUNT(*)" + joins + where, params,
+        ).fetchone()
+        rows = self._conn.execute(
+            "SELECT s.segment_id,s.document_id,s.heading_path,s.text_ref_or_inline,"
+            "r.trust_label" + joins + where
+            + " ORDER BY s.document_id,s.ordinal LIMIT ? OFFSET ?",
+            (*params, max(1, min(limit, 100)), max(0, offset)),
+        ).fetchall()
+        return {
+            "items": [dict(row) for row in rows],
+            "total": int(total_row[0]) if total_row else 0,
+        }
+
     def list_tool_calls(self, limit: int = 50) -> list[dict[str, Any]]:
         rows = self._conn.execute(
             "SELECT * FROM tool_calls ORDER BY started_at DESC LIMIT ?", (limit,),
@@ -1566,6 +1840,30 @@ class QueryService:
             },
             "total_selected": len(snap["items"]),
         }
+
+
+def _public_task(value: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "task_id", "task_type", "status", "priority", "scheduled_at",
+        "origin", "created_at",
+    )
+    return {key: value.get(key) for key in keys}
+
+
+def _public_task_attempt(value: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "task_attempt_id", "task_id", "attempt_no", "status", "started_at",
+        "finished_at",
+    )
+    return {key: value.get(key) for key in keys}
+
+
+def _public_schedule(value: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "schedule_id", "schedule_type", "expression", "timezone", "enabled",
+        "next_fire_at", "last_fire_at", "version", "created_at",
+    )
+    return {key: value.get(key) for key in keys}
 
 
 # ── PLAN-09 M4b 兼容别名：保留 QueryService 类名，同时暴露

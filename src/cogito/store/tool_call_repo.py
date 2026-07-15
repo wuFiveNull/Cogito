@@ -19,10 +19,16 @@ class ToolCallRecord:
     tool_name: str = ""
     tool_version: str = "1.0"
     arguments: str = "{}"
+    arguments_ref: str = ""
     idempotency_key: str = ""
     status: Literal["pending", "approved", "executing", "succeeded", "failed", "unknown", "cancelled"] = "pending"
     started_at: int | None = None
     completed_at: int | None = None
+    result_ref: str = ""
+    result_summary: str = ""
+    result_trust_label: str = "unverified"
+    result_size_bytes: int = 0
+    constraints_json: str = "{}"
 
 
 class ToolCallRepository:
@@ -36,12 +42,15 @@ class ToolCallRepository:
         self._conn.execute(
             "INSERT INTO tool_calls "
             "(tool_call_id, attempt_id, attempt_type, tool_name, tool_version, "
-            "arguments, idempotency_key, status, started_at, completed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "arguments, arguments_ref, idempotency_key, status, started_at, completed_at, "
+            "result_ref, result_summary, result_trust_label, result_size_bytes, constraints_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (record.tool_call_id, record.attempt_id, record.attempt_type,
              record.tool_name, record.tool_version,
-             record.arguments, record.idempotency_key,
-             record.status, record.started_at, record.completed_at),
+             record.arguments, record.arguments_ref, record.idempotency_key,
+             record.status, record.started_at, record.completed_at,
+             record.result_ref, record.result_summary, record.result_trust_label,
+             record.result_size_bytes, record.constraints_json),
         )
 
     def update_status(
@@ -49,12 +58,20 @@ class ToolCallRepository:
         tool_call_id: str,
         status: str,
         completed_at: int | None = None,
+        *,
+        result_ref: str = "",
+        result_summary: str = "",
+        result_trust_label: str = "unverified",
+        result_size_bytes: int = 0,
     ) -> None:
         """更新 ToolCall 状态。"""
         if completed_at is not None:
             self._conn.execute(
-                "UPDATE tool_calls SET status=?, completed_at=? WHERE tool_call_id=?",
-                (status, completed_at, tool_call_id),
+                "UPDATE tool_calls SET status=?, completed_at=?, result_ref=?, "
+                "result_summary=?, result_trust_label=?, result_size_bytes=? "
+                "WHERE tool_call_id=?",
+                (status, completed_at, result_ref, result_summary,
+                 result_trust_label, result_size_bytes, tool_call_id),
             )
         else:
             self._conn.execute(
@@ -79,15 +96,22 @@ class ToolCallRepository:
         return self._row_to_record(row) if row else None
 
     def _row_to_record(self, row: sqlite3.Row) -> ToolCallRecord:
+        value = dict(row)
         return ToolCallRecord(
-            tool_call_id=row["tool_call_id"],
-            attempt_id=row["attempt_id"],
-            attempt_type=row.get("attempt_type", "run"),
-            tool_name=row.get("tool_name", ""),
-            tool_version=row.get("tool_version", "1.0"),
-            arguments=row.get("arguments", "{}"),
-            idempotency_key=row.get("idempotency_key", ""),
-            status=row["status"],
-            started_at=row.get("started_at"),
-            completed_at=row.get("completed_at"),
+            tool_call_id=value["tool_call_id"],
+            attempt_id=value["attempt_id"],
+            attempt_type=value.get("attempt_type", "run"),
+            tool_name=value.get("tool_name", ""),
+            tool_version=value.get("tool_version", "1.0"),
+            arguments=value.get("arguments", "{}"),
+            arguments_ref=value.get("arguments_ref", ""),
+            idempotency_key=value.get("idempotency_key", ""),
+            status=value["status"],
+            started_at=value.get("started_at"),
+            completed_at=value.get("completed_at"),
+            result_ref=value.get("result_ref", ""),
+            result_summary=value.get("result_summary", ""),
+            result_trust_label=value.get("result_trust_label", "unverified"),
+            result_size_bytes=value.get("result_size_bytes", 0),
+            constraints_json=value.get("constraints_json", "{}"),
         )

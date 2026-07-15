@@ -72,6 +72,19 @@ def handle_mcp_connector_poll(task: Task, ctx: TaskHandlerContext) -> str:
     except Exception:
         _LOGGER.exception("mcp_connector.poll failed: %s", connector_id)
         try:
+            # 任何阶段失败都必须收尾 batch；不仅分页调用会失败，Normalize、
+            # Outbox 或 Cursor 提交也可能抛错。按 task_id 限定，避免误伤并发批次。
+            conn.execute(
+                "UPDATE ingestion_batches SET status='failed', "
+                "error_ref=CASE WHEN error_ref='' THEN 'task_handler_failed' ELSE error_ref END, "
+                "completed_at=? WHERE connector_id=? AND task_id=? AND status='started'",
+                (now_ms(), connector_id, task_id_from_ctx(ctx)),
+            )
+            ConnectorRepository(conn).update_failure(connector_id)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+        try:
             conn.close()
         except Exception:
             pass

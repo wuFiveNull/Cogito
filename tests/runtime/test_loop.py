@@ -48,6 +48,40 @@ def _make_snapshot(text: str = "Hello") -> ContextSnapshot:
 
 class TestAgentLoop:
     @pytest.mark.asyncio
+    async def test_checkpoint_restores_cumulative_usage(self):
+        provider = StubModelProvider(
+            [
+                StubScenario(
+                    response_text="continued",
+                    usage=Usage(input_tokens=3, output_tokens=2, cached_tokens=1),
+                )
+            ],
+        )
+        router = ModelRouter(providers={"stub": provider}, role_map={"main": "stub"})
+        loop = AgentLoop(
+            router,
+            checkpoint_loader=lambda _turn_id: {
+                "usage": {"input_tokens": 11, "output_tokens": 5, "cached_tokens": 2},
+                "accumulated_cost": 0.25,
+                "elapsed_wall_seconds": 1,
+                "budget": {
+                    "max_loop_iterations": 10,
+                    "max_model_calls": 20,
+                    "max_tool_calls": 50,
+                    "max_input_tokens": 32000,
+                    "max_output_tokens": 8192,
+                    "max_wall_time_s": 120,
+                    "max_cost": 0,
+                },
+            },
+        )
+
+        result = await loop.run(_make_snapshot())
+
+        assert result.result_type == LoopResultType.final_response
+        assert result.usage == Usage(input_tokens=14, output_tokens=7, cached_tokens=3)
+
+    @pytest.mark.asyncio
     async def test_final_response(self):
         provider = StubModelProvider([StubScenario(response_text="Hello!")])
         router = ModelRouter(

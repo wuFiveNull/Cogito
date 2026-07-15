@@ -100,6 +100,10 @@ Fail(error)
 
 一次调用执行有界步骤，长期循环必须写 Checkpoint 并重新排队。
 
+Agent Tool 创建/取消 Schedule 不直接写 Repository，而是发送
+`CreateAgentSchedule` / `CancelAgentSchedule` Command。Handler 在同一事务写
+聚合、Command Audit 和 Event Outbox，幂等键为 `tool_call_id + action_hash`。
+
 ## 6. Retry
 
 RetryPolicy 定义次数、错误码、指数退避、上限和 jitter。Attempt 数和预算跨重启累计。副作用 unknown 不进入普通 Retry，先对账。
@@ -199,9 +203,21 @@ merge             所有错过的触发合并为一次执行，payload 中包含
 
 WaitingCondition 保存类型、目标、过期时间、轮询时间和恢复 Checkpoint。子任务声明 `join_policy: all|any|none`、失败策略和最大深度；创建子任务与父状态更新同事务。
 
+`delegate_task` 将旧单 `prompt` 规范化为一个 `tasks[]` 元素；一次最多三个子
+Agent、同一父 Attempt 并发最多两个、深度最多二。权限是父 CapabilitySnapshot、
+请求 Toolset 与本地子 Agent Policy 的交集，排除 Channel/Delivery/权限管理。
+父 Attempt 结束后 Turn=`waiting_external`；子 Task 使用独立 Turn、RunAttempt 和
+预算执行。每个 Child 的 `usage_json` 在 Join Evaluator 中聚合到父
+`agent_delegations.usage_json`，供状态查询和后续预算治理使用。Join `all|any` 满足后
+父 Turn 入队，新 Attempt 从 Checkpoint 恢复。
+
 ## 9. 取消与恢复
 
 取消先更新 Task 版本，再通知 Worker。重启扫描过期 Lease、running Task、waiting 条件和 unknown ToolCall；旧 Attempt abandoned，确认安全后重新排队。
+
+父取消以条件更新级联所有非终态 Child Task/Turn，只阻止后续执行，不声称撤销
+已发生副作用。子 Agent 的高风险审批绑定原始 Principal；子 Turn 可等待用户，
+父 Turn 继续等待 Join。
 
 ## 10. 公平性与资源
 

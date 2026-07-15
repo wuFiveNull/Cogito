@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -54,6 +53,49 @@ def _cmd_info(args: argparse.Namespace) -> int:
     print(f"Workspace:{config.workspace_path}")
     print(f"Database: {config.resolve_db_path()}")
     print(f"Model:    {config.model.main.model or '(stub)'}")
+    return 0
+
+
+def _cmd_mcp_serve(args: argparse.Namespace) -> int:
+    """Run the local read-only MCP server over stdio."""
+    config = Config.load(_config_path(args))
+    from cogito.service.read_only_mcp_server import run_read_only_mcp_server
+    run_read_only_mcp_server(config)
+    return 0
+
+
+def _cmd_mcp_auth(args: argparse.Namespace) -> int:
+    """Inspect or reset OAuth token state without printing credentials."""
+    config = Config.load(_config_path(args))
+    selected = [
+        entry for entry in config.capability.mcp_servers
+        if not args.server or entry.name == args.server
+    ]
+    if args.server and not selected:
+        print(f"MCP server not found: {args.server}", file=sys.stderr)
+        return 2
+    for entry in selected:
+        if not entry.oauth_enabled:
+            print(f"{entry.name}: oauth_disabled")
+            continue
+        if not entry.secret_root:
+            print(f"{entry.name}: invalid_secret_root")
+            continue
+        root = Path(entry.secret_root).expanduser().resolve()
+        path = Path(
+            entry.oauth_token_file
+            or root / f"{entry.name}.json"
+        ).expanduser().resolve()
+        try:
+            path.relative_to(root)
+        except ValueError:
+            print(f"{entry.name}: invalid_token_path")
+            continue
+        if args.auth_command == "reset":
+            path.unlink(missing_ok=True)
+            print(f"{entry.name}: reset")
+        else:
+            print(f"{entry.name}: {'configured' if path.is_file() else 'auth_required'}")
     return 0
 
 
@@ -131,9 +173,10 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
 async def _serve_async(config: Config, args: argparse.Namespace) -> int:
     """Serve 异步实现：所有 async 操作在同一 event loop 内完成。"""
+    import uvicorn
+
     from cogito.application import RuntimeApplication
     from cogito.interaction_web.server import create_app
-    import uvicorn
 
     print("=" * 50)
     print("  Cogito — interaction-web")
@@ -165,7 +208,7 @@ async def _serve_async(config: Config, args: argparse.Namespace) -> int:
         worker_task = asyncio.create_task(
             rt.run_worker(
                 worker_id="web-worker",
-                poll_interval=config.worker.heartbeat_interval_seconds,
+                poll_interval=config.worker.poll_interval_seconds,
             ),
             name="cogito-web-worker",
         )
@@ -226,6 +269,14 @@ def main() -> None:
     ).add_parser("check", help="校验配置文件并报告状态", parents=[pre])
 
     sub.add_parser("info", help="显示系统信息", parents=[pre])
+    sub.add_parser("mcp-serve", help="启动只读 stdio MCP Server", parents=[pre])
+    mcp_parser = sub.add_parser("mcp", help="MCP 管理", parents=[pre])
+    mcp_sub = mcp_parser.add_subparsers(dest="mcp_command")
+    auth_parser = mcp_sub.add_parser("auth", help="OAuth token 管理", parents=[pre])
+    auth_sub = auth_parser.add_subparsers(dest="auth_command")
+    for command in ("status", "reset"):
+        item = auth_sub.add_parser(command, parents=[pre])
+        item.add_argument("--server", default="")
 
     run_parser = sub.add_parser("run", help="前台运行 Agent worker", parents=[pre])
     run_parser.add_argument(
@@ -263,6 +314,10 @@ def main() -> None:
             sys.exit(_cmd_info(args))
         elif args.command == "run":
             sys.exit(_cmd_run(args))
+        elif args.command == "mcp-serve":
+            sys.exit(_cmd_mcp_serve(args))
+        elif args.command == "mcp" and args.mcp_command == "auth" and args.auth_command:
+            sys.exit(_cmd_mcp_auth(args))
         elif args.command == "serve":
             sys.exit(_cmd_serve(args))
         else:

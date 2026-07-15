@@ -6,6 +6,10 @@ per-source 预算配额，版本化策略。knowledge 不能挤掉 active constr
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from cogito.contracts.retrieval import RetrievalCandidate
 
 
 @dataclass
@@ -64,9 +68,9 @@ class BudgetAllocation:
 class BudgetSelection:
     """统一预算选择结果（PLAN-16 RET-03 完整）。"""
 
-    selected: list["RetrievalCandidate"] = field(default_factory=list)
-    excluded: list["RetrievalCandidate"] = field(default_factory=list)
-    allocations: "dict[str, BudgetAllocation]" = field(default_factory=dict)
+    selected: list[RetrievalCandidate] = field(default_factory=list)
+    excluded: list[RetrievalCandidate] = field(default_factory=list)
+    allocations: dict[str, BudgetAllocation] = field(default_factory=dict)
 
 
 def allocate_budget(
@@ -87,8 +91,8 @@ def allocate_budget(
 
 
 def select_candidates(
-    candidates: list["RetrievalCandidate"],
-    allocations: "dict[str, BudgetAllocation]",
+    candidates: list[RetrievalCandidate],
+    allocations: dict[str, BudgetAllocation],
     *,
     protected_ids: set[str] | None = None,
 ) -> BudgetSelection:
@@ -102,14 +106,14 @@ def select_candidates(
 
     protected_ids = protected_ids or set()
     # 按 source group 内部归一化（各来源 score 可比）
-    by_source: dict[str, list["RetrievalCandidate"]] = {}
+    by_source: dict[str, list[RetrievalCandidate]] = {}
     for c in candidates:
         by_source.setdefault(c.candidate_type, []).append(c)
     for group in by_source.values():
         normalize_scores(group)
 
     # protected 先选（不计入 quota 限制）
-    protected_selected: list["RetrievalCandidate"] = [
+    protected_selected: list[RetrievalCandidate] = [
         c for c in candidates if c.candidate_id in protected_ids
     ]
 
@@ -119,8 +123,8 @@ def select_candidates(
         key=lambda c: -c.final_score,
     )
     import dataclasses
-    selected: list["RetrievalCandidate"] = list(protected_selected)
-    excluded: list["RetrievalCandidate"] = []
+    selected: list[RetrievalCandidate] = list(protected_selected)
+    excluded: list[RetrievalCandidate] = []
     for alloc in allocations.values():
         alloc.used = 0
         alloc.selected = []

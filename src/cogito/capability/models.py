@@ -13,6 +13,75 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+
+@dataclass(frozen=True)
+class ConstraintSet:
+    """Deterministic upper bounds carried from Policy into the runtime."""
+
+    allowed_paths: tuple[str, ...] = ()
+    protected_paths: tuple[str, ...] = ()
+    allowed_hosts: tuple[str, ...] = ()
+    network_enabled: bool = False
+    mount_mode: Literal["none", "ro", "rw"] = "none"
+    timeout_seconds: int = 30
+    max_output_chars: int = 50_000
+    max_result_items: int = 1_000
+    max_write_bytes: int = 1_000_000
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any] | None) -> ConstraintSet:
+        raw = value or {}
+        return cls(
+            allowed_paths=tuple(str(v) for v in raw.get("allowed_paths", ())),
+            protected_paths=tuple(str(v) for v in raw.get("protected_paths", ())),
+            allowed_hosts=tuple(str(v) for v in raw.get("allowed_hosts", ())),
+            network_enabled=bool(raw.get("network_enabled", False)),
+            mount_mode=str(raw.get("mount_mode", "none")),
+            timeout_seconds=max(1, int(raw.get("timeout_seconds", 30))),
+            max_output_chars=max(1, int(raw.get("max_output_chars", 50_000))),
+            max_result_items=max(1, int(raw.get("max_result_items", 1_000))),
+            max_write_bytes=max(1, int(raw.get("max_write_bytes", 1_000_000))),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "allowed_paths": list(self.allowed_paths),
+            "protected_paths": list(self.protected_paths),
+            "allowed_hosts": list(self.allowed_hosts),
+            "network_enabled": self.network_enabled,
+            "mount_mode": self.mount_mode,
+            "timeout_seconds": self.timeout_seconds,
+            "max_output_chars": self.max_output_chars,
+            "max_result_items": self.max_result_items,
+            "max_write_bytes": self.max_write_bytes,
+        }
+
+    def intersect(self, other: ConstraintSet) -> ConstraintSet:
+        paths = _intersect_scopes(self.allowed_paths, other.allowed_paths)
+        hosts = _intersect_scopes(self.allowed_hosts, other.allowed_hosts)
+        protected = tuple(sorted(set(self.protected_paths) | set(other.protected_paths)))
+        mount_rank = {"none": 0, "ro": 1, "rw": 2}
+        mount = min((self.mount_mode, other.mount_mode), key=mount_rank.__getitem__)
+        return ConstraintSet(
+            allowed_paths=paths,
+            protected_paths=protected,
+            allowed_hosts=hosts,
+            network_enabled=self.network_enabled and other.network_enabled,
+            mount_mode=mount,
+            timeout_seconds=min(self.timeout_seconds, other.timeout_seconds),
+            max_output_chars=min(self.max_output_chars, other.max_output_chars),
+            max_result_items=min(self.max_result_items, other.max_result_items),
+            max_write_bytes=min(self.max_write_bytes, other.max_write_bytes),
+        )
+
+
+def _intersect_scopes(left: tuple[str, ...], right: tuple[str, ...]) -> tuple[str, ...]:
+    if not left:
+        return right
+    if not right:
+        return left
+    return tuple(sorted(set(left) & set(right)))
+
 # ── Tool 定义（注册后不可变）──
 
 
@@ -33,24 +102,37 @@ class ToolDef:
 
     # ── Capability Registry 2.0 元数据 ──
     version: str = "1.0"
-    namespace: str = "core"          # 全局唯一 namespace:name
+    namespace: str = "core"  # 全局唯一 namespace:name
     toolset: tuple[str, ...] = ("core",)
-    supported_modes: tuple[str, ...] = ()   # 空 = 所有模式
-    permissions: tuple[str, ...] = ()       # 所需权限声明
+    supported_modes: tuple[str, ...] = ()  # 空 = 所有模式
+    permissions: tuple[str, ...] = ()  # 所需权限声明
     risk_level: Literal["low", "medium", "high"] = "low"
     side_effect_class: Literal["none", "idempotent", "reconcilable", "non_retriable"] = "none"
     resource_requirements: dict[str, Any] = field(default_factory=dict)
     check_fn: Callable[[], bool] | None = field(
-        default=None, compare=False, hash=False,
+        default=None,
+        compare=False,
+        hash=False,
+    )
+    reconcile_fn: Callable[..., Any] | None = field(
+        default=None,
+        compare=False,
+        hash=False,
     )
     requires_env: tuple[str, ...] = ()
     deprecated: bool = False
     disabled: bool = False
+    approval_policy: Literal["auto", "always", "never"] = "auto"
+    output_schema: dict[str, Any] | None = None
+    result_trust_label: str = "verified_local"
+    deferred: bool = False
+    # Optional stable identity when the model-facing name needs namespacing.
+    capability_name: str = ""
 
     @property
     def capability_id(self) -> str:
         """全局唯一 capability_id = namespace:name。"""
-        return f"{self.namespace}:{self.name}"
+        return f"{self.namespace}:{self.capability_name or self.name}"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "toolset", tuple(self.toolset))
@@ -60,6 +142,7 @@ class ToolDef:
 
 
 # ── SideEffectReceipt (Plan 03 M2/M3) ───────────────────────────
+
 
 @dataclass(frozen=True)
 class SideEffectReceipt:
@@ -72,6 +155,7 @@ class SideEffectReceipt:
     raw_ref: 原始响应 Payload ref（受限访问）
     reconcile_status: pending | reconciled | manual
     """
+
     receipt_id: str = ""
     tool_call_id: str = ""
     external_operation_id: str = ""
@@ -117,10 +201,25 @@ class ToolResult:
 
     tool_call_id: str
     tool_name: str
-    status: Literal["success", "error"]
+    status: Literal["success", "error", "approval_required", "waiting_external"]
     result: str = ""
     error_message: str = ""
     duration_ms: int = 0
+    trust_label: str = "unverified"
+    approval_id: str = ""
+    payload_ref: str = ""
+    raw_size_bytes: int = 0
+    truncated: bool = False
+    constraints: ConstraintSet = field(default_factory=ConstraintSet)
+    waiting_id: str = ""
+
+
+@dataclass(frozen=True)
+class DeferredExecution:
+    """Handler result indicating durable work was queued outside this worker."""
+
+    waiting_id: str
+    summary: str = "Deferred work queued"
 
 
 # ── 执行上下文 ──
@@ -141,3 +240,20 @@ class ToolContext:
     turn_id: str = ""
     input_message_id: str = ""
     conversation_id: str = ""
+    agent_mode: str = "reactive"
+    # Only the latest user request is exposed to the Auto Mode classifier.
+    # Handlers should not use this field as an authorization signal.
+    user_request: str = ""
+    expose_tool: Callable[[str], bool] | None = field(
+        default=None,
+        compare=False,
+        hash=False,
+    )
+    tool_state: dict[str, Any] = field(
+        default_factory=dict,
+        compare=False,
+        hash=False,
+    )
+    constraints: ConstraintSet = field(default_factory=ConstraintSet)
+    allowed_toolsets: tuple[str, ...] = ()
+    capability_snapshot_ids: tuple[str, ...] = ()

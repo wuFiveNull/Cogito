@@ -10,6 +10,7 @@ CAPABILITY-PLUGINS / 4. Capability Registry：
 from __future__ import annotations
 
 from dataclasses import dataclass
+from threading import RLock
 from typing import Any
 
 from cogito.capability.models import ToolDef
@@ -20,6 +21,7 @@ MAX_DESCRIPTION_LENGTH = 512
 @dataclass(frozen=True)
 class CapabilitySnapshot:
     """不可变能力快照 —— 写入 Attempt，锁定执行时的能力集合。"""
+
     schema_version: str = "1.0"
     capabilities: tuple[ToolDef, ...] = ()
     policy_version: str = "1.0"
@@ -40,6 +42,8 @@ class CapabilityRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, ToolDef] = {}
+        self._stale_capabilities: set[str] = set()
+        self._lock = RLock()
 
     # ── 注册 ──
 
@@ -50,26 +54,30 @@ class CapabilityRegistry:
         同名冲突时 startup 失败并指出来源（Plan 03 M1）。
         """
         cid = tool.capability_id
-        if cid in self._tools:
-            import warnings
+        with self._lock:
+            if cid in self._tools:
+                import warnings
 
-            warnings.warn(
-                f"Capability '{cid}' already registered (from {self._tools[cid].namespace}), "
-                f"overwriting",
-                stacklevel=2,
-            )
-        self._tools[cid] = tool
+                warnings.warn(
+                    f"Capability '{cid}' already registered (from {self._tools[cid].namespace}), "
+                    f"overwriting",
+                    stacklevel=2,
+                )
+            self._tools[cid] = tool
+            self._stale_capabilities.discard(cid)
+            self._stale_capabilities.discard(tool.name)
 
     # ── 查询 ──
 
     def get(self, name: str) -> ToolDef | None:
         """按 capability_id 或 name 获取工具定义。"""
-        if name in self._tools:
-            return self._tools[name]
-        # 反向按 name 查找（兼容未加 namespace 的调用方）
-        for t in self._tools.values():
-            if t.name == name:
-                return t
+        with self._lock:
+            if name in self._tools:
+                return self._tools[name]
+            # 反向按 name 查找（兼容未加 namespace 的调用方）
+            for t in self._tools.values():
+                if t.name == name:
+                    return t
         return None
 
     def resolve(self, name: str) -> ToolDef:
@@ -81,15 +89,16 @@ class CapabilityRegistry:
 
     def all_tools(self) -> list[ToolDef]:
         """返回所有已注册的工具。"""
-        return list(self._tools.values())
+        with self._lock:
+            return list(self._tools.values())
 
     def list_by_toolset(self, toolset: str) -> list[ToolDef]:
         """返回属于指定 Toolset 的所有工具。"""
-        return [t for t in self._tools.values() if toolset in t.toolset]
+        return [t for t in self.all_tools() if toolset in t.toolset]
 
     def list_by_toolsets(self, toolsets: set[str]) -> list[ToolDef]:
         """返回属于任一指定 Toolset 的所有工具。"""
-        return [t for t in self._tools.values() if set(t.toolset) & toolsets]
+        return [t for t in self.all_tools() if set(t.toolset) & toolsets]
 
     def list_by_mode(self, mode: str) -> list[ToolDef]:
         """返回指定模式下可见的所有工具。
@@ -97,8 +106,7 @@ class CapabilityRegistry:
         空 supported_modes 表示该工具在所有模式均可见。
         """
         return [
-            t for t in self._tools.values()
-            if not t.supported_modes or mode in t.supported_modes
+            t for t in self.all_tools() if not t.supported_modes or mode in t.supported_modes
         ]
 
     # ── Schema 输出 ──
@@ -110,7 +118,11 @@ class CapabilityRegistry:
             return desc[:MAX_DESCRIPTION_LENGTH] + "..."
         return desc
 
-    def get_openai_schemas(self, toolsets: set[str] | None = None) -> list[dict[str, Any]]:
+    def get_openai_schemas(
+        self,
+        toolsets: set[str] | None = None,
+        exposed_tools: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
         """获取 OpenAI function calling 格式的工具 Schema 列表。
 
         Args:
@@ -119,66 +131,120 @@ class CapabilityRegistry:
         Returns:
             [{type: "function", function: {name, description, parameters}}]
         """
-        tools = (
-            self.list_by_toolsets(toolsets)
-            if toolsets is not None
-            else self.all_tools()
-        )
+        tools = self.list_by_toolsets(toolsets) if toolsets is not None else self.all_tools()
 
         result = []
         for t in tools:
-            result.append({
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": self._sanitize_description(t.description),
-                    "parameters": t.input_schema,
-                },
-            })
+            if t.deferred and not (
+                exposed_tools and (t.name in exposed_tools or t.capability_id in exposed_tools)
+            ):
+                continue
+            result.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": self._sanitize_description(t.description),
+                        "parameters": t.input_schema,
+                    },
+                }
+            )
         return result
+
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        toolsets: set[str] | None = None,
+    ) -> list[ToolDef]:
+        terms = [term.casefold() for term in query.split() if term]
+        candidates = self.list_by_toolsets(toolsets) if toolsets else self.all_tools()
+        ranked: list[tuple[int, ToolDef]] = []
+        for tool in candidates:
+            haystack = " ".join(
+                (
+                    tool.name,
+                    tool.description,
+                    tool.namespace,
+                    " ".join(tool.toolset),
+                )
+            ).casefold()
+            score = sum(
+                3 if term in tool.name.casefold() else 1 for term in terms if term in haystack
+            )
+            if not terms or score:
+                ranked.append((score, tool))
+        ranked.sort(key=lambda item: (-item[0], item[1].capability_id))
+        return [tool for _, tool in ranked[: max(1, min(limit, 50))]]
 
     def get_schemas_by_mode(self, mode: str) -> list[dict[str, Any]]:
         """返回指定模式下可见的工具 Schema。"""
         tools = self.list_by_mode(mode)
         result = []
         for t in tools:
-            result.append({
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": self._sanitize_description(t.description),
-                    "parameters": t.input_schema,
-                },
-            })
+            result.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": self._sanitize_description(t.description),
+                        "parameters": t.input_schema,
+                    },
+                }
+            )
         return result
 
     # ── 统计 ──
 
     def __len__(self) -> int:
-        return len(self._tools)
+        with self._lock:
+            return len(self._tools)
 
     def __contains__(self, name: str) -> bool:
         """兼容 name 和 capability_id (namespace:name) 查找。"""
-        if name in self._tools:
-            return True
-        # 反向查找：name 匹配（不含 namespace 前缀）
-        return any(t.name == name for t in self._tools.values())
+        with self._lock:
+            if name in self._tools:
+                return True
+            # 反向查找：name 匹配（不含 namespace 前缀）
+            return any(t.name == name for t in self._tools.values())
 
     # ── 取消注册 ──
 
     def unregister(self, name: str) -> None:
         """按名称移除一个工具。"""
-        self._tools.pop(name, None)
+        with self._lock:
+            removed = self._tools.pop(name, None)
+            if removed is not None:
+                self._stale_capabilities.update({removed.capability_id, removed.name})
 
     def unregister_by_prefix(self, prefix: str) -> list[str]:
         """移除所有名称以指定前缀开头的工具。
 
         Returns: 被移除的工具名列表。
         """
-        removed = [n for n in self._tools if n.startswith(prefix)]
-        for n in removed:
-            del self._tools[n]
+        with self._lock:
+            removed = [
+                cid
+                for cid, tool in self._tools.items()
+                if cid.startswith(prefix) or tool.name.startswith(prefix)
+            ]
+            for n in removed:
+                self._stale_capabilities.update(
+                    {self._tools[n].capability_id, self._tools[n].name}
+                )
+                del self._tools[n]
         return removed
+
+    def is_stale(self, name: str) -> bool:
+        """Return true when a dynamically provided capability was removed."""
+        with self._lock:
+            if name in self._stale_capabilities:
+                return True
+            return any(
+                tool_name.endswith(f":{name}")
+                for tool_name in self._stale_capabilities
+            )
 
     # ── Capability Snapshot (Plan 03 M1) ─────────────────────────
 
@@ -194,7 +260,7 @@ class CapabilityRegistry:
         disabled/deprecated 工具不会进入 Model Schema。
         """
         visible: list[ToolDef] = []
-        for t in self._tools.values():
+        for t in self.all_tools():
             if t.disabled or t.deprecated:
                 continue
             if toolsets and not (set(t.toolset) & toolsets):

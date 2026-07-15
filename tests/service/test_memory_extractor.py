@@ -162,7 +162,7 @@ class TestMemoryExtractor:
         assert row is not None
         assert row["status"] == "candidate"
 
-    def test_parse_failure_returns_empty(self, db, service):
+    def test_parse_failure_raises_typed_error(self, db, service):
         from cogito.model.router import ModelRouter
         from cogito.model.stub_provider import StubModelProvider, StubScenario
 
@@ -173,12 +173,14 @@ class TestMemoryExtractor:
             providers={"extractor": provider},
             role_map={"memory_extractor": "extractor"},
         )
-        extractor = MemoryExtractor(db, service, router=router)
+        extractor = MemoryExtractor(db, service, router=router, strict=True)
 
-        items = asyncio.run(extractor.extract_from_messages(
-            _msgs(["Hello"] * 5), "p1", session_id="s1",
-        ))
-        assert items == []
+        from cogito.service.memory_extractor import MemoryExtractionParseError
+
+        with pytest.raises(MemoryExtractionParseError):
+            asyncio.run(extractor.extract_from_messages(
+                _msgs(["Hello"] * 5), "p1", session_id="s1",
+            ))
 
     def test_format_messages(self, db, service):
         msgs = _msgs(["Hello", "Hi there"])

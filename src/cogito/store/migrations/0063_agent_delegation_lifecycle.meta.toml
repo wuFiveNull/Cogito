@@ -1,0 +1,4 @@
+version = 63
+name = "agent_delegation_lifecycle"
+online_safe = true
+requires_downtime = false

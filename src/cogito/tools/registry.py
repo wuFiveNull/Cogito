@@ -6,19 +6,20 @@ CAPABILITY-PLUGINS / 4.1 路径 A — 自动发现（内置 Tool）：
 PLAN-09 M4a: registry 不再依赖 SqliteMemoryService；记忆工具
 由组合根通过 MemoryReader / MemoryWriter 端口注入（工厂或实例）。
 """
+
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from cogito.capability.registry import CapabilityRegistry
+from cogito.contracts.context import KnowledgeReader
+from cogito.contracts.memory import MemoryReader, MemoryWriter
+from cogito.contracts.multimodal import StickerService, VisionToolService
 
 _LOGGER = logging.getLogger("cogito.tools.registry")
-
-from cogito.contracts.memory import MemoryReader, MemoryWriter
-from cogito.contracts.context import KnowledgeReader
-from cogito.contracts.multimodal import StickerService, VisionToolService
 
 # 全局默认注册表
 registry: CapabilityRegistry = CapabilityRegistry()
@@ -36,6 +37,8 @@ def discover_builtin_tools(
     make_task_service: Callable[[], Any] | None = None,
     make_memory_service: Callable[[], Any] | None = None,
     knowledge_reader: KnowledgeReader | None = None,
+    capability_config: Any | None = None,
+    connection: Any | None = None,
 ) -> CapabilityRegistry:
     """发现并注册所有内置工具。
 
@@ -58,27 +61,48 @@ def discover_builtin_tools(
     for tool in [echo.tool_def, now.tool_def]:
         r.register(tool)
 
+    # Explicit project workspace. No root means no host file tools.
+    workspace_cfg = getattr(capability_config, "workspace", None)
+    if workspace_cfg is not None and workspace_cfg.root:
+        from cogito.capability.workspace import WorkspaceBoundary
+        from cogito.tools.filesystem import create_tool_defs as _create_fs_tools
+
+        boundary = WorkspaceBoundary.create(
+            workspace_cfg.root,
+            protected_paths=workspace_cfg.protected_paths,
+            max_read_bytes=workspace_cfg.max_read_bytes,
+            max_write_bytes=workspace_cfg.max_write_bytes,
+        )
+        for tool in _create_fs_tools(boundary):
+            r.register(tool)
+
     # ── 记忆工具（依赖 MemoryReader / MemoryWriter 端口）──
     from cogito.tools.forget_memory import create_tool_def as _create_forget
     from cogito.tools.recall_memory import create_tool_def as _create_recall
     from cogito.tools.remember_memory import create_tool_def as _create_remember
 
     # 优先用 make_writer 工厂（独立事务），其次用共享 writer 实例
-    r.register(_create_remember(
-        writer=memory_writer,
-        make_writer=make_memory_writer,
-        make_task_service=make_task_service,
-    ))
-    r.register(_create_forget(
-        reader=memory_reader,
-        writer=memory_writer,
-    ))
+    r.register(
+        _create_remember(
+            writer=memory_writer,
+            make_writer=make_memory_writer,
+            make_task_service=make_task_service,
+        )
+    )
+    r.register(
+        _create_forget(
+            reader=memory_reader,
+            writer=memory_writer,
+        )
+    )
     # 读工具使用共享 reader 或工厂；召回命中后写 exposed 信号（MEM-02）
     # MEM-02: 工具召回命中 → exposed 信号（可观察）
-    r.register(_create_recall(
-        reader=memory_reader,
-        on_exposed=_make_on_exposed_handler(make_memory_service=make_memory_service),
-    ))
+    r.register(
+        _create_recall(
+            reader=memory_reader,
+            on_exposed=_make_on_exposed_handler(make_memory_service=make_memory_service),
+        )
+    )
 
     if knowledge_reader is not None:
         from cogito.tools.search_knowledge import create_tool_def as _create_knowledge_search
@@ -105,6 +129,31 @@ def discover_builtin_tools(
         r.register(_create_save_url(make_service=make_sticker_service))
         r.register(_create_send(make_service=make_sticker_service))
 
+    # Common Agent capabilities.  Deferred tools are discoverable through the
+    # always-visible tool_search bridge without bloating every model request.
+    from cogito.tools.web import create_web_fetch_def
+
+    r.register(create_web_fetch_def())
+
+    if connection is not None:
+        from cogito.tools.common_agent import create_schedule_tool_defs
+
+        for tool in create_schedule_tool_defs(connection):
+            r.register(tool)
+
+    skill_cfg = getattr(capability_config, "skills", None)
+    if skill_cfg is not None and skill_cfg.root:
+        from cogito.tools.common_agent import create_skill_tool_defs
+
+        skill_root = Path(skill_cfg.root).resolve()
+        for tool in create_skill_tool_defs(skill_root, r, connection):
+            r.register(tool)
+
+    from cogito.tools.agent_meta import create_tool_defs as _create_meta_tools
+
+    for tool in _create_meta_tools(r):
+        r.register(tool)
+
     return r
 
 
@@ -119,6 +168,8 @@ def assemble_default_registry(
     make_task_service: Callable[[], Any] | None = None,
     make_memory_service: Callable[[], Any] | None = None,
     knowledge_reader: KnowledgeReader | None = None,
+    capability_config: Any | None = None,
+    connection: Any | None = None,
 ) -> CapabilityRegistry:
     """创建 CapabilityRegistry 并注册所有内置工具。
 
@@ -138,6 +189,8 @@ def assemble_default_registry(
         make_task_service=make_task_service,
         make_memory_service=make_memory_service,
         knowledge_reader=knowledge_reader,
+        capability_config=capability_config,
+        connection=connection,
     )
     return registry
 
@@ -155,6 +208,7 @@ def _make_on_exposed_handler(
     def _on_exposed(memory_ids: list[str]) -> None:
         svc = make_memory_service()
         from cogito.service.memory_signals import SignalWriter
+
         writer = SignalWriter(svc.conn if hasattr(svc, "conn") else svc._conn)
         try:
             for mid in memory_ids:

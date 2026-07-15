@@ -29,8 +29,9 @@ class TestDriftConfigDefaults:
         c = cfg.capability.proactive.cadence
         assert c.min_interval_seconds == 60
         assert c.max_interval_seconds == 1800
-        assert c.high_energy_interval_seconds == 60
-        assert c.low_energy_interval_seconds == 480
+        assert c.high_energy_interval_seconds == 480
+        assert c.medium_energy_interval_seconds == 240
+        assert c.low_energy_interval_seconds == 60
         assert c.jitter_ratio == 0.10
         assert c.misfire_policy == "coalesce"
 

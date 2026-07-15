@@ -1,0 +1,6 @@
+id = "fetch"
+display_name = "Generic Fetch MCP"
+recommended_alias = "fetch"
+access = "read_only"
+trust_label = "external_untrusted"
+auto_install = false

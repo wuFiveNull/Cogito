@@ -1,0 +1,6 @@
+id = "context7"
+display_name = "Context7 Documentation MCP"
+recommended_alias = "docs_search"
+access = "read_only"
+trust_label = "external_untrusted"
+auto_install = false

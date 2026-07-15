@@ -246,8 +246,10 @@ def migrate(
     """
     _ensure_schema_version_table(conn)
     applied = _get_applied_versions(conn)
-    current = max(applied) if applied else 0
-    pending = [mf for mf in _discover() if mf.version > current]
+    # 正确水位线：检查每个版本是否已应用，不能依赖 max(version)。
+    # 当高版本号迁移（如 plugin 1002/1004/1005）先于核心低版本迁移应用时，
+    # max 水位线会错误跳过未应用的低版本迁移（如 0040-0060）。
+    pending = [mf for mf in _discover() if mf.version not in applied]
 
     applied_versions: list[int] = []
     for mf in pending:

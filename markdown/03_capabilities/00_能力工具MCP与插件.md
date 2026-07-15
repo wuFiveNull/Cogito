@@ -237,7 +237,9 @@ tools:
 
 系统提供两种注册路径：
 
-**路径 A — 自动发现（内置 Tool）**：`tools/` 目录下的 Python 文件，在模块顶层调用 `registry.register()`：
+**路径 A — 组合根显式发现（内置 Tool）**：`discover_builtin_tools()` 导入内置
+ToolDef 或调用依赖注入工厂，统一注册到 Registry。带外部依赖的 Tool 不在模块
+import 时修改全局状态：
 
 ```python
 # tools/my_tool.py
@@ -253,7 +255,9 @@ registry.register(
 )
 ```
 
-启动时 `discover_builtin_tools()` 扫描 `tools/*.py`，通过 AST 检测顶层 `registry.register()` 调用，自动 import 并注册。**无需手动维护工具列表。**
+启动时组合根传入 Memory、Knowledge、Workspace、数据库连接和 Capability 配置。
+Workspace Root 未配置时文件 Tool 不注册。核心 Registry 不提供 Shell、后台进程或
+任意代码执行 Tool；stdio MCP 仅允许显式声明的 `host_trusted` Server。
 
 **路径 B — 插件注册**：插件在 `register(ctx)` 函数中调用 `ctx.register_tool(...)`，底层委托给同一个 Registry。插件 Tool 的 toolset 可在 `plugin.yaml` 中声明默认值，用户可覆盖。
 
@@ -339,11 +343,14 @@ metadata:
 ```text
 内置 Skill     <repo>/skills/<name>/SKILL.md          — 随项目分发
 可选 Skill     <repo>/optional-skills/<name>/SKILL.md  — 需用户安装
-用户 Skill     ~/.cogito/skills/<name>/SKILL.md        — 用户创建或第三方
+用户 Skill     capability.skills.root/<name>/SKILL.md  — 显式配置后可管理
 插件 Skill     插件包内的 skills/ 目录
 ```
 
 加载顺序：内置 → 用户（同名覆盖）。Skill 的 toolsets 声明不得超过 Plugin Manifest 的权限。
+用户 Skill Root 不从 cwd、HOME 或 Workspace Root 隐式推导；未配置时
+`skill_manage` 不注册。创建、更新、归档和恢复通过 Command Service 写 Audit 与
+Outbox，更新和状态变化要求 `expected_version`，归档采用软删除。
 
 ### 5.3 Skill 激活方式
 
@@ -382,6 +389,13 @@ pinned     — 用户标记为永久保留，跳过自动归档
 - Server 不可用时只影响相关 Capability。
 
 MCP Server 提供的 Tool 自动进入 Registry，toolset 默认设为 Server 名称。用户可将其重新分配 Toolset 或禁用单个 Tool。
+
+Registry 对动态 Provider 更新使用并发安全快照。MCP Tool 本地配置决定风险、
+审批策略与权限；Server 自报元数据不得扩大权限。Manager 支持列表变化通知、
+Schema/数量/大小校验、稳定别名、指数退避、熔断和健康状态。Sampling 使用独立
+无 Tool 模型角色，并按 `Server + Agent Attempt` 隔离调用次数、Token 与墙钟预算；
+Roots 只来自显式 Workspace/roots 配置。当前 Remote MCP 对 HTTP 重定向采用严格
+拒绝策略，配置必须指向最终 Endpoint。
 
 ---
 

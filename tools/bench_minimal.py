@@ -48,7 +48,7 @@ async def test_inbound(path: str) -> None:
     async def noop_notify():
         pass
 
-    svc = InboundService(conn, notify=noise_notify)
+    svc = InboundService(conn, notify=noop_notify)
 
     envelope = ChannelEnvelope(
         channel_type="web",

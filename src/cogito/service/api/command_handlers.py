@@ -13,6 +13,7 @@ import json
 import logging
 import sqlite3
 import uuid
+from dataclasses import replace
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -51,6 +52,7 @@ from cogito.contracts.models import (
     PayloadGcDryRunPayload,
     ArchiveSkillPayload,
     ForceConnectorPollPayload,
+    FetchProactiveDataPayload,
     ImportProactiveContextPayload,
     PinSkillPayload,
     RebuildProactiveContextPayload,
@@ -68,6 +70,7 @@ from cogito.contracts.models import (
 )
 from cogito.service.dispatcher import Dispatcher
 from cogito.service.memory_service import SqliteMemoryService
+from cogito.service.task_service import SqliteTaskService
 from cogito.store.connector_repo import ConnectorRepository
 from cogito.store.task_repo import TaskRepository
 
@@ -123,8 +126,8 @@ def _write_erasure_receipt(
         capability_id="memory",
         operation_id=memory_id,
         request_hash=request_hash,
-        side_effect_class="erasure",
-        status="applied",
+        side_effect_class="non_retriable",
+        status="succeeded",
         reconcile_status="not_needed",
         summary=f"memory erased: {reason}",
         attempt_type="run",
@@ -190,15 +193,17 @@ def cancel_turn(payload: CancelTurnPayload, deps: CommandDeps = Depends(get_comm
     ).fetchone()
     if turn_row is None:
         raise HTTPException(status_code=404, detail=f"turn {payload.turn_id} not found")
-    if turn_row["status"] != "queued":
-        return _fail("cancel-turn", payload.turn_id, f"status is {turn_row['status']}, not queued")
+    if turn_row["status"] not in {"queued", "waiting_user", "waiting_external"}:
+        return _fail("cancel-turn", payload.turn_id, f"status is {turn_row['status']}, not cancellable")
     ok = dispatcher.cancel(payload.turn_id, turn_row["version"])
     if not ok:
         return _fail("cancel-turn", payload.turn_id, "concurrent modification")
+    from cogito.service.delegation_lifecycle import DelegationLifecycleService
+    cancelled_children = DelegationLifecycleService(deps.conn).cancel_for_parent(payload.turn_id)
     write_audit(
         deps.conn, actor_id=ACTOR, action="cancel-turn",
         target_type="turn", target_id=payload.turn_id,
-        changes={"reason": payload.reason},
+        changes={"reason": payload.reason, "cancelled_delegations": cancelled_children},
     )
     return _ok("cancel-turn", payload.turn_id)
 
@@ -229,6 +234,8 @@ def retry_task(payload: RetryTaskPayload, deps: CommandDeps = Depends(get_comman
 def approve(payload: ApprovalPayload, deps: CommandDeps = Depends(get_command_deps)) -> CommandResponse:
     ok = set_approval_decision(
         deps.conn, approval_id=payload.approval_id, decision="approved", responder_id=ACTOR,
+        expected_version=payload.expected_version, action_hash=payload.action_hash,
+        response_reason=payload.response_reason,
     )
     if not ok:
         exists = deps.conn.execute(
@@ -239,11 +246,30 @@ def approve(payload: ApprovalPayload, deps: CommandDeps = Depends(get_command_de
         return _fail("approve", payload.approval_id, "not in pending status")
     # 审批通过后：仅创建一个恢复（Turn waiting_user → queued，幂等）
     resumed_turn_id = resume_turn_after_approval(deps.conn, approval_id=payload.approval_id)
+    event_payload = {
+        "approval_id": payload.approval_id,
+        "decision": "approved",
+        "responder_id": ACTOR,
+        "resumed_turn_id": resumed_turn_id,
+    }
+    outbox = OutboxRepository(deps.conn)
+    outbox.insert(DomainEvent(
+        event_type="ApprovalResponded",
+        aggregate_type="approval",
+        aggregate_id=payload.approval_id,
+        aggregate_version=outbox.next_aggregate_version("approval", payload.approval_id),
+        payload=event_payload,
+        payload_ref=json.dumps(event_payload, ensure_ascii=False, sort_keys=True),
+        origin="command",
+        trust_label="verified",
+    ))
     write_audit(
         deps.conn, actor_id=ACTOR, action="approve",
         target_type="approval", target_id=payload.approval_id,
         changes={"resumed_turn_id": resumed_turn_id},
+        commit=False,
     )
+    deps.conn.commit()
     return _ok("approve", payload.approval_id, resumed_turn_id=resumed_turn_id)
 
 
@@ -251,6 +277,8 @@ def approve(payload: ApprovalPayload, deps: CommandDeps = Depends(get_command_de
 def reject(payload: ApprovalPayload, deps: CommandDeps = Depends(get_command_deps)) -> CommandResponse:
     ok = set_approval_decision(
         deps.conn, approval_id=payload.approval_id, decision="rejected", responder_id=ACTOR,
+        expected_version=payload.expected_version,
+        response_reason=payload.response_reason,
     )
     if not ok:
         exists = deps.conn.execute(
@@ -259,10 +287,29 @@ def reject(payload: ApprovalPayload, deps: CommandDeps = Depends(get_command_dep
         if not exists:
             raise HTTPException(status_code=404, detail=f"approval {payload.approval_id} not found")
         return _fail("reject", payload.approval_id, "not in pending status")
+    event_payload = {
+        "approval_id": payload.approval_id,
+        "decision": "rejected",
+        "responder_id": ACTOR,
+    }
+    outbox = OutboxRepository(deps.conn)
+    outbox.insert(DomainEvent(
+        event_type="ApprovalResponded",
+        aggregate_type="approval",
+        aggregate_id=payload.approval_id,
+        aggregate_version=outbox.next_aggregate_version("approval", payload.approval_id),
+        payload=event_payload,
+        payload_ref=json.dumps(event_payload, ensure_ascii=False, sort_keys=True),
+        origin="command",
+        trust_label="verified",
+    ))
     write_audit(
         deps.conn, actor_id=ACTOR, action="reject",
         target_type="approval", target_id=payload.approval_id,
+        changes={"response_reason": payload.response_reason},
+        commit=False,
     )
+    deps.conn.commit()
     return _ok("reject", payload.approval_id)
 
 
@@ -687,9 +734,9 @@ def update_proactive_policy(
     # 版本冲突检查
     if payload.expected_version is not None and payload.expected_version != current.version:
         return _conflict("update-proactive-policy", current.policy_id, current.version)
-    new_policy = current.__class__(
+    new_policy = replace(
+        current,
         policy_id=uuid.uuid4().hex,
-        principal_id=current.principal_id,
         version=current.version + 1,
         dry_run=payload.dry_run if payload.dry_run is not None else current.dry_run,
         max_pushes_per_hour=payload.max_pushes_per_hour if payload.max_pushes_per_hour is not None else current.max_pushes_per_hour,
@@ -788,6 +835,66 @@ def force_connector_poll(
         changes={"schedule_id": sched["schedule_id"] if sched else None},
     )
     return _ok("force-connector-poll", payload.connector_id)
+
+
+@router.post("/fetch-proactive-data", response_model=CommandResponse)
+def fetch_proactive_data(
+    payload: FetchProactiveDataPayload,
+    deps: CommandDeps = Depends(get_command_deps),
+) -> CommandResponse:
+    """排队一次 AIHOT Poll；后续 Candidate/Decision 仍走 Outbox + Task。"""
+    from cogito.domain.task import Task, TaskStatus
+    from cogito.service.aihot_connector import AIHOT_CONNECTOR_ID
+
+    if not deps.config.capability.proactive.enabled:
+        raise HTTPException(status_code=409, detail="proactive is disabled")
+    connector = deps.conn.execute(
+        "SELECT status FROM connectors WHERE connector_id=?",
+        (AIHOT_CONNECTOR_ID,),
+    ).fetchone()
+    if connector is None or connector["status"] != "active":
+        raise HTTPException(status_code=409, detail="AIHOT connector is not active")
+    manager = getattr(deps.runtime, "mcp_manager", None)
+    client = manager.get_client("aihot") if manager is not None else None
+    if client is None or not client.connected:
+        raise HTTPException(status_code=503, detail="AIHOT MCP server is not connected")
+
+    request_key = payload.idempotency_key or uuid.uuid4().hex
+    task_key = f"manual-proactive-fetch:{request_key}"
+    existing = deps.conn.execute(
+        "SELECT task_id FROM tasks WHERE idempotency_key=?",
+        (task_key,),
+    ).fetchone()
+    if existing is not None:
+        task_id = existing["task_id"]
+        return _ok(
+            "fetch-proactive-data", AIHOT_CONNECTOR_ID,
+            poll_task_id=task_id, connector_id=AIHOT_CONNECTOR_ID,
+            dry_run=True, idempotent=True,
+        )
+
+    task = Task(
+        task_id=f"task-aihot-manual-{uuid.uuid4().hex[:16]}",
+        task_type="mcp_connector.poll",
+        payload_ref=AIHOT_CONNECTOR_ID,
+        status=TaskStatus.queued,
+        priority=60,
+        idempotency_key=task_key,
+        origin="dashboard-proactive-fetch",
+        retry_policy={"max_attempts": 3, "backoff_seconds": [5, 30, 120]},
+    )
+    TaskRepository(deps.conn).insert(task)
+    write_audit(
+        deps.conn, actor_id=ACTOR, action="fetch-proactive-data",
+        target_type="connector", target_id=AIHOT_CONNECTOR_ID,
+        changes={"poll_task_id": task.task_id, "dry_run": True},
+    )
+    deps.conn.commit()
+    return _ok(
+        "fetch-proactive-data", AIHOT_CONNECTOR_ID,
+        poll_task_id=task.task_id, connector_id=AIHOT_CONNECTOR_ID,
+        dry_run=True, idempotent=False,
+    )
 
 
 # ── Knowledge: register / refresh / invalidate / erase ───────
@@ -961,35 +1068,25 @@ def import_proactive_context(
     cached = _check_idempotency(deps.conn, ACTOR, "import-proactive-context", payload.idempotency_key)
     if cached:
         return cached
-    import json
     from pathlib import Path
-    import uuid
-    from datetime import UTC, datetime
+    from cogito.store.proactive_repo import ProactivePolicyRepository
     workspace = Path(deps.config.workspace_path)
     context_file = workspace / "PROACTIVE_CONTEXT.md"
     # 写文件
     context_file.write_text(payload.content, encoding="utf-8")
     # 简单解析：提取黑白名单主题
     allow_topics, deny_topics = _parse_topics_from_markdown(payload.content)
-    # 读当前最新版本
-    current = deps.conn.execute(
-        "SELECT * FROM proactive_policies ORDER BY version DESC LIMIT 1"
-    ).fetchone()
-    new_version = (current["version"] + 1) if current else 1
-    dry_run = bool(current["dry_run"]) if current else True
-    new_id = uuid.uuid4().hex
-    now_ms = int(datetime.now(UTC).timestamp() * 1000)
-    deps.conn.execute(
-        "INSERT INTO proactive_policies "
-        "(policy_id, principal_id, version, allow_topics_json, deny_topics_json, "
-        " dry_run, filters_json, updated_by, updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
-        (new_id, "owner", new_version,
-         json.dumps(allow_topics, ensure_ascii=False),
-         json.dumps(deny_topics, ensure_ascii=False),
-         1 if dry_run else 0,
-         "{}", "dashboard-import", now_ms),
+    # 仅替换上下文明确携带的主题字段，其余策略事实完整继承。
+    repo = ProactivePolicyRepository(deps.conn)
+    current = repo.get_current()
+    new_policy = replace(
+        current,
+        policy_id=uuid.uuid4().hex,
+        version=current.version + 1,
+        allow_topics=tuple(allow_topics),
+        deny_topics=tuple(deny_topics),
     )
+    repo.save(new_policy)
     deps.conn.commit()
     write_audit(
         deps.conn, actor_id=ACTOR, action="import-proactive-context",

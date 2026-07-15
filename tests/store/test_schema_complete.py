@@ -159,7 +159,7 @@ class TestSideEffectReceipts:
             operation_id="op-123",
             request_hash="sha256:abc",
             side_effect_class="idempotent",
-            status="success",
+            status="succeeded",
             attempt_id="att-1",
             attempt_type="run",
             created_at=1000,

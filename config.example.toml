@@ -42,6 +42,7 @@ validate_origin = true
 [worker]
 # Lease/心跳/恢复参数（必满足：lease_duration > heartbeat_interval）
 concurrency = 1
+poll_interval_seconds = 1.0
 lease_duration_seconds = 300
 heartbeat_interval_seconds = 60
 outbox_lease_ttl_seconds = 120
@@ -99,6 +100,17 @@ recovery_grace_period_seconds = 30
 # provider = "openai"
 # model = "gpt-4o"
 
+# ── Auto Mode（默认关闭）──
+# 确定性 ToolPolicy 始终先执行；低风险、无副作用的本地工具走快速路径，
+# 其余工具由 fast 角色进行两阶段安全分类，分类不可用时默认阻断。
+# [capability.auto_mode]
+# enabled = true
+# model_role = "fast"
+# stage1_timeout_seconds = 10
+# stage2_timeout_seconds = 30
+# max_argument_chars = 8000
+# safe_tools = []
+
 # ── 多模态感知层（默认关闭）──
 # [multimodal]
 # enabled = true
@@ -135,13 +147,51 @@ recovery_grace_period_seconds = 30
 # project_paths = [".cogito/plugins"]
 # granted_permissions = ["filesystem.read", "network.connect:api.example.com"]
 
-# ── MCP Server（Phase 5；可选）──
-# [capability.mcp.servers.filesystem]
-# command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
-# transport = "stdio"
+# ── 通用 Agent Tool（显式 Root；未配置时不注册文件 Tool；无 Shell Tool）──
+# [capability.workspace]
+# root = "D:/Code/PythonCode/cogito"
+# protected_paths = [".git", ".env", ".workspace", "config.toml"]
+# max_read_bytes = 1000000
+# max_write_bytes = 1000000
+#
+# Mutable user Skills are registered only when this root is explicit.
+# [capability.skills]
+# root = "D:/Code/PythonCode/cogito/.cogito/skills"
+#
+# [capability.read_only_mcp]
+# principal_id = "owner"
+# page_size = 50
+
+# ── MCP Server（可选；stdio 仅允许显式信任的宿主进程）──
+# [capability.mcp.servers.docs]
+# command = "python"
+# args = ["-m", "example_mcp"]
+# transport = "stdio" # stdio | sse | streamable_http
 # enabled = true
 # toolset = "mcp"
+# include_tools = []
+# exclude_tools = []
+# timeout_seconds = 30
+# max_output_chars = 50000
+# allow_resources = false
+# allow_prompts = false
+# allow_roots = false
+# allow_sampling = false
+# isolation = "host_trusted"
+# env = { API_TOKEN = "env://EXAMPLE_API_TOKEN" }
+# oauth_enabled = false
+# oauth_token_file = ".workspace/secrets/docs-mcp-oauth.json"
+# oauth_redirect_uri = "http://127.0.0.1:33418/callback"
+# oauth_scope = ""
+# secret_root = ".workspace/secrets"
+# roots = [] # used only when allow_roots=true
+# [capability.mcp.servers.docs.tool_policy.search]
+# risk_level = "medium"
+# approval_policy = "auto"
+# permissions = ["network.read"]
+#
+# [capability.mcp.aliases]
+# docs_search = "docs.query_docs"
 
 # ── AIHOT（主动推送信息源；可选）──
 # 将 https://aihot.virxact.com 的公开 API 封装为 MCP 工具，
@@ -156,6 +206,7 @@ recovery_grace_period_seconds = 30
 # transport = "stdio"
 # enabled = true
 # toolset = "mcp"
+# isolation = "host_trusted" # 本地受信代码才可显式启用
 
 # ── Proactive 主动推送（Plan 06；默认关闭 + dry-run）──
 # 启用方法：enabled=true + dry_run=false（首次建议仅 dry-run 观察 would_send）。
@@ -170,6 +221,7 @@ recovery_grace_period_seconds = 30
 # same_topic_cooldown_minutes = 360
 # max_pushes_per_hour = 3
 # max_pushes_per_day = 10
+# alert_max_per_hour = 5
 # digest_max_delay_minutes = 360
 # candidate_ttl_hours = 48
 #
@@ -180,12 +232,11 @@ recovery_grace_period_seconds = 30
 # timezone = "Asia/Shanghai"
 #
 # [proactive.cadence]
-# enabled = true
 # min_interval_seconds = 60
 # max_interval_seconds = 1800
-# high_energy_interval_seconds = 60
+# high_energy_interval_seconds = 480
 # medium_energy_interval_seconds = 240
-# low_energy_interval_seconds = 480
+# low_energy_interval_seconds = 60
 # jitter_ratio = 0.10
 # misfire_policy = "coalesce"
 

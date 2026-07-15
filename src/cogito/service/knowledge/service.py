@@ -480,7 +480,7 @@ def _write_knowledge_erasure_receipt(
         operation_id=resource_id,
         request_hash=request_hash,
         side_effect_class="non_retriable",
-        status="success",
+        status="succeeded",
         reconcile_status="not_needed",
         summary=f"knowledge resource erased: {reason} ({segment_count} segments)",
         attempt_type="run",

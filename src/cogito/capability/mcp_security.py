@@ -25,6 +25,7 @@ class MCPServerSecurityPolicy:
     allow_roots: bool = False
     allow_sampling: bool = False
     allow_resources: bool = False
+    allow_prompts: bool = False
 
 
 class MCPSchemaValidator:
@@ -40,6 +41,11 @@ class MCPSchemaValidator:
         errors: list[str] = []
         if not name:
             errors.append("tool name empty")
+        elif len(name) > 128 or not all(
+            character.isalnum() or character in {"_", "-", "."}
+            for character in name
+        ):
+            errors.append(f"tool {name!r}: invalid name")
         size = len(str(schema))
         if size > cls.MAX_SCHEMA_SIZE:
             errors.append(f"tool {name}: schema too large ({size} > {cls.MAX_SCHEMA_SIZE})")
@@ -47,6 +53,12 @@ class MCPSchemaValidator:
         for kw in cls.FORBIDDEN_KEYWORDS:
             if kw in str(schema):
                 errors.append(f"tool {name}: unsupported JSON Schema keyword {kw!r}")
+        try:
+            from jsonschema import Draft202012Validator
+
+            Draft202012Validator.check_schema(schema)
+        except Exception as exc:
+            errors.append(f"tool {name}: invalid JSON Schema: {exc}")
         return errors
 
     @classmethod
@@ -57,7 +69,11 @@ class MCPSchemaValidator:
             errors.append(f"too many tools: {len(tools)} > {cls.MAX_TOOLS_PER_SERVER}")
         for tool in tools:
             name = tool.get("name", "")
-            schema = tool.get("parameters", {}) or tool.get("inputSchema", {})
+            schema = (
+                tool.get("parameters", {})
+                or tool.get("inputSchema", {})
+                or tool.get("input_schema", {})
+            )
             errors.extend(cls.validate_tool_schema(name, schema))
         return errors
 

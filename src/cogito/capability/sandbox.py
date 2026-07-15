@@ -1,10 +1,9 @@
-"""Sandbox Runtime — 5 Profile (Plan 03 M4).
+"""Sandbox Runtime profiles (Plan 03 M4).
 
-实现 5 种 Sandbox Profile：
+实现 4 种 Sandbox Profile：
 - read_only: 只读访问
 - workspace_write: 工作区写入
 - network_restricted: 受限网络
-- shell_isolated: 隔离 Shell
 - plugin_process: 第三方插件进程外
 
 每个 Profile 固定：工作目录和允许 Root、环境变量白名单、Secret 注入方式、
@@ -66,16 +65,6 @@ NETWORK_RESTRICTED = SandboxProfile(
     max_cpu_s=10,
 )
 
-SHELL_ISOLATED = SandboxProfile(
-    name="shell_isolated",
-    description="隔离 Shell：参数数组执行，不拼接隐式 Shell，默认不继承全局环境",
-    allowed_roots=("/workspace", "/tmp"),
-    allow_network=False,
-    allow_shell=True,
-    max_processes=2,
-    env_whitelist=("PATH", "HOME"),
-)
-
 PLUGIN_PROCESS = SandboxProfile(
     name="plugin_process",
     description="第三方插件默认进程外：完全隔离，可被终止且无残留进程",
@@ -95,7 +84,6 @@ def get_profile(name: str) -> SandboxProfile:
         "read_only": READ_ONLY,
         "workspace_write": WORKSPACE_WRITE,
         "network_restricted": NETWORK_RESTRICTED,
-        "shell_isolated": SHELL_ISOLATED,
         "plugin_process": PLUGIN_PROCESS,
     }
     if name not in profiles:

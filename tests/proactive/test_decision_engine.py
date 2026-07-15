@@ -142,12 +142,21 @@ def test_alert_fast_path_send_now():
     assert action == "send_now"
 
 
-def test_alert_quiet_hours_still_defers():
+def test_alert_respects_quiet_hours_by_default():
     p = _policy(quiet_hours={"enabled": True, "start": "00:00", "end": "23:59"})
     c = _candidate(stream_type="alert")
     from datetime import datetime, UTC
     action, _ = decide(c, p, now=datetime(2026, 7, 7, 12, 0, tzinfo=UTC))
     assert action == "send_later"
+
+
+def test_critical_alert_explicitly_bypasses_quiet_hours():
+    p = _policy(quiet_hours={"enabled": True, "start": "00:00", "end": "23:59"})
+    c = _candidate(stream_type="alert", critical_override=True)
+    from datetime import datetime, UTC
+    action, trace = decide(c, p, now=datetime(2026, 7, 7, 12, 0, tzinfo=UTC))
+    assert action == "send_now"
+    assert any(item.rule == "critical_override" for item in trace)
 
 
 # ── 能量模型 ─────────────────────────────────────────────────────────────────

@@ -19,6 +19,7 @@ import logging
 import signal
 import sqlite3
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -157,6 +158,13 @@ class RuntimeApplication:
         except Exception:
             conn.close()
             raise
+
+        # 注册 AIHOT MCP Connector（幂等）：把 aihot_items 作为主动推送数据源
+        try:
+            from cogito.service.aihot_connector import seed_aihot_connector
+            seed_aihot_connector(conn)
+        except Exception:
+            logger.warning("AIHOT connector seed failed (non-fatal)", exc_info=True)
 
         # Plan 06 M2: 持久化配置版本（启动时记录，供 Attempt/Task 追溯）
         _persist_config_version(conn, config)
@@ -361,6 +369,8 @@ class RuntimeApplication:
             make_sticker_service=sticker_factory,
             make_task_service=_make_task_service,
             make_memory_service=_make_memory_service,
+            capability_config=config.capability,
+            connection=conn,
         )
 
         runner = build_agent_runner(
@@ -743,13 +753,23 @@ class RuntimeApplication:
         mcp_registry = self.runner._registry if self.runner else None
         self.mcp_manager = None
         if mcp_registry is not None:
-            self.mcp_manager = MCPServerManager(mcp_registry)
+            self.mcp_manager = MCPServerManager(
+                mcp_registry,
+                aliases=self.config.capability.mcp_aliases,
+            )
             try:
-                self.mcp_manager = await start_mcp_servers(self.config, mcp_registry)
+                self.mcp_manager = await start_mcp_servers(
+                    self.config,
+                    mcp_registry,
+                    self.runner._router,
+                )
             except Exception:
                 logger.warning("MCP Manager startup partially failed (non-fatal)",
                                exc_info=True)
-                self.mcp_manager = MCPServerManager(mcp_registry)
+                self.mcp_manager = MCPServerManager(
+                    mcp_registry,
+                    aliases=self.config.capability.mcp_aliases,
+                )
 
         # 创建 Scheduler
         from cogito.service.scheduler import Scheduler
@@ -792,6 +812,9 @@ class RuntimeApplication:
             config_version_id=self.config.config_version,
             # PLAN-16 M4 完整 payload 边界：resolver 化知识段落文本
             payload_store_factory=self._make_payload_store_factory(),
+            capability_registry=self.runner._registry if self.runner else None,
+            tool_executor=self.runner._executor if self.runner else None,
+            parent_toolsets=set(self.runner._toolsets) if self.runner else set(),
         )
         task_registry = _build_registry(task_handler_ctx)
         task_dispatcher = TaskDispatcher(self.conn)
@@ -916,7 +939,15 @@ class RuntimeApplication:
                 except RuntimeError:
                     loop = None
                 if loop and loop.is_running():
-                    loop.create_task(self.mcp_manager.stop_all())
+                    # running loop 中不能阻塞等，但也不能 fire-and-forget ——
+                    # 用 run_coroutine_threadsafe 把 stop_all 派回主 loop 同步等完成，
+                    # 避免进程在 stdio 子进程未清理前就退出（导致 GeneratorExit 报错）。
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                        future = pool.submit(
+                            asyncio.run, self.mcp_manager.stop_all(),
+                        )
+                        future.result(timeout=self._drain_timeout)
                 else:
                     asyncio.run(self.mcp_manager.stop_all())
         except Exception as e:

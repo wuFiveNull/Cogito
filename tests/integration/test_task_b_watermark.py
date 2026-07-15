@@ -287,8 +287,19 @@ class TestMemoryExtractHandler:
                     )
             dest.commit()
 
+            from cogito.model.router import ModelRouter
+            from cogito.model.stub_provider import StubModelProvider, StubScenario
+
+            router = ModelRouter(
+                providers={"extractor": StubModelProvider(scenarios=[
+                    StubScenario(response_text='{"candidates": []}'),
+                    StubScenario(response_text='{"candidates": []}'),
+                ])},
+                role_map={"memory_extractor": "extractor"},
+            )
             ctx = TaskHandlerContext(
                 connection_factory=lambda: _get_conn(db_path),
+                model_router=router,
             )
 
             task1 = Task(

@@ -16,13 +16,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Any
 
 _LOGGER = logging.getLogger("cogito.task_worker")
 
 from cogito.contracts.clock import Clock, ProductionClock
 from cogito.service.task_dispatcher import TaskDispatcher
-from cogito.service.task_handlers import TaskHandlerContext, TaskHandlerRegistry
+from cogito.service.task_handlers import TaskHandlerContext, TaskHandlerRegistry, TaskHandlerWait
 
 TASK_WORKER_ID_PREFIX = "task-wkr-"
 
@@ -103,9 +105,9 @@ class TaskWorker:
         # task_id+attempt_id+worker_id+lease_version 条件查询 tasks 表，
         # 避免外部 heartbeat 失败/抢占时仍默认 lease_valid=True 继续执行。
         _lease_version = attempt.lease_version
-        _expire = attempt.lease_expires_at
         _task_id = task.task_id
         _worker = worker_id
+
         def _lease_checker() -> bool:
             try:
                 conn = self._conn
@@ -118,11 +120,10 @@ class TaskWorker:
                     return False
                 if row["lease_version"] != _lease_version:
                     return False
-                from datetime import datetime as _dt, timezone as _tz
                 exp = row["lease_expires_at"]
                 # lease_expires_at stored as epoch ms int
                 if isinstance(exp, (int, float)):
-                    return exp > int(_dt.now(_tz.utc).timestamp() * 1000)
+                    return exp > int(datetime.now(UTC).timestamp() * 1000)
                 return True
             except Exception:
                 return False
@@ -133,10 +134,15 @@ class TaskWorker:
         )
 
         try:
-            # Handler 可能在 async 子线程中调用模型
-            result = await asyncio.to_thread(
-                handler, task, self._handler_ctx,
-            )
+            # 异步 Handler（调用模型/ httpx 的）必须在主 loop 上 await，
+            # 复用主 loop 的 httpx 连接池，避免 loop 不匹配错误。
+            # 同步 Handler（纯 SQLite）仍在 to_thread 中运行，避免阻塞主 loop。
+            if asyncio.iscoroutinefunction(handler):
+                result = await handler(task, self._handler_ctx)
+            else:
+                result = await asyncio.to_thread(
+                    handler, task, self._handler_ctx,
+                )
             _LOGGER.info(
                 "Task handler completed: %s => %s",
                 task.task_type, (result or "")[:100],
@@ -161,15 +167,37 @@ class TaskWorker:
                     )
                 else:
                     self._dispatcher.fail(task, attempt, worker_id)
+                    self._evaluate_delegation(task.task_id)
             except Exception:
                 pass
             return TaskRunOutcome.failed
 
         heartbeat_task.cancel()
 
+        if isinstance(result, TaskHandlerWait):
+            try:
+                now_ms = int(datetime.now(UTC).timestamp() * 1000)
+                self._conn.execute(
+                    "UPDATE task_attempts SET status='succeeded',finished_at=? "
+                    "WHERE task_attempt_id=? AND status='running'",
+                    (now_ms, attempt.task_attempt_id),
+                )
+                self._conn.execute(
+                    "UPDATE tasks SET status=?,lease_owner=NULL,lease_expires_at=NULL,"
+                    "checkpoint_ref=? WHERE task_id=? AND status='running' AND lease_owner=?",
+                    (result.status, result.waiting_id, task.task_id, worker_id),
+                )
+                self._conn.commit()
+                return TaskRunOutcome.completed
+            except Exception:
+                self._conn.rollback()
+                return TaskRunOutcome.failed
+
         # ── 4. 完成 ──
         # MEM-01 完整：先将 handler 声明的依赖持久化到 result_ref
         self._persist_declared_dependencies(task)
+        if result and not task.result_ref:
+            task.result_ref = str(result)
 
         # MEM-01 + #11 完整：事实型 task_succeeded 信号在 complete 之前写入，
         # 与 Task/Attempt 完成同事务原子提交；失败向上传播（禁止 silent pass）
@@ -189,7 +217,17 @@ class TaskWorker:
             _LOGGER.warning("Task complete failed (lease lost): %s", task.task_id)
             return TaskRunOutcome.lost
 
+        self._evaluate_delegation(task.task_id)
+
         return TaskRunOutcome.completed
+
+    def _evaluate_delegation(self, task_id: str) -> None:
+        try:
+            from cogito.service.delegation_lifecycle import DelegationLifecycleService
+
+            DelegationLifecycleService(self._conn).evaluate_for_task(task_id)
+        except Exception:
+            _LOGGER.exception("delegation join evaluation failed for %s", task_id)
 
     def _emit_task_succeeded_signals(self, task: Any) -> None:
         """Task 成功后写 task_succeeded 信号（PLAN-16 MEM-01 完整原子语义）。

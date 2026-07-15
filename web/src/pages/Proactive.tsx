@@ -8,6 +8,7 @@ import {
   type ScheduledRequest,
   type DigestBucket,
   type ProactiveFeedback,
+  type ProactiveFetchRun,
 } from "../api";
 import { Badge, Collapsible, CommandButton, Empty, ErrorBox, Loading, PageTitle, Section, StatTile, StatusPill, useAsync } from "../components";
 
@@ -357,6 +358,10 @@ export default function ProactivePage() {
   const scheduled = useAsync(() => api.proactiveScheduledRequests(), []);
   const digests = useAsync(() => api.proactiveDigests(), []);
   const feedback = useAsync(() => api.proactiveFeedback(), []);
+  const [fetchTaskId, setFetchTaskId] = useState<string | null>(null);
+  const [fetchRun, setFetchRun] = useState<ProactiveFetchRun | null>(null);
+  const [fetching, setFetching] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
   const refreshAll = () => {
     status.reload();
@@ -366,6 +371,51 @@ export default function ProactivePage() {
     digests.reload();
     feedback.reload();
   };
+
+  const startFetch = async () => {
+    setFetching(true);
+    setFetchError(null);
+    setFetchRun(null);
+    try {
+      const key = `web-aihot-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const result = await api.fetchProactiveData(key);
+      const taskId = String(result.details.poll_task_id ?? "");
+      if (!taskId) throw new Error("后端未返回 poll_task_id");
+      setFetchTaskId(taskId);
+    } catch (e) {
+      setFetching(false);
+      setFetchError(e instanceof Error ? e.message : "触发失败");
+    }
+  };
+
+  useEffect(() => {
+    if (!fetchTaskId) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const run = await api.proactiveFetchRun(fetchTaskId);
+        if (cancelled) return;
+        setFetchRun(run);
+        if (run.done) {
+          setFetching(false);
+          refreshAll();
+          return;
+        }
+      } catch (e) {
+        if (cancelled) return;
+        setFetching(false);
+        setFetchError(e instanceof Error ? e.message : "状态查询失败");
+        return;
+      }
+      timer = window.setTimeout(poll, 1000);
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [fetchTaskId]);
 
   if (status.loading) return <Loading />;
   if (status.error) return <ErrorBox msg={status.error} />;
@@ -378,11 +428,39 @@ export default function ProactivePage() {
         desc="Agent 的主动性边界：候选 → 决策 → dry-run / 发送"
         action={
           <div className="flex gap-2">
+            <CommandButton
+              onClick={startFetch}
+              disabled={fetching || !s.fetch_available}
+              title={!s.fetch_available ? s.fetch_unavailable_reason : "从 AIHOT 拉取并执行 dry-run 评估"}
+            >
+              {fetching ? "获取中…" : "获取主动推送数据"}
+            </CommandButton>
             <Link to="/deliveries" className="btn-ghost">投递 →</Link>
             <Link to="/connectors" className="btn-ghost">连接器 →</Link>
           </div>
         }
       />
+
+      {(fetchRun || fetchError) && (
+        <div className={`rounded-xl border p-3 text-sm ${fetchRun?.failed || fetchError ? "border-danger/30 bg-danger/5 text-danger" : "border-info/30 bg-info/5 text-info"}`}>
+          {fetchError ? `获取失败：${fetchError}` : (
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+              <Badge tone={fetchRun?.done ? (fetchRun.failed ? "danger" : "ok") : "info"}>
+                {fetchRun?.failed ? "失败" : fetchRun?.done ? "完成" : "处理中"}
+              </Badge>
+              <span>Poll {fetchRun?.poll_status}</span>
+              <span>摄取 {fetchRun?.ingestion_status}</span>
+              <span>抓取 {fetchRun?.fetched_count ?? 0}</span>
+              <span>新增 {fetchRun?.accepted_count ?? 0}</span>
+              <span>重复 {fetchRun?.duplicate_count ?? 0}</span>
+              <span>候选 {fetchRun?.candidate_count ?? 0}</span>
+              <span>决策 {fetchRun?.decision_count ?? 0}</span>
+              {fetchRun?.error && <span>{fetchRun.error}</span>}
+              <Badge tone="info">dry-run</Badge>
+            </div>
+          )}
+        </div>
+      )}
 
       <Section title="状态栏" subtitle="当前主动系统运行状态">
         <StatusBar status={s} />

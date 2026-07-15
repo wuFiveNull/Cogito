@@ -16,6 +16,7 @@ import logging
 import sqlite3
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from cogito.service.outbox_worker import OutboxLease
 
@@ -144,7 +145,9 @@ class SourceEventIngestedConsumer(EventConsumer):
 
         # 4. 初始评分：relevance 由 MCP handler 算好，energy 后续注入
         relevance = float(item["relevance"] or 0.0)
-        novelty = 0.5  # 占位；后续 embedding/time-window 增强
+        # MCP 摄取已用 source_id + content_hash 做精确去重；进入此处即为 exact-new。
+        # 语义 novelty 后续可再降分，但不能用低于默认阈值的占位值阻断全量候选。
+        novelty = 1.0
         urgency = relevance  # 无 energy 基准
         confidence = 0.7  # MCP 有稳定 id + schema 校验
 
@@ -184,6 +187,30 @@ class SourceEventIngestedConsumer(EventConsumer):
                 "VALUES (?, ?, 'succeeded', 1, ?)",
                 (self.name, lease.event_id, int(now.timestamp() * 1000)),
             )
+            # 同一 ingestion batch 只创建一个立即评估 Task。Outbox 在 Task 前排水，
+            # 因此本批已投影 Candidate 会先全部落库，再由 bounded handler 评估。
+            trigger_id = lease.correlation_id or lease.event_id
+            eval_idempotency = f"proactive-evaluate-source:{trigger_id}"
+            exists = conn.execute(
+                "SELECT 1 FROM tasks WHERE idempotency_key=?",
+                (eval_idempotency,),
+            ).fetchone()
+            if exists is None:
+                conn.execute(
+                    "INSERT INTO tasks "
+                    "(task_id, task_type, payload_ref, status, priority, "
+                    "idempotency_key, origin, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        f"task-pe-src-{uuid.uuid4().hex[:16]}",
+                        "proactive.evaluate",
+                        trigger_id,
+                        "queued",
+                        15,
+                        eval_idempotency,
+                        "source-event-immediate-eval",
+                        int(now.timestamp() * 1000),
+                    ),
+                )
         return True
 
 

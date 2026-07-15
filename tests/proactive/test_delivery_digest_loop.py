@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 
 import pytest
@@ -182,7 +183,7 @@ def test_proactive_delivery_ready_handler_dry_run():
         workspace_path="",
         delivery_service=None,
     )
-    result = th_module._handle_proactive_delivery_ready(task, ctx)
+    result = asyncio.run(th_module._handle_proactive_delivery_ready(task, ctx))
     assert "dry_run" in result or "converted" in result
     # task_db 内部已 close——但同 connection的后续 execute 会 raise
     # 因此此处仅验证返回值。详细 DB 状态用独立 Test_file。

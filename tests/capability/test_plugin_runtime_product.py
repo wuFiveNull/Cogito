@@ -15,12 +15,12 @@ import sqlite3
 import tempfile
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from cogito.capability.plugin_runtime import (
     CircuitBreaker,
-    PluginManifest,
     SqlitePluginRuntime,
 )
 from cogito.service.plugin_runtime import PluginManifest, PluginState

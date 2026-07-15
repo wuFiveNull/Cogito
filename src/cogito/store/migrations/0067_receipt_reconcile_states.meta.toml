@@ -1,0 +1,4 @@
+version = 67
+name = "receipt_reconcile_states"
+online_safe = true
+requires_downtime = false

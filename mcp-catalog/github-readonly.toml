@@ -1,0 +1,6 @@
+id = "github-readonly"
+display_name = "GitHub Read-only MCP"
+recommended_alias = "github_search"
+access = "read_only"
+trust_label = "external_untrusted"
+auto_install = false

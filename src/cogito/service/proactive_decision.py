@@ -52,6 +52,7 @@ def decide(
     now: datetime | None = None,
     existing_hourly_sent: int = 0,
     existing_daily_sent: int = 0,
+    existing_alert_hourly_sent: int | None = None,
     recent_topic_sent_at: int | None = None,  # epoch ms
 ) -> tuple[str, list[DecisionTrace]]:
     """运行决策引擎，返回 (action, trace)。"""
@@ -65,9 +66,16 @@ def decide(
         return passed
 
     # 1. alert fast-path: 跳过以下 2-5
-    if alert:
+    alert_hourly = (
+        existing_hourly_sent
+        if existing_alert_hourly_sent is None
+        else existing_alert_hourly_sent
+    )
+    if alert and alert_hourly < policy.alert_max_per_hour:
         return _decide_alert(candidate, policy, now, energy_value,
-                             existing_hourly_sent, traces)
+                             alert_hourly, traces)
+    if alert:
+        record("alert_hourly_budget", False, "degraded_to_content")
 
     # 2. hard safety / deny-list ────────────────────────────────────────────
     if candidate.topic in policy.deny_topics:
@@ -137,7 +145,7 @@ def decide(
 
     # 9. (延后) model score —— 当前使用 deterministic 直接判 send_now
     # 10. aggregation ──────────────────────────────────────────────────────
-    if adjusted_urgency >= 0.65 or candidate.stream_type == "alert":
+    if adjusted_urgency >= 0.65:
         record("aggregate", True, "send_now")
         return "send_now", traces
 
@@ -148,19 +156,20 @@ def decide(
 
 
 def _decide_alert(candidate, policy, now, energy_value, hourly_sent, traces):
-    """alert 快速通道：跳过 novelty/relevance/energy gate，但仍受 budget/qualify 控。"""
+    """alert 快速通道：仅服从 hard safety 与独立 alert 限额。"""
     def r(name, passed, detail=""):
         traces.append(DecisionTrace(name, passed, detail))
         return passed
 
     if candidate.topic in policy.deny_topics:
+        r("deny_topics", False, f"topic={candidate.topic}")
         return "discard", traces
-    if _in_quiet_hours(policy, now):
+    if _in_quiet_hours(policy, now) and not candidate.critical_override:
+        r("quiet_hours", False, "alert_deferred")
         return "send_later", traces
-    # alert 独立 hourly 上限 = policy 两倍
-    if hourly_sent >= policy.max_pushes_per_hour * 2:
-        return "send_later", traces
-    r("alert_fast_path", True)
+    if _in_quiet_hours(policy, now) and candidate.critical_override:
+        r("critical_override", True, "quiet_hours_bypassed")
+    r("alert_fast_path", True, f"hourly={hourly_sent}/{policy.alert_max_per_hour}")
     return "send_now", traces
 
 

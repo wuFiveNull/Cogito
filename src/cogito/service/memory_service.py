@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from cogito.domain.memory import (
+    Explicitness,
     MemoryItem,
     MemoryKind,
     MemoryStatus,

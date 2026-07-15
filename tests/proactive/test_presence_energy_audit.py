@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
@@ -311,7 +312,7 @@ class TestEvaluateCandidates:
             config_version_id="cfg-x",
         )
         # 执行（同批 → 两个 decision 的 energy_value/lost_user_at 一致）
-        th_module._evaluate_candidates_sync(conn, ctx)
+        asyncio.run(th_module._evaluate_candidates_async(conn, ctx))
 
         rows = conn.execute(
             "SELECT energy_value, last_user_at FROM proactive_decisions_v2 "
@@ -345,7 +346,7 @@ class TestEvaluateCandidates:
                                              max_pushes_per_day=99),
             presence_reader=SqlitePresenceReader(connection_factory=lambda p=conn: _factory_for(p)),
         )
-        th_module._evaluate_candidates_sync(conn, ctx)
+        asyncio.run(th_module._evaluate_candidates_async(conn, ctx))
         # decision.dry_run = true
         row = conn.execute(
             "SELECT dry_run FROM proactive_decisions_v2 WHERE candidate_id='c1'"
@@ -380,8 +381,9 @@ class TestEvaluateCandidates:
             delivery_service=None,  # 无投递 → 不创建 Delivery
         )
         # 不抛异常
-        th_module._evaluate_candidates_sync(conn, ctx)
+        asyncio.run(th_module._evaluate_candidates_async(conn, ctx))
         row = conn.execute(
             "SELECT dry_run FROM proactive_decisions_v2 WHERE candidate_id='c1'"
         ).fetchone()
-        assert row["dry_run"] == 0  # real mode 传入，但 delivery_service=None 仅记录
+        # 全局配置或 Principal policy 任一 dry-run 都是安全锁；默认 policy 为 dry-run。
+        assert row["dry_run"] == 1

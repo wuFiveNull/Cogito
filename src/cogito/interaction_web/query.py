@@ -255,7 +255,18 @@ def health_components(deps: CommandDeps = Depends(get_command_deps)) -> HealthCo
 
 @router.get("/proactive/status")
 def proactive_status(deps: CommandDeps = Depends(get_command_deps)) -> dict:
-    return _svc(deps).proactive_status()
+    out = _svc(deps).proactive_status()
+    manager = getattr(deps.runtime, "mcp_manager", None)
+    client = manager.get_client("aihot") if manager is not None else None
+    connected = bool(client is not None and client.connected)
+    out["fetch_available"] = bool(out["enabled"] and connected)
+    if not out["enabled"]:
+        out["fetch_unavailable_reason"] = "主动系统未启用"
+    elif not connected:
+        out["fetch_unavailable_reason"] = "AIHOT MCP 未连接"
+    else:
+        out["fetch_unavailable_reason"] = ""
+    return out
 
 
 @router.get("/proactive/candidates")
@@ -289,6 +300,16 @@ def list_digests(deps: CommandDeps = Depends(get_command_deps)) -> dict:
 @router.get("/proactive/feedback")
 def proactive_feedback(deps: CommandDeps = Depends(get_command_deps)) -> dict:
     return _svc(deps).proactive_feedback()
+
+
+@router.get("/proactive/fetch-runs/{poll_task_id}")
+def proactive_fetch_run(
+    poll_task_id: str, deps: CommandDeps = Depends(get_command_deps),
+) -> dict:
+    out = _svc(deps).proactive_fetch_run(poll_task_id)
+    if out is None:
+        raise HTTPException(status_code=404, detail=f"fetch run {poll_task_id} not found")
+    return out
 
 
 # ── Drift Dashboard (R9 M6) ──────────────────────────────────────

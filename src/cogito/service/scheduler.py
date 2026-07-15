@@ -14,6 +14,7 @@ import logging
 import sqlite3
 import uuid
 from datetime import datetime, timedelta
+from typing import Any
 
 from cogito.domain.schedule import (
     FireStatus,
@@ -525,7 +526,7 @@ class Scheduler:
             nxt = next_fire_at(schedule.expression, schedule.timezone, now)
 
             # 选择 task_type：按 connector_type 分派（mcp vs rss/json/atom）
-            task_type = POLL_TASK_TYPE
+            task_type = schedule.task_type or POLL_TASK_TYPE
             if schedule.connector_id:
                 row = self._conn.execute(
                     "SELECT connector_type FROM connectors WHERE connector_id=?",
@@ -535,7 +536,7 @@ class Scheduler:
                     task_type = self.task_type_for_connector(row[0])
 
             # 构建 payload：merge 时携带合并元数据
-            payload_ref = schedule.connector_id or ""
+            payload_ref = schedule.task_payload or schedule.connector_id or ""
             if merged_count > 1:
                 # merge 策略：payload 携带合并次数和时间窗口
                 import json

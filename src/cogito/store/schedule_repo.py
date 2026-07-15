@@ -8,12 +8,12 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime
 
+from cogito.contracts.clock import epoch_ms, from_epoch_ms
 from cogito.domain.schedule import (
     FireStatus,
     Schedule,
     ScheduledFire,
 )
-from cogito.contracts.clock import epoch_ms, from_epoch_ms
 
 
 class ScheduleRepository:
@@ -51,6 +51,15 @@ class ScheduleRepository:
                 epoch_ms(schedule.created_at),
             ),
         )
+        # Added by migration 0061; keep the original INSERT compatible with
+        # databases that are being upgraded in the same startup transaction.
+        try:
+            self._conn.execute(
+                "UPDATE schedules SET task_type=?, task_payload=? WHERE schedule_id=?",
+                (schedule.task_type, schedule.task_payload, schedule.schedule_id),
+            )
+        except sqlite3.OperationalError:
+            pass
 
     @staticmethod
     def _compute_interval(expression: str) -> int | None:
@@ -119,7 +128,20 @@ class ScheduleRepository:
             version=row["version"],
             connector_id=row["connector_id"],
             created_at=from_epoch_ms(row["created_at"]),
+            task_type=(row["task_type"] if "task_type" in row.keys() else "connector.poll"),
+            task_payload=(row["task_payload"] if "task_payload" in row.keys() else ""),
         )
+
+    def update_enabled_expected(
+        self, schedule_id: str, enabled: bool, expected_version: int,
+    ) -> bool:
+        """Update enabled atomically under the caller's observed version."""
+        cursor = self._conn.execute(
+            "UPDATE schedules SET enabled=?, version=version+1 "
+            "WHERE schedule_id=? AND version=?",
+            (1 if enabled else 0, schedule_id, expected_version),
+        )
+        return cursor.rowcount > 0
 
 
 class ScheduledFireRepository:

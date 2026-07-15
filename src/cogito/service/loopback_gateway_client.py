@@ -71,7 +71,7 @@ class LoopbackGatewayClient:
                     retry_after_seconds=retry,
                 )
             # 遗留 bool|None 形式
-            legacy = adapter.send(target, content_ref)
+            legacy = adapter.send(target, content)
             if legacy is True:
                 return GatewayResult(
                     status="success",

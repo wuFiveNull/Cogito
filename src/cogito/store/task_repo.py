@@ -175,15 +175,16 @@ class TaskRepository:
 
     def complete(
         self, task_id: str, worker_id: str, lease_version: int,
-        now_ms: int | None = None,
+        now_ms: int | None = None, result_ref: str | None = None,
     ) -> bool:
         if now_ms is None:
             now_ms = epoch_ms(datetime.now(UTC))
         cursor = self._conn.execute(
-            "UPDATE tasks SET status='completed', lease_owner=NULL, lease_expires_at=NULL "
+            "UPDATE tasks SET status='completed', lease_owner=NULL, lease_expires_at=NULL, "
+            "result_ref=COALESCE(?,result_ref) "
             "WHERE task_id=? AND lease_owner=? AND lease_version=? "
             "AND status='running' AND lease_expires_at IS NOT NULL AND lease_expires_at > ?",
-            (task_id, worker_id, lease_version, now_ms),
+            (result_ref, task_id, worker_id, lease_version, now_ms),
         )
         return cursor.rowcount > 0
 
