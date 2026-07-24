@@ -194,6 +194,27 @@ def insert_document(conn: sqlite3.Connection, doc: KnowledgeDocument) -> Knowled
             doc.updated_at.isoformat() if doc.updated_at else None,
         ),
     )
+    EventStore(conn).append(
+        Event(
+            event_type="knowledge.document.created",
+            stream_type="knowledge_document",
+            stream_id=doc.document_id,
+            producer="knowledge-repository",
+            event_class=EventClass.DOMAIN,
+            summary=f"Knowledge document created: {doc.title}",
+            attributes={
+                "resource_id": doc.resource_id,
+                "title": doc.title,
+                "language": doc.language,
+                "parser_id": doc.parser_id,
+                "content_version": doc.content_version,
+                "status": doc.status,
+            },
+            outcome=doc.status,
+            idempotency_key=f"knowledge:document:{doc.document_id}:created",
+        ),
+        expected_version=0,
+    )
     return doc
 
 
@@ -250,6 +271,27 @@ def insert_segment(conn: sqlite3.Connection, seg: KnowledgeSegment) -> Knowledge
             seg.updated_at.isoformat() if seg.updated_at else None,
             seg.deleted_at.isoformat() if seg.deleted_at else None,
         ),
+    )
+    EventStore(conn).append(
+        Event(
+            event_type="knowledge.segment.created",
+            stream_type="knowledge_segment",
+            stream_id=seg.segment_id,
+            producer="knowledge-repository",
+            event_class=EventClass.OPERATION,
+            summary=f"Knowledge segment created (ordinal {seg.ordinal})",
+            attributes={
+                "document_id": seg.document_id,
+                "ordinal": seg.ordinal,
+                "segment_kind": seg.segment_kind,
+                "content_hash": seg.content_hash,
+                "token_count": seg.token_count,
+            },
+            payload_ref=seg.payload_ref,
+            outcome="created",
+            idempotency_key=f"knowledge:segment:{seg.segment_id}:created",
+        ),
+        expected_version=0,
     )
     return seg
 
@@ -331,6 +373,19 @@ def write_embedding(
         "(segment_id, embedding_model, embedding_version, vector, created_at) "
         "VALUES (?, ?, ?, ?, ?)",
         (segment_id, model, version, blob, datetime.now(UTC).isoformat()),
+    )
+    EventStore(conn).append(
+        Event(
+            event_type="knowledge.embedding.written",
+            stream_type="knowledge_segment",
+            stream_id=segment_id,
+            producer="knowledge-repository",
+            event_class=EventClass.OPERATION,
+            summary="Knowledge embedding written",
+            attributes={"embedding_model": model, "embedding_version": version},
+            outcome="ready",
+            idempotency_key=f"knowledge:embedding:{segment_id}:{model}:{version}",
+        ),
     )
 
 
