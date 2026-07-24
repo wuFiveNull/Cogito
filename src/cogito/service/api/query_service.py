@@ -74,19 +74,6 @@ class QueryService:
             PayloadStore(config.resolve_payload_dir(), conn),
         )
 
-    def _identity_count(
-        self, stream_type: str, legacy_sql: str, *, active_only: bool = False
-    ) -> int:
-        projection_lookup = {
-            "conversation": self._event_projections.conversations,
-            "session": self._event_projections.sessions,
-            "endpoint": self._event_projections.endpoints,
-        }
-        projections = projection_lookup[stream_type](**({"active_only": True} if active_only else {}))
-        if projections:
-            return len(projections)
-        return int(self._conn.execute(legacy_sql).fetchone()[0])
-
     @staticmethod
     def _message_text(message: dict[str, Any] | None) -> str:
         if not message:
