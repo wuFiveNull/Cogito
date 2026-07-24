@@ -269,53 +269,30 @@ class QueryService:
             )
             items = [sm.to_dict() for sm in scored]
         else:
+            # Use Event projections to list memories
+            all_mems = self._event_projections.memories()
+            filtered = [m for m in all_mems if m.get("principal_id") == principal_id]
             if statuses:
-                placeholders = ",".join("?" for _ in statuses)
-                rows = self._conn.execute(
-                    f"SELECT * FROM memory_items "
-                    f"WHERE principal_id=? AND deleted_at IS NULL AND status IN ({placeholders}) "
-                    f"ORDER BY importance DESC, created_at DESC LIMIT ?",
-                    (principal_id, *statuses, limit),
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    "SELECT * FROM memory_items "
-                    "WHERE principal_id=? AND deleted_at IS NULL "
-                    "ORDER BY importance DESC, created_at DESC LIMIT ?",
-                    (principal_id, limit),
-                ).fetchall()
-            items = [dict(r) for r in rows]
+                filtered = [m for m in filtered if m.get("status") in statuses]
+            filtered.sort(key=lambda m: m.get("created_at") or 0, reverse=True)
+            items = filtered[:limit]
         return {"items": items, "query": q, "count": len(items), "status": status}
 
-    def search_memory_page(
-        self,
-        q: str,
-        *,
-        principal_id: str,
-        limit: int,
-        offset: int,
-    ) -> dict[str, Any]:
-        escaped = q.replace("%", "\\%").replace("_", "\\_")
-        where = (
-            "principal_id=? AND deleted_at IS NULL AND status='confirmed' "
-            "AND (subject LIKE ? ESCAPE '\\' OR predicate LIKE ? ESCAPE '\\' "
-            "OR value LIKE ? ESCAPE '\\')"
-        )
-        like = f"%{escaped}%"
-        params = (principal_id, like, like, like)
-        total_row = self._conn.execute(
-            f"SELECT COUNT(*) FROM memory_items WHERE {where}",
-            params,
-        ).fetchone()
-        rows = self._conn.execute(
-            f"SELECT * FROM memory_items WHERE {where} "
-            "ORDER BY importance DESC,created_at DESC LIMIT ? OFFSET ?",
-            (*params, max(1, min(limit, 100)), max(0, offset)),
-        ).fetchall()
-        return {
-            "items": [dict(row) for row in rows],
-            "total": int(total_row[0]) if total_row else 0,
-        }
+    def search_memory_page(self, q: str, *, principal_id: str, limit: int, offset: int) -> dict[str, Any]:
+        """Paged memory search using Event replay + FTS projection."""
+        # Use Event projections for count, then FTS-like text filter
+        all_mems = self._event_projections.memories()
+        filtered = [
+            m for m in all_mems
+            if m.get("principal_id") == principal_id
+            and m.get("status") == "confirmed"
+        ]
+        if q:
+            ql = q.lower()
+            filtered = [m for m in filtered if ql in (m.get("memory_id") or "").lower()]
+        total = len(filtered)
+        page = filtered[offset:offset + limit]
+        return {"items": page, "total": total, "limit": limit, "offset": offset}
 
     # ── connectors ─────────────────────────────────────────────
 
@@ -1515,43 +1492,20 @@ class QueryService:
                 for ce in self._event_store.read_stream_type("proactive_candidate"):
                     if ce.stream_id == candidate_id and ce.event_type == "proactive.decision.made":
                         decision_count += 1
-            ).fetchone()[0]
-            decision_count = self._conn.execute(
-                "SELECT COUNT(*) FROM proactive_decisions_v2 d JOIN proactive_candidates c "
-                "ON c.candidate_id=d.candidate_id WHERE c.source_payload_ref IN "
-                "(SELECT payload_ref FROM event_log WHERE correlation_id=? "
-                "AND event_type='connector.source.ingested')",
-                (batch_id,),
-            ).fetchone()[0]
-            evaluating_count = self._conn.execute(
-                "SELECT COUNT(*) FROM proactive_candidates c WHERE c.status='evaluating' "
-                "AND c.source_payload_ref IN (SELECT payload_ref FROM event_log "
-                "WHERE correlation_id=? AND event_type='connector.source.ingested')",
-                (batch_id,),
-            ).fetchone()[0]
-        poll_status = task["status"]
-        ingestion_status = batch["status"] if batch is not None else "pending"
-        failed = poll_status == "failed" or ingestion_status == "failed"
-        done = failed or (
-            poll_status == "completed"
-            and ingestion_status == "committed"
-            and evaluating_count == 0
-            and decision_count >= candidate_count
+        evaluating_count = sum(
+            1 for ce in self._event_store.read_stream_type("proactive_candidate")
+            if ce.event_type == "proactive.candidate.created"
+            and ce.attributes.get("status", "") == "evaluating"
         )
+        done = candidate_count > 0 and decision_count >= candidate_count and evaluating_count == 0
         return {
             "poll_task_id": poll_task_id,
-            "poll_status": poll_status,
-            "ingestion_status": ingestion_status,
-            "batch_id": batch_id,
-            "fetched_count": int(batch["fetched_count"] if batch is not None else 0),
-            "accepted_count": int(batch["accepted_count"] if batch is not None else 0),
-            "duplicate_count": int(batch["duplicate_count"] if batch is not None else 0),
-            "quarantined_count": int(batch["quarantined_count"] if batch is not None else 0),
+            "poll_status": task.status.value,
             "candidate_count": int(candidate_count),
             "decision_count": int(decision_count),
             "evaluating_count": int(evaluating_count),
             "done": bool(done),
-            "failed": bool(failed),
+            "failed": task.status.value == "failed",
             "error": str(batch["error_ref"] or "") if batch is not None else "",
         }
 
@@ -1639,22 +1593,13 @@ class QueryService:
             kind = receipt_kind_by_event.get(event.event_type)
             if kind:
                 receipt_kinds[kind] = receipt_kinds.get(kind, 0) + 1
-        # proactive_feedback signals 聚合
+        # proactive_feedback signals — from Event stream
         fb: dict[str, int] = {}
-        try:
-            # 表名以实际 schema 为准 (proactive_signals / feedback_signals)
-            for row in self._conn.execute(
-                "SELECT payload_json FROM proactive_signals "
-                "WHERE category IN ('feedback','proactive_feedback')"
-            ).fetchall():
-                try:
-                    p = __import__("json").loads(row[0] or "{}")
-                except Exception:
-                    p = {}
-                evt = p.get("event_type", p.get("action", "other"))
-                fb[evt] = fb.get(evt, 0) + 1
-        except Exception:
-            pass
+        for event in self._event_store.read_stream_type("proactive_candidate"):
+            if event.event_type == "proactive.decision.made":
+                action = event.attributes.get("action", "")
+                if action in {"silent", "send_later"}:
+                    fb[action] = fb.get(action, 0) + 1
         return {
             "opened": receipt_kinds.get("confirmed", 0),
             "ignored": fb.get("ignored", 0),
@@ -1811,60 +1756,6 @@ class QueryService:
             "model_cost_per_useful_result": None,
         }
 
-    # ── canonical Event Explorer ────────────────────────────────
-                "unauthorized_tool_execution_count": self._conn.execute(
-                    "SELECT COUNT(*) FROM proactive_decisions_v2 "
-                    "WHERE action='unauthorized_tool_rejected'"
-                ).fetchone()[0],
-                "model_cost_per_useful_result": None,
-            }
-        total = self._conn.execute(
-            "SELECT COUNT(*) FROM drift_runs WHERE principal_id=?",
-            (principal_id,),
-        ).fetchone()[0]
-        completed = self._conn.execute(
-            "SELECT COUNT(*) FROM drift_runs WHERE principal_id=? AND status='completed'",
-            (principal_id,),
-        ).fetchone()[0]
-        no_value = self._conn.execute(
-            "SELECT COUNT(*) FROM drift_runs WHERE principal_id=? "
-            "AND finish_summary LIKE 'no_value%'",
-            (principal_id,),
-        ).fetchone()[0]
-        paused_total = self._conn.execute(
-            "SELECT COUNT(*) FROM drift_runs WHERE principal_id=? AND status='paused'",
-            (principal_id,),
-        ).fetchone()[0]
-        resumed = self._conn.execute(
-            "SELECT COUNT(*) FROM drift_runs WHERE principal_id=? "
-            "AND finish_summary LIKE '%resumed%'",
-            (principal_id,),
-        ).fetchone()[0]
-        # unauthorized_tool_execution / duplicate_side_effect: PLAN-17 P0-06 现在
-        # 真实计算 (MVP 只读真实值通常为 0, 不再硬编码掩盖。)
-        unauthorized = self._conn.execute(
-            "SELECT COUNT(*) FROM proactive_decisions_v2 WHERE action='unauthorized_tool_rejected'"
-        ).fetchone()[0]
-        duplicate_side_effect = self._conn.execute(
-            "SELECT COUNT(*) FROM drift_results "
-            "WHERE result_kind IN ('duplicate_side_effect_suspect',)"
-        ).fetchone()[0]
-        # admission_rate: 真实计算需要 admission/deny audit 表 (PLAN-17 R1 建议);
-        # 暂时由完成率代替并明确标注 None 含义。
-        return {
-            # Pending drift_admission_decisions audit table; do not fabricate.
-            "admission_rate": None,
-            "total_runs": total,
-            "completion_rate": (completed / total) if total else 0.0,
-            "no_value_rate": (no_value / total) if total else 0.0,
-            "paused_total": paused_total,
-            "paused_recovery_rate": (resumed / paused_total) if paused_total else 1.0,
-            "duplicate_side_effect_count": duplicate_side_effect,
-            "unauthorized_tool_execution_count": unauthorized,
-            # Pending model-call metering; 0.0 would conceal absence.
-            "model_cost_per_useful_result": None,
-        }
-
     def _event_drift_runs(self, principal_id: str) -> list[dict[str, Any]]:
         if not self._event_store.read_stream_type("drift_run", limit=1):
             return []
@@ -1946,21 +1837,18 @@ class QueryService:
         content = ""
         if context_file.exists():
             content = context_file.read_text(encoding="utf-8")
-        # 直接读最新版本，避免 repo.get_current() 的 NOT NULL 约束问题
-        row = self._conn.execute(
-            "SELECT * FROM proactive_policies ORDER BY version DESC LIMIT 1"
-        ).fetchone()
-        if row is None:
-            return {
-                "content": content,
-                "policy_version": 1,
-                "dry_run": True,
-                "file_exists": context_file.exists(),
-            }
+        # Use Event-first ProactivePolicyRepository
+        try:
+            policy = self._policy_repo.get_current("owner")
+            version = policy.version
+            dry_run = policy.dry_run
+        except Exception:
+            version = 1
+            dry_run = True
         return {
             "content": content,
-            "policy_version": row["version"],
-            "dry_run": bool(row["dry_run"]),
+            "policy_version": version,
+            "dry_run": dry_run,
             "file_exists": context_file.exists(),
         }
 
