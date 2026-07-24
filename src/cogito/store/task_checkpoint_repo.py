@@ -15,6 +15,8 @@ import hashlib
 import sqlite3
 from dataclasses import dataclass
 
+from cogito.infrastructure.payload_store import PayloadStore
+
 
 @dataclass
 class TaskCheckpoint:
@@ -36,8 +38,11 @@ class TaskCheckpoint:
 
 
 class TaskCheckpointRepository:
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(
+        self, conn: sqlite3.Connection, *, payload_store: PayloadStore | None = None
+    ) -> None:
         self._conn = conn
+        self._payload_store = payload_store
 
     def insert(self, ck: TaskCheckpoint) -> TaskCheckpoint:
         self._conn.execute(

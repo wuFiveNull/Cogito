@@ -11,6 +11,9 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
+from cogito.domain.event import Event, EventClass, EventContext
+from cogito.store.event_store import EventStore
+
 
 @dataclass
 class DriftResult:
@@ -32,6 +35,24 @@ class DriftResultRepository:
         self._conn = conn
 
     def insert(self, result: DriftResult) -> DriftResult:
+        EventStore(self._conn).append(
+            Event(
+                event_type="drift.result.committed",
+                stream_type="drift_result",
+                stream_id=result.drift_result_id,
+                producer="drift-result-repository",
+                event_class=EventClass.DOMAIN,
+                summary=f"Drift result: {result.result_kind}",
+                attributes={
+                    "drift_run_id": result.drift_run_id,
+                    "result_kind": result.result_kind,
+                },
+                payload_ref=result.result_ref,
+                outcome="committed",
+                idempotency_key=f"drift:result:{result.drift_result_id}:committed",
+            ),
+            expected_version=0,
+        )
         self._conn.execute(
             "INSERT INTO drift_results ("
             "  drift_result_id, drift_run_id, task_attempt_id, result_kind, "
