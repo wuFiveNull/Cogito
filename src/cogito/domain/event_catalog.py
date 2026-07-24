@@ -97,6 +97,7 @@ _TYPES: dict[str, EventClass] = {
     "approval.consumed": EventClass.OPERATION,
     "agent.command.completed": EventClass.DOMAIN,
     "proactive.candidate.created": EventClass.DOMAIN,
+    "proactive.cadence.evaluated": EventClass.OPERATION,
     "proactive.decision.made": EventClass.DOMAIN,
     "proactive.delivery.requested": EventClass.DOMAIN,
     "proactive.delivery.completed": EventClass.DOMAIN,

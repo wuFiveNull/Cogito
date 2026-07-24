@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from cogito.contracts.clock import Clock, ProductionClock, epoch_ms
+from cogito.domain.event import Event, EventClass, EventContext
 from cogito.domain.schedule import (
     FireStatus,
     MisfirePolicy,
@@ -26,6 +27,7 @@ from cogito.domain.schedule import (
 )
 from cogito.domain.task import Task, TaskStatus
 from cogito.service.unit_of_work import UnitOfWork
+from cogito.store.event_store import EventStore
 from cogito.store.schedule_repo import ScheduledFireRepository, ScheduleRepository
 from cogito.store.task_repo import TaskRepository
 
@@ -339,23 +341,22 @@ class Scheduler:
     # ── M2: cadence state 读写 + 能量档 + 间隔计算 ──
 
     def _read_cadence_state(self) -> dict[str, Any]:
-        """读 cadence 单例行；不存在则返回到期默认。"""
-        row = self._conn.execute(
-            "SELECT last_eval_at, next_eval_at, interval_s, energy_band "
-            "FROM proactive_cadence_state WHERE id=1",
-        ).fetchone()
-        if row is None:
+        """从 Event 流读 cadence 状态；不存在则返回到期默认。"""
+        events = EventStore(self._conn).read_stream("proactive_cadence", "default")
+        if events:
+            last = events[-1]
+            attrs = last.attributes
             return {
-                "last_eval_at": None,
-                "next_eval_at": 0,
-                "interval_s": 60,
-                "energy_band": "medium",
+                "last_eval_at": attrs.get("last_eval_at"),
+                "next_eval_at": attrs.get("next_eval_at", 0),
+                "interval_s": attrs.get("interval_s", 60),
+                "energy_band": attrs.get("energy_band", "medium"),
             }
         return {
-            "last_eval_at": row[0],
-            "next_eval_at": row[1],
-            "interval_s": row[2],
-            "energy_band": row[3],
+            "last_eval_at": None,
+            "next_eval_at": 0,
+            "interval_s": 60,
+            "energy_band": "medium",
         }
 
     def _write_cadence_state(
@@ -367,11 +368,23 @@ class Scheduler:
         energy_band,
         updated_at,
     ) -> None:
-        self._conn.execute(
-            "UPDATE proactive_cadence_state "
-            "SET last_eval_at=?, next_eval_at=?, interval_s=?, "
-            "energy_band=?, updated_at=? WHERE id=1",
-            (last_eval_at, next_eval_at, interval_s, energy_band, updated_at),
+        EventStore(self._conn).append(
+            Event(
+                event_type="proactive.cadence.evaluated",
+                stream_type="proactive_cadence",
+                stream_id="default",
+                producer="scheduler",
+                event_class=EventClass.OPERATION,
+                summary="Proactive cadence evaluated",
+                attributes={
+                    "last_eval_at": last_eval_at,
+                    "next_eval_at": next_eval_at,
+                    "interval_s": interval_s,
+                    "energy_band": energy_band,
+                },
+                occurred_at=epoch_ms(updated_at),
+                idempotency_key=f"cadence:evaluated:{updated_at}",
+            ),
         )
 
     def _current_energy_band(self) -> str:
