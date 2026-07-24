@@ -11,16 +11,19 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
-from dataclasses import dataclass, field
+import threading
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from cogito.domain.memory import MemoryItem
 from cogito.model.contracts import (
+    ErrorCategory,
     FinishReason,
     ModelRequest,
 )
-from cogito.model.router import ModelRouter
+from cogito.model.router import ModelRouter, RouterError
 from cogito.service.memory_service import SqliteMemoryService
 
 _LOGGER = logging.getLogger("cogito.memory_extractor")
@@ -39,6 +42,16 @@ class MemoryExtractionWriteError(RuntimeError):
 
     整个提取窗口应视为失败：事务回滚、watermark 不推进、下次重试该窗口。
     """
+
+
+def _is_database_lock_error(error: BaseException) -> bool:
+    """识别由 SQLite 写锁导致的异常链，不依赖 Provider 错误文本。"""
+    current: BaseException | None = error
+    while current is not None:
+        if isinstance(current, sqlite3.OperationalError) and "locked" in str(current).lower():
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 # 最小消息数阈值，低于此数量不提取
@@ -179,10 +192,10 @@ def request_extraction(
     - Task + Outbox 事件 + checkpoint 在同一事务提交（调用方提供连接并负责 commit）。
     返回 True 表示（已创建或已存在），False 表示触发策略决定不提交。
     """
-    from cogito.domain.events import DomainEvent
+    from cogito.domain.event import Event, EventClass, EventContext
     from cogito.service.task_handlers import make_idempotency_key
     from cogito.service.task_service import SqliteTaskService
-    from cogito.store.repositories import OutboxRepository
+    from cogito.store.event_store import EventStore
     from cogito.store.watermark_repo import PROC_MEMORY_EXTRACT, WatermarkRepository
 
     watermark = WatermarkRepository(conn).get(
@@ -232,7 +245,7 @@ def request_extraction(
         f"{EXTRACTOR_VERSION}:{trigger_type}",
     )
     try:
-        SqliteTaskService(conn).create(
+        task = SqliteTaskService(conn, event_sourced=True).create(
             "memory.extract",
             json.dumps(task_payload, ensure_ascii=False),
             idempotency_key=key,
@@ -246,15 +259,28 @@ def request_extraction(
     # OPS-04 完整：记录 extraction completed（Task 已创建）
     _metrics().record_extraction_completed()
 
-    OutboxRepository(conn).insert(
-        DomainEvent(
-            event_type="MemoryExtractionRequested",
-            aggregate_type="memory_extract",
-            aggregate_id=key,
-            aggregate_version=1,
-            payload=task_payload,
-            payload_ref=json.dumps(task_payload, ensure_ascii=False),
-            origin=f"{trigger_type}_consumer",
+    EventStore(conn).append(
+        Event(
+            event_type="memory.extraction.requested",
+            stream_type="memory_extract",
+            stream_id=key,
+            producer=f"{trigger_type}-memory-extraction",
+            event_class=EventClass.DOMAIN,
+            context=EventContext(
+                principal_id=principal_id,
+                conversation_id=conversation_id,
+                session_id=session_id,
+                task_id=task.task_id,
+            ),
+            summary="Memory extraction requested",
+            attributes={
+                "trigger_type": trigger_type,
+                "from_sequence": from_seq,
+                "to_sequence": to_seq,
+                "task_type": "memory.extract",
+            },
+            outcome="requested",
+            idempotency_key=f"memory-extraction-requested:{key}",
         )
     )
     return True
@@ -336,13 +362,38 @@ class MemoryExtractor:
         # non-strict 模式：才允许单条跳过，避免整窗口因单条脏数据丢失。
         written = []
         self.created_memory_ids = []
-        for c in candidates:
+        _LOGGER.info(
+            "Memory candidate persistence started: extraction=%s candidates=%d "
+            "process=%d thread=%d connection=%s",
+            ctx.extraction_id,
+            len(candidates),
+            os.getpid(),
+            threading.get_ident(),
+            hex(id(self._conn)),
+        )
+        for candidate_index, c in enumerate(candidates, start=1):
             evidence = self._validate_evidence(c, ctx.allowed_message_ids)
             try:
                 item = self._write_candidate(c, ctx, evidence=evidence)
             except MemoryExtractionWriteError:
                 raise
             except Exception as e:
+                if _is_database_lock_error(e):
+                    # 只记录结构化候选元数据，避免将用户记忆正文写入日志。
+                    _LOGGER.warning(
+                        "Memory candidate write locked: extraction=%s candidate_index=%d "
+                        "kind=%s scope_type=%s evidence_count=%d connection=%s "
+                        "process=%d thread=%d in_transaction=%s",
+                        ctx.extraction_id,
+                        candidate_index,
+                        c.get("kind", "fact"),
+                        c.get("scope_type", ""),
+                        len(evidence),
+                        hex(id(self._conn)),
+                        os.getpid(),
+                        threading.get_ident(),
+                        self._conn.in_transaction,
+                    )
                 if self._strict:
                     raise MemoryExtractionWriteError(
                         f"strict extraction aborted: candidate write failed: {e}"
@@ -361,7 +412,7 @@ class MemoryExtractor:
         self,
         conversation_text: str,
     ) -> list[dict[str, Any]]:
-        """调用模型提取候选（D1: 使用 response_schema 结构化输出）。"""
+        """调用模型提取候选，并兼容不支持 JSON Schema 的兼容 Provider。"""
         try:
             request = ModelRequest(
                 messages=[
@@ -425,7 +476,25 @@ class MemoryExtractor:
                     "required": ["candidates"],
                 },
             )
-            response = await self._router.generate(request, model_role=self._model_role)
+            try:
+                response = await self._router.generate(request, model_role=self._model_role)
+            except RouterError as exc:
+                # OpenAI-compatible API 并不都支持 ``json_schema``（OpenCode Go
+                # 的部分上游会以 400 拒绝它）。提示词已要求 JSON，因此仅在
+                # 明确的请求格式错误时降级为通用 json_object，不吞掉鉴权、限流
+                # 等其他失败。
+                if (
+                    exc.envelope is None
+                    or exc.envelope.category != ErrorCategory.invalid_request
+                ):
+                    raise
+                _LOGGER.info(
+                    "Memory extraction JSON Schema rejected; retrying with json_object"
+                )
+                response = await self._router.generate(
+                    replace(request, response_schema=None, response_format="json"),
+                    model_role=self._model_role,
+                )
         except Exception as e:
             _LOGGER.warning("Memory extraction model call failed: %s", e)
             if self._strict:

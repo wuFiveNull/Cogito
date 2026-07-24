@@ -7,7 +7,7 @@ const ACTION_TONE: Record<string, "ok" | "warn" | "danger" | "info" | "muted"> =
   approve: "ok", reject: "danger", "confirm-memory": "ok", "delete-memory": "danger",
   "delete-session": "danger", "delete-sessions-by-conversation": "danger",
   "pause-connector": "warn", "disable-plugin": "warn", "disable-tool": "warn",
-  "replay-delivery": "info", "replay-event": "info", "retry-task": "info",
+  "retry-task": "info",
   "create-backup": "info", "verify-backup": "info", "restore-backup": "warn",
   "config-dry-run": "info", "rollback-config": "warn", "update-proactive-policy": "info",
   "review-proactive-candidate": "ok", "reconcile-receipt": "ok",
@@ -72,7 +72,7 @@ export default function AuditPage() {
         ) : audit.error ? (
           <ErrorBox msg={audit.error} />
         ) : items.length === 0 ? (
-          <Empty msg="暂无审计记录" hint="审计记录在 Command 执行后自动生成（如审批、删除会话、重放投递等）。" />
+          <Empty msg="暂无审计记录" hint="审计记录在 Command 执行后自动生成（如审批、删除会话、投递对账等）。" />
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm">

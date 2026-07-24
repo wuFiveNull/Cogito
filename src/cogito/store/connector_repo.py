@@ -1,4 +1,8 @@
-"""Connector / Cursor / RawItem / Item 数据访问层。"""
+"""Connector / Cursor / RawItem / Item 数据访问层 — Event-only.
+
+Write operations append canonical Events.  Read operations replay from Event
+streams, with legacy table fallback for pre-backfill data.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +19,9 @@ from cogito.domain.connector import (
     ConnectorStatus,
     ItemStatus,
 )
+from cogito.domain.event import Event, EventClass, EventContext
+from cogito.store.event_replay import replay_connector_source
+from cogito.store.event_store import EventStore
 
 
 class ConnectorRepository:
@@ -29,8 +36,31 @@ class ConnectorRepository:
         return self._row_to_connector(row) if row else None
 
     def insert(self, connector: Connector) -> None:
+        EventStore(self._conn).append(
+            Event(
+                event_type="connector.created",
+                stream_type="connector",
+                stream_id=connector.connector_id,
+                producer="connector-repository",
+                event_class=EventClass.DOMAIN,
+                summary=f"Connector created: {connector.name}",
+                attributes={
+                    "connector_type": connector.connector_type.value,
+                    "name": connector.name,
+                    "url": connector.url or "",
+                    "site_link": connector.site_link or "",
+                    "poll_schedule_id": connector.poll_schedule_id or "",
+                    "fetch_timeout_s": connector.fetch_timeout_s,
+                },
+                outcome=connector.status.value,
+                occurred_at=epoch_ms(connector.created_at),
+                idempotency_key=f"connector:{connector.connector_id}:created",
+            ),
+            expected_version=0,
+        )
+        # Legacy row INSERT for FK compatibility with connector_raw_items etc.
         self._conn.execute(
-            "INSERT INTO connectors (connector_id, connector_type, name, url, "
+            "INSERT OR IGNORE INTO connectors (connector_id, connector_type, name, url, "
             "  site_link, poll_schedule_id, fetch_timeout_s, status, "
             "  consecutive_failures, last_success_at, last_attempt_at, created_at) "
             "VALUES (?,?,?,?,?, ?,?,?,?, ?,?,?)",
@@ -58,6 +88,20 @@ class ConnectorRepository:
         return [self._row_to_connector(r) for r in rows]
 
     def update_status(self, connector_id: str, status: ConnectorStatus) -> None:
+        EventStore(self._conn).append(
+            Event(
+                event_type="connector.status.updated",
+                stream_type="connector",
+                stream_id=connector_id,
+                producer="connector-repository",
+                event_class=EventClass.DOMAIN,
+                summary=f"Connector status: {status.value}",
+                attributes={"status": status.value},
+                outcome=status.value,
+                idempotency_key=f"connector:{connector_id}:status:{status.value}",
+            ),
+        )
+        # Keep legacy table write for FK compatibility
         self._conn.execute(
             "UPDATE connectors SET status=? WHERE connector_id=?",
             (status.value, connector_id),
@@ -65,10 +109,19 @@ class ConnectorRepository:
 
     def update_success(self, connector_id: str) -> None:
         now_ms = epoch_ms(datetime.now(UTC))
-        self._conn.execute(
-            "UPDATE connectors SET last_success_at=?, last_attempt_at=?, "
-            "  consecutive_failures=0, status='active' WHERE connector_id=?",
-            (now_ms, now_ms, connector_id),
+        # Also append connector.cursor.updated Event
+        EventStore(self._conn).append(
+            Event(
+                event_type="connector.status.updated",
+                stream_type="connector",
+                stream_id=connector_id,
+                producer="connector-repository",
+                event_class=EventClass.DOMAIN,
+                summary="Connector poll succeeded",
+                attributes={"status": "active"},
+                outcome="active",
+                idempotency_key=f"connector:{connector_id}:success:{now_ms}",
+            ),
         )
 
     def update_failure(self, connector_id: str) -> None:
@@ -120,24 +173,20 @@ class ConnectorCursorRepository:
         )
 
     def upsert(self, cursor: ConnectorCursor) -> None:
-        now_ms = epoch_ms(datetime.now(UTC))
-        self._conn.execute(
-            "INSERT INTO connector_cursors "
-            "(connector_id, etag, last_modified, last_item_ids, "
-            " last_polled_at, cursor_json, updated_at) "
-            "VALUES (?,?,?,?,?,?,?) "
-            "ON CONFLICT(connector_id) DO UPDATE SET "
-            "etag=excluded.etag, last_modified=excluded.last_modified, "
-            "last_item_ids=excluded.last_item_ids, last_polled_at=excluded.last_polled_at, "
-            "cursor_json=excluded.cursor_json, updated_at=excluded.updated_at",
-            (
-                cursor.connector_id,
-                cursor.etag,
-                cursor.last_modified,
-                json.dumps(cursor.last_item_ids),
-                epoch_ms(cursor.last_polled_at),
-                json.dumps(cursor.cursor_json),
-                now_ms,
+        EventStore(self._conn).append(
+            Event(
+                event_type="connector.cursor.updated",
+                stream_type="connector",
+                stream_id=cursor.connector_id,
+                producer="connector-repository",
+                event_class=EventClass.OPERATION,
+                summary="Connector cursor updated",
+                attributes={
+                    "etag": cursor.etag or "",
+                    "last_modified": cursor.last_modified or "",
+                    "last_item_ids": cursor.last_item_ids,
+                },
+                idempotency_key=f"connector:cursor:{cursor.connector_id}:{epoch_ms(datetime.now(UTC))}",
             ),
         )
 
@@ -147,8 +196,10 @@ class ConnectorRawRepository:
         self._conn = conn
 
     def insert(self, raw: ConnectorRawItem) -> None:
+        # Keep legacy INSERT for FK compatibility; the source data is also
+        # captured in the connector.source.ingested Event.
         self._conn.execute(
-            "INSERT INTO connector_raw_items "
+            "INSERT OR IGNORE INTO connector_raw_items "
             "(raw_item_id, connector_id, source_item_id, fetched_at, "
             " content_hash, payload_ref, http_etag, http_last_modified) "
             "VALUES (?,?,?,?,?, ?,?,?)",
@@ -190,30 +241,28 @@ class ConnectorItemRepository:
         self._conn = conn
 
     def insert(self, item: ConnectorItem, source_metadata: str = "") -> None:
-        self._conn.execute(
-            "INSERT INTO connector_items "
-            "(item_id, connector_id, raw_item_id, source_item_id, title, link, "
-            " summary, author, published_at, content_hash, relevance, "
-            " summary_text, status, created_at, source_metadata_json, topic) "
-            "VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?,?)",
-            (
-                item.item_id,
-                item.connector_id,
-                item.raw_item_id,
-                item.source_item_id,
-                item.title,
-                item.link,
-                item.summary,
-                item.author,
-                epoch_ms(item.published_at),
-                item.content_hash,
-                item.relevance,
-                item.summary_text,
-                item.status.value,
-                epoch_ms(item.created_at),
-                source_metadata or "",
-                item.topic,
+        EventStore(self._conn).append(
+            Event(
+                event_type="connector.source.ingested",
+                stream_type="source",
+                stream_id=f"{item.connector_id}:{item.source_item_id}",
+                producer="connector-repository",
+                event_class=EventClass.DOMAIN,
+                summary=f"Connector item ingested: {item.title or item.source_item_id}",
+                attributes={
+                    "item_id": item.item_id,
+                    "connector_id": item.connector_id,
+                    "source_item_id": item.source_item_id,
+                    "title": item.title or "",
+                    "link": item.link or "",
+                    "content_hash": item.content_hash or "",
+                    "published_at": epoch_ms(item.published_at) if item.published_at else None,
+                    "topic": item.topic or "",
+                },
+                outcome=item.status.value,
+                idempotency_key=f"connector:item:{item.connector_id}:{item.source_item_id}:ingested",
             ),
+            expected_version=0,
         )
 
     def find_by_source_id(self, connector_id: str, source_item_id: str) -> ConnectorItem | None:

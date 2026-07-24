@@ -89,7 +89,7 @@ def enqueue_knowledge_sync_source(
     try:
         from cogito.service.task_service import SqliteTaskService
 
-        task = SqliteTaskService(conn).create(
+        task = SqliteTaskService(conn, event_sourced=True).create(
             "knowledge.sync_source",
             json.dumps(data, ensure_ascii=False),
             idempotency_key=idem,
@@ -119,7 +119,7 @@ def enqueue_knowledge_embed(
     try:
         from cogito.service.task_service import SqliteTaskService
 
-        task = SqliteTaskService(conn).create(
+        task = SqliteTaskService(conn, event_sourced=True).create(
             "knowledge.embed",
             json.dumps({"mode": "pending", "embed_model": embed_model}, ensure_ascii=False),
             origin=origin,

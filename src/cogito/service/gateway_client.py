@@ -102,7 +102,7 @@ PERMANENT_GATEWAY_STATUSES = frozenset(
 
 
 def gateway_status_to_channel(status: str) -> str:
-    """Map Bridge/Gateway taxonomy to DeliveryWorker taxonomy."""
+    """Map Bridge/Gateway taxonomy to Channel adapter taxonomy."""
     if status in ("success", "sent"):
         return "sent"
     if status in PERMANENT_GATEWAY_STATUSES:

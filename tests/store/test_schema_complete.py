@@ -13,7 +13,6 @@ from cogito.store.context_snapshot_repo import (
     SnapshotItem,
 )
 from cogito.store.receipt_repo import ReceiptRecord, SideEffectReceiptRepository
-from cogito.store.trace_repo import SpanRecord, TraceRecord, TraceRepository
 
 
 # ── Fixtures ────────────────────────────────────────────────
@@ -32,12 +31,9 @@ class TestNewTablesExist:
 
     EXPECTED_NEW_TABLES = [
         "commands",
-        "side_effect_receipts",
         "capabilities",
         "context_snapshots",
         "context_snapshot_items",
-        "traces",
-        "spans",
         "config_versions",
         "gateway_operation_receipts",
         "plugins",
@@ -151,7 +147,7 @@ class TestCommandsTable:
         assert repo.get("cmd-c").status == "consumed"
 
 
-# ── 6.3: side_effect_receipts 表 ──────────────────────────
+# ── 6.3: side-effect receipt Event 回放 ────────────────────
 
 
 class TestSideEffectReceipts:
@@ -174,6 +170,7 @@ class TestSideEffectReceipts:
         found = repo.find_by_attempt("run", "att-1")
         assert len(found) == 1
         assert found[0].operation_id == "op-123"
+        assert conn.execute("SELECT COUNT(*) FROM side_effect_receipts").fetchone()[0] == 0
 
     def test_pending_reconcile(self, conn):
         repo = SideEffectReceiptRepository(conn)
@@ -281,46 +278,6 @@ class TestContextSnapshots:
                 "VALUES (?, ?, ?, ?)",
                 ("nonexistent", 0, "x", "y"),
             )
-            conn.commit()
-
-
-# ── 6.6: traces / spans 表 ────────────────────────────────
-
-
-class TestTraces:
-    """sch-08: spans 外键约束。"""
-
-    def test_insert_trace_and_spans(self, conn):
-        repo = TraceRepository(conn)
-        trace = TraceRecord(trace_id="trace-1", started_at=1000, actor="owner", origin="web")
-        repo.insert_trace(trace)
-        span = SpanRecord(
-            span_id="span-1",
-            trace_id="trace-1",
-            name="turn-1",
-            kind="turn",
-            started_at=1000,
-            attributes={"turn_id": "turn-1"},
-        )
-        repo.insert_span(span)
-        conn.commit()
-
-        found = repo.get_trace("trace-1")
-        assert found is not None
-        assert len(found.spans) == 1
-        assert found.spans[0].attributes["turn_id"] == "turn-1"
-
-    def test_foreign_key_constraint(self, conn):
-        repo = TraceRepository(conn)
-        span = SpanRecord(
-            span_id="orphan",
-            trace_id="no-such-trace",
-            name="x",
-            kind="custom",
-            started_at=1000,
-        )
-        with pytest.raises(Exception):
-            repo.insert_span(span)
             conn.commit()
 
 

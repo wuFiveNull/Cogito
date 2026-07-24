@@ -111,11 +111,13 @@ class SqliteIdentityConversationService:
         if principal is None:
             principal = Principal(
                 principal_id=uuid.uuid4().hex,
-                principal_type=PrincipalType(principal_type),
+                principal_type=PrincipalType(
+                    "external_user" if principal_type == "user" else principal_type
+                ),
                 status=PrincipalStatus.active,
                 created_at=datetime.now(UTC),
             )
-            self._principal_repo.insert(principal)
+            principal = self._principal_repo.insert(principal)
             created_principal = True
 
         # 2. 查找或创建 Endpoint
@@ -134,7 +136,8 @@ class SqliteIdentityConversationService:
                 endpoint_ref=endpoint_ref or uuid.uuid4().hex,
                 status=EndpointStatus.active,
             )
-            self._endpoint_repo.insert(endpoint)
+            endpoint = self._endpoint_repo.insert(endpoint)
+            principal = self._principal_repo.find(endpoint.principal_id) or principal
             created_endpoint = True
 
         return IdentityResolution(
@@ -199,7 +202,7 @@ class SqliteIdentityConversationService:
         session = Session(
             session_id=uuid.uuid4().hex,
             conversation_id=conversation_id,
-            principal_id=principal_id,
+            context_partition_key=principal_id or conversation_id,
             status=SessionStatus.active,
             created_at=datetime.now(UTC),
         )

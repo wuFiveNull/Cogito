@@ -79,20 +79,23 @@ COMPAT_ALIASES: dict[str, str] = {
 # ── 已定型节内的已知字段（校验未知字段）──
 STORAGE_FIELDS = frozenset({"db_path", "enable_wal", "busy_timeout", "payload_dir", "profile_name"})
 RUNTIME_FIELDS = frozenset({"profile", "timezone", "instance_id"})
-INTERACTION_FIELDS = frozenset({"bind_host", "allow_remote", "validate_origin", "port"})
+INTERACTION_FIELDS = frozenset(
+    {"bind_host", "allow_remote", "validate_origin", "port", "payload_access_token"}
+)
 WORKER_FIELDS = frozenset(
     {
         "concurrency",
         "poll_interval_seconds",
         "lease_duration_seconds",
         "heartbeat_interval_seconds",
-        "outbox_lease_ttl_seconds",
         "delivery_lease_ttl_seconds",
         "recovery_grace_period_seconds",
     }
 )
 
-MODEL_TOP_FIELDS = frozenset({"provider", "main", "providers", "roles"})
+# ``main`` 是历史单 Provider 端点；``fast`` / ``vlm`` 是常用角色的
+# 直接端点简写。三者都可写成 [model.<role>] 而无需再声明 providers/roles。
+MODEL_TOP_FIELDS = frozenset({"provider", "main", "fast", "vlm", "providers", "roles"})
 MODEL_FIELDS = frozenset(
     {
         "model",
@@ -317,11 +320,13 @@ class InteractionConfig:
     allow_remote: bool = False
     validate_origin: bool = True
     port: int = 8081
+    payload_access_token: str = ""
 
     def __repr__(self) -> str:
         return (
             f"InteractionConfig(bind_host={self.bind_host!r}, "
-            f"allow_remote={self.allow_remote}, port={self.port})"
+            f"allow_remote={self.allow_remote}, port={self.port}, "
+            f"payload_access_token={'<configured>' if self.payload_access_token else '<disabled>'})"
         )
 
     @classmethod
@@ -332,6 +337,7 @@ class InteractionConfig:
             allow_remote=bool(raw.get("allow_remote", False)),
             validate_origin=bool(raw.get("validate_origin", True)),
             port=int(raw.get("port", 8081)),
+            payload_access_token=str(raw.get("payload_access_token", "")),
         )
 
 
@@ -348,7 +354,6 @@ class WorkerConfig:
     poll_interval_seconds: float = 1.0
     lease_duration_seconds: int = 300
     heartbeat_interval_seconds: int = 60
-    outbox_lease_ttl_seconds: int = 120
     delivery_lease_ttl_seconds: int = 120
     recovery_grace_period_seconds: int = 30
 
@@ -368,15 +373,6 @@ class WorkerConfig:
                 field="lease_duration_seconds",
                 reason=(
                     f"lease_duration_seconds ({self.lease_duration_seconds}) must be "
-                    f"> heartbeat_interval_seconds ({self.heartbeat_interval_seconds})"
-                ),
-            )
-        if self.outbox_lease_ttl_seconds <= self.heartbeat_interval_seconds:
-            raise ConfigError(
-                section="worker",
-                field="outbox_lease_ttl_seconds",
-                reason=(
-                    f"outbox_lease_ttl_seconds ({self.outbox_lease_ttl_seconds}) must be "
                     f"> heartbeat_interval_seconds ({self.heartbeat_interval_seconds})"
                 ),
             )
@@ -407,7 +403,6 @@ class WorkerConfig:
             poll_interval_seconds=float(raw.get("poll_interval_seconds", 1.0)),
             lease_duration_seconds=int(raw.get("lease_duration_seconds", 300)),
             heartbeat_interval_seconds=int(raw.get("heartbeat_interval_seconds", 60)),
-            outbox_lease_ttl_seconds=int(raw.get("outbox_lease_ttl_seconds", 120)),
             delivery_lease_ttl_seconds=int(raw.get("delivery_lease_ttl_seconds", 120)),
             recovery_grace_period_seconds=int(raw.get("recovery_grace_period_seconds", 30)),
         )
@@ -486,20 +481,24 @@ class RoleConfig:
 class ModelConfig:
     """模型配置 —— 提供者选择与模型选择。
 
-    兼容两种写法：
+    兼容三种写法：
     - 传统单 provider：[model] provider + [model.main]
+    - 直接角色端点：[model.main] + [model.fast] + [model.vlm]
     - 多 provider + 角色路由：[model.providers.<name>] + [model.roles.<name>]
-    当配置了 roles 时，按角色路由优先；否则退化到单 provider 行为。
+    显式 roles 的优先级高于直接角色端点；两者都未配置时退化到单
+    provider 行为。
     """
 
     provider: str = "openai_compat"
     main: ModelEndpointConfig = field(default_factory=ModelEndpointConfig)
+    direct_role_endpoints: dict[str, ModelEndpointConfig] = field(default_factory=dict)
     providers: dict[str, ModelEndpointConfig] = field(default_factory=dict)
     roles: dict[str, RoleConfig] = field(default_factory=dict)
 
     def __repr__(self) -> str:
         return (
             f"ModelConfig(provider={self.provider!r}, main={self.main!r}, "
+            f"direct_roles={list(self.direct_role_endpoints)}, "
             f"providers={list(self.providers)}, roles={list(self.roles)})"
         )
 
@@ -510,6 +509,17 @@ class ModelConfig:
         provider = str(raw.get("provider", "openai_compat"))
         main_raw = dict(raw.get("main", {}))
         main = ModelEndpointConfig._from_raw(main_raw)
+
+        # 常用角色可直接写成 [model.fast] / [model.vlm]，避免为每个
+        # 独立端点重复 providers + roles 两层配置。仅在该节真实出现时
+        # 注册，未写时仍会按既有规则回退到 main。
+        direct_role_endpoints: dict[str, ModelEndpointConfig] = {}
+        for role_name in ("fast", "vlm"):
+            role_raw = raw.get(role_name)
+            if isinstance(role_raw, dict):
+                direct_role_endpoints[role_name] = ModelEndpointConfig._from_raw(
+                    dict(role_raw)
+                )
 
         # 解析多 Provider：[model.providers.<name>]
         providers: dict[str, ModelEndpointConfig] = {}
@@ -530,6 +540,7 @@ class ModelConfig:
         return cls(
             provider=provider,
             main=main,
+            direct_role_endpoints=direct_role_endpoints,
             providers=providers,
             roles=roles,
         )
@@ -537,11 +548,15 @@ class ModelConfig:
     def resolve_role(self, role: str) -> tuple[str, ModelEndpointConfig]:
         """解析角色到 (provider_key, endpoint)。
 
-        优先使用 roles 配置；否则退化到 ("main", main)。
+        优先使用 roles 配置，其次使用 [model.fast] / [model.vlm] 的
+        直接端点；否则退化到 ("main", main)。
         role 可覆盖 model：返回一个 model 被替换的新 endpoint。
         """
         role_cfg = self.roles.get(role)
         if role_cfg is None:
+            endpoint = self.direct_role_endpoints.get(role)
+            if endpoint is not None:
+                return (f"direct:{role}", endpoint)
             return ("main", self.main)
 
         provider_key = role_cfg.provider or "main"
@@ -1619,7 +1634,6 @@ concurrency = {self.worker.concurrency}
 poll_interval_seconds = {self.worker.poll_interval_seconds}
 lease_duration_seconds = {self.worker.lease_duration_seconds}
 heartbeat_interval_seconds = {self.worker.heartbeat_interval_seconds}
-outbox_lease_ttl_seconds = {self.worker.outbox_lease_ttl_seconds}
 delivery_lease_ttl_seconds = {self.worker.delivery_lease_ttl_seconds}
 recovery_grace_period_seconds = {self.worker.recovery_grace_period_seconds}
 

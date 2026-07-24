@@ -62,7 +62,8 @@ class OpenAICompatProvider(ModelProvider):
     Ollama、vLLM、LiteLLM 等兼容接口。
     """
 
-    HEALTH_CACHE_TTL_S = 30  # 健康检查缓存时间
+    HEALTH_CACHE_TTL_S = 30  # 成功健康检查缓存时间
+    UNHEALTHY_CACHE_TTL_S = 2  # 短暂网络波动不能长时间阻断真实请求
 
     def __init__(
         self,
@@ -281,8 +282,15 @@ class OpenAICompatProvider(ModelProvider):
         import time
 
         now = time.monotonic()
-        if self._health_cache is not None and now - self._health_cache[1] < self.HEALTH_CACHE_TTL_S:
-            return self._health_cache[0]
+        if self._health_cache is not None:
+            cached_status, cached_at = self._health_cache
+            cache_ttl = (
+                self.HEALTH_CACHE_TTL_S
+                if cached_status.healthy
+                else self.UNHEALTHY_CACHE_TTL_S
+            )
+            if now - cached_at < cache_ttl:
+                return cached_status
 
         try:
             response = await self._client.get(

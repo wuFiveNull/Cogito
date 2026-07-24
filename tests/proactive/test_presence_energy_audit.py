@@ -427,21 +427,52 @@ class TestEvaluateCandidates:
         ProactiveCandidateRepository(memory_db).insert(
             _candidate(urgency=0.95, novelty=0.9, relevance=0.9, created_at=1)
         )
+        from cogito.contracts.envelope import ChannelEnvelope
+        from cogito.service.inbound_service import InboundService
+
+        InboundService(memory_db).accept(
+            ChannelEnvelope(
+                channel_type="web",
+                channel_instance_id="web",
+                platform_sender_id="web-user",
+                platform_conversation_id="web:latest",
+                platform_message_id="web-latest-message",
+                content_parts=[{"content_type": "text", "inline_data": "hello"}],
+                trust_label="authenticated",
+            )
+        )
         memory_db.commit()
         delivery = self.FakeDelivery()
+        fallback_delivery = self.FakeDelivery()
+        factory_connections = []
         from cogito.config import ProactiveConfig
 
         ctx = th_module.TaskHandlerContext(
             proactive_config=ProactiveConfig(enabled=True, dry_run=False),
-            delivery_service=delivery,
+            delivery_service=fallback_delivery,
+            delivery_service_factory=lambda conn: factory_connections.append(conn) or delivery,
         )
 
         asyncio.run(th_module._evaluate_candidates_async(memory_db, ctx))
 
         assert len(delivery.requests) == 1
+        assert fallback_delivery.requests == []
+        assert factory_connections == [memory_db]
         target = delivery.requests[0].target
         assert target["adapter_id"] == "web"
-        assert target["conversation_id"] == "proactive:owner"
+        assert target["conversation_id"] == "web:latest"
+        message = memory_db.execute(
+            "SELECT m.role, m.direction, cp.inline_data FROM messages m "
+            "JOIN content_parts cp ON cp.message_id=m.message_id "
+            "WHERE m.message_id=?",
+            (delivery.requests[0].content_ref,),
+        ).fetchone()
+        assert message is not None
+        assert dict(message) == {
+            "role": "assistant",
+            "direction": "outbound",
+            "inline_data": "test",
+        }
 
     def test_same_batch_uses_same_energy_snapshot(self, memory_db):
         """同批 2 个 Candidate 必须使用同一 energy/activity 快照。"""

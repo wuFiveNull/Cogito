@@ -12,10 +12,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from cogito.domain.events import DomainEvent
+from cogito.domain.event import Event, EventClass, EventContext
 from cogito.domain.schedule import MisfirePolicy, Schedule, ScheduleType, next_fire_at
 from cogito.service.api.audit import write_audit
-from cogito.store.repositories import OutboxRepository
+from cogito.store.event_store import EventStore
 from cogito.store.schedule_repo import ScheduleRepository
 
 
@@ -244,23 +244,31 @@ class AgentToolCommandService:
             trace_id=tool_call_id,
             commit=False,
         )
-        outbox = OutboxRepository(self._conn)
-        event_payload = {
-            "command": command,
-            "actor": actor,
-            "idempotency_key": idempotency_key,
-            **payload,
-        }
-        outbox.insert(
-            DomainEvent(
-                event_type=f"{command}Completed",
-                aggregate_type="agent_tool_command",
-                aggregate_id=aggregate_id,
-                aggregate_version=outbox.next_aggregate_version("agent_tool_command", aggregate_id),
-                payload=event_payload,
-                payload_ref=json.dumps(event_payload, ensure_ascii=False, sort_keys=True),
-                origin="agent_tool",
-                trust_label="verified",
+        EventStore(self._conn).append(
+            Event(
+                event_type="agent.command.completed",
+                stream_type="agent_tool_command",
+                stream_id=aggregate_id,
+                producer="agent-tool-command-service",
+                event_class=EventClass.DOMAIN,
+                context=EventContext(
+                    trace_id=tool_call_id,
+                    correlation_id=tool_call_id,
+                    actor_id=actor,
+                    principal_id=actor,
+                ),
+                summary=f"Agent command completed: {command}",
+                attributes={
+                    "command": command,
+                    "aggregate_id": aggregate_id,
+                    **{
+                        key: value
+                        for key, value in payload.items()
+                        if isinstance(value, str | int | float | bool)
+                    },
+                },
+                outcome="completed",
+                idempotency_key=f"agent-command:{idempotency_key}",
             )
         )
         self._conn.execute(

@@ -27,8 +27,11 @@ class CheckpointRepository:
     用于在工具调用等可恢复点保存上下文。
     """
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(
+        self, conn: sqlite3.Connection, *, payload_store: PayloadStore | None = None
+    ) -> None:
         self._conn = conn
+        self._payload_store = payload_store
 
     def save(
         self,

@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("AIHOT manual fetch shows progress and dry-run completion", async ({ page }) => {
+test("Mock delivery trigger shows progress and live completion", async ({ page }) => {
   let runPolls = 0;
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
@@ -12,16 +12,17 @@ test("AIHOT manual fetch shows progress and dry-run completion", async ({ page }
     });
     if (path === "/api/proactive/status") {
       return json({
-        enabled: true, dry_run: true, global_dry_run: true,
+        enabled: true, dry_run: false, global_dry_run: false,
         default_principal_id: "owner", quiet_hours_start: 23, quiet_hours_end: 8,
         hourly_budget: 3, daily_budget: 10, energy_value: 0.5,
         policy_version: "1", fetch_available: true, fetch_unavailable_reason: "",
+        mock_available: true, mock_unavailable_reason: "",
       });
     }
-    if (path === "/api/commands/fetch-proactive-data") {
+    if (path === "/api/commands/trigger-proactive-mock") {
       return json({
         command_id: "cmd-1", status: "ok", message: "queued",
-        details: { poll_task_id: "task-fetch-1", connector_id: "connector-aihot-items", dry_run: true },
+        details: { poll_task_id: "task-fetch-1", connector_id: "connector-proactive-mock", dry_run: false },
       });
     }
     if (path === "/api/proactive/fetch-runs/task-fetch-1") {
@@ -52,8 +53,8 @@ test("AIHOT manual fetch shows progress and dry-run completion", async ({ page }
   });
 
   await page.goto("/proactive");
-  await expect(page.getByText("dry-run", { exact: true }).first()).toBeVisible();
-  await page.getByRole("button", { name: "获取主动推送数据" }).click();
+  await expect(page.getByText("live", { exact: true }).first()).toBeVisible();
+  await page.getByRole("button", { name: "触发 Mock 投递" }).click();
   await expect(page.getByText("完成", { exact: true })).toBeVisible({ timeout: 5_000 });
   await expect(page.getByText(/抓取 4/)).toBeVisible();
   await expect(page.getByText(/决策 3/)).toBeVisible();

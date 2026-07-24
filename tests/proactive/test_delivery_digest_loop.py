@@ -22,10 +22,12 @@ from cogito.domain.connector import (
     ConnectorRawItem,
     ItemStatus,
 )
+from cogito.contracts.envelope import ChannelEnvelope
 from cogito.config import ProactiveConfig
 from cogito.service.delivery_service import DeliveryRequest
+from cogito.infrastructure.payload_store import PayloadStore
 from cogito.service.event_consumers import SourceEventIngestedConsumer
-from cogito.service.outbox_worker import OutboxLease
+from cogito.service.inbound_service import InboundService
 from cogito.service.proactive_delivery_service import (
     SqliteDeliveryService,
     create_scheduled_request,
@@ -103,11 +105,52 @@ def _seed_candidate(conn, candidate_id="c-1", topic="ai-models"):
     conn.commit()
 
 
+def _seed_web_conversation(conn, conversation_id="web:active"):
+    """Create a real Web conversation eligible for proactive delivery."""
+    InboundService(conn).accept(
+        ChannelEnvelope(
+            channel_type="web",
+            channel_instance_id="web",
+            platform_sender_id="web-user",
+            platform_conversation_id=conversation_id,
+            platform_message_id=f"message-{conversation_id}",
+            content_parts=[{"content_type": "text", "inline_data": "hello"}],
+            trust_label="authenticated",
+        )
+    )
+
+
+def test_proactive_content_ref_reuses_message_without_delivery_row(memory_db):
+    _seed_web_conversation(memory_db, "web:idempotent")
+    target = {"channel": "web", "adapter_id": "web", "conversation_id": "web:idempotent"}
+
+    first = th_module._proactive_delivery_content_ref(
+        memory_db,
+        target=target,
+        text="Event-first proactive message",
+        principal_id="owner",
+        idempotency_key="proactive-message-key",
+    )
+    second = th_module._proactive_delivery_content_ref(
+        memory_db,
+        target=target,
+        text="Event-first proactive message",
+        principal_id="owner",
+        idempotency_key="proactive-message-key",
+    )
+
+    assert second == first
+    assert memory_db.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0] == 0
+
+
 # ── SqliteDeliveryService ────────────────────────────────────────────────────
 
 
-def test_delivery_service_enqueue_creates_pending(memory_db):
-    svc = SqliteDeliveryService(memory_db)
+def test_delivery_service_enqueue_creates_pending(memory_db, tmp_path):
+    svc = SqliteDeliveryService(
+        memory_db,
+        effect_payload_store=PayloadStore(tmp_path / "payloads", memory_db),
+    )
 
     async def _do():
         ref = await svc.enqueue(
@@ -122,12 +165,9 @@ def test_delivery_service_enqueue_creates_pending(memory_db):
     import asyncio
 
     delivery_ref = asyncio.run(_do())
-    row = memory_db.execute(
-        "SELECT status FROM deliveries WHERE delivery_id=?",
-        (delivery_ref.delivery_id,),
-    ).fetchone()
-    assert row is not None
-    assert row["status"] == "pending"
+    view = svc.get(delivery_ref.delivery_id)
+    assert view is not None and view.status == "pending"
+    assert memory_db.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0] == 0
 
 
 # ── ScheduledDeliveryRequest ────────────────────────────────────────────────
@@ -270,6 +310,7 @@ def test_proactive_delivery_ready_honors_config_dry_run_with_live_service():
 def test_historical_web_request_gets_complete_delivery_target():
     task_db = _fresh_db()
     _seed_candidate(task_db)
+    _seed_web_conversation(task_db, "web:latest")
     ProactivePolicyRepository(task_db).save(
         ProactivePolicy(
             policy_id="policy-live",
@@ -308,9 +349,53 @@ def test_historical_web_request_gets_complete_delivery_target():
     assert delivery.requests[0].target == {
         "channel": "web",
         "adapter_id": "web",
-        "conversation_id": "proactive:owner",
+        "conversation_id": "web:latest",
         "principal_id": "owner",
     }
+
+
+def test_web_request_without_a_real_conversation_is_skipped():
+    task_db = _fresh_db()
+    _seed_candidate(task_db)
+    ProactivePolicyRepository(task_db).save(
+        ProactivePolicy(policy_id="policy-live", principal_id="owner", dry_run=False)
+    )
+    req_id = create_scheduled_request(
+        task_db,
+        candidate_id="c-1",
+        content_ref="historical-content",
+        suggested_target={"channel": "web", "principal_id": "owner"},
+        reason="no-web-conversation",
+        scheduled_at_ms=1_700_000_000_000,
+    )
+
+    class FakeDelivery:
+        async def enqueue(self, request):
+            raise AssertionError(f"unexpected delivery: {request}")
+
+    result = asyncio.run(
+        th_module._deliver_scheduled_request_async(
+            task_db,
+            req_id,
+            FakeDelivery(),
+            proactive_config=ProactiveConfig(enabled=True, dry_run=False),
+        )
+    )
+
+    assert result == "converted (skipped: no active web conversation)"
+
+
+def test_proactive_target_uses_the_most_recent_real_web_conversation(memory_db):
+    _seed_web_conversation(memory_db, "web:older")
+    memory_db.execute("UPDATE messages SET created_at=1 WHERE conversation_id IN ("
+                      "SELECT conversation_id FROM conversations "
+                      "WHERE platform_conversation_id='web:older')")
+    _seed_web_conversation(memory_db, "web:newest")
+
+    target = th_module._proactive_web_target(memory_db, "owner")
+
+    assert target is not None
+    assert target["conversation_id"] == "web:newest"
 
 
 def test_mark_request_converted_links(memory_db):
@@ -385,6 +470,7 @@ def test_digest_publish_renders_topic_and_marks_sent(memory_db):
             dry_run=False,
         )
     )
+    _seed_web_conversation(memory_db, "web:digest")
     memory_db.commit()
 
     class FakeDelivery:

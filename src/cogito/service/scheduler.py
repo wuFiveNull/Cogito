@@ -97,11 +97,7 @@ class Scheduler:
         origin: str = "memory_maintenance",
     ) -> Task | None:
         """幂等：创建唯一 Task（已存在则跳过），返回 Task 或 None。"""
-        existing = self._conn.execute(
-            "SELECT task_id FROM tasks WHERE idempotency_key=?",
-            (idempotency,),
-        ).fetchone()
-        if existing is not None:
+        if self._task_repo.exists_by_idempotency(idempotency):
             return None
         task = Task(
             task_id=f"task-mm-{idempotency}",
@@ -183,11 +179,7 @@ class Scheduler:
         tasks: list[Task] = []
         # 创建 proactive.evaluate 任务（单次，misfire 只补一次）
         idempotency = f"proactive-evaluate:{now_ms}"
-        existing = self._conn.execute(
-            "SELECT task_id FROM tasks WHERE idempotency_key=?",
-            (idempotency,),
-        ).fetchone()
-        if existing is None:
+        if not self._task_repo.exists_by_idempotency(idempotency):
             # Task.scheduled_at / created_at 为 datetime 类型（task_repo.insert
             # 内部调用 epoch_ms() 转为 epoch ms 存储）。
             task = Task(
@@ -263,11 +255,7 @@ class Scheduler:
         # 粗粒度幂等窗口（1 分钟内只创建一个）
         window_ms = (now_ms // 60000) * 60000
         idempotency = f"drift-run:{self._drift_config.default_principal_id}:{window_ms}"
-        existing = self._conn.execute(
-            "SELECT task_id FROM tasks WHERE idempotency_key=?",
-            (idempotency,),
-        ).fetchone()
-        if existing is not None:
+        if self._task_repo.exists_by_idempotency(idempotency):
             return None
 
         from cogito.domain.task import Task, TaskStatus
@@ -301,7 +289,7 @@ class Scheduler:
         )
         skill_states = {
             row["skill_name"]: row
-            for row in DriftSkillStateRepository(self._conn).all_states(
+            for row in DriftSkillStateRepository(self._conn, event_sourced=True).all_states(
                 self._drift_config.default_principal_id
             )
         }
@@ -314,7 +302,7 @@ class Scheduler:
         manifest = catalog[skill_name].manifest
 
         # 写 drift_runs 记录（真实 skill_name + selection trace）
-        repo = DriftRunRepository(self._conn)
+        repo = DriftRunRepository(self._conn, event_sourced=True)
         try:
             selection_trace = {
                 "weights_version": WEIGHTS_VERSION,

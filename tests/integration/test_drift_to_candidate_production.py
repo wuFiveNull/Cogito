@@ -2,7 +2,7 @@
 
 完整生产路径：
 Scheduler.admission → TaskDispatcher/TaskWorker.claim_next → handle_drift_run →
-Skill 产出 items → _finish_drift 写 DriftResult + Outbox DriftResultCommitted →
+Skill 产出 items → _finish_drift 写 DriftResult + drift.result.committed →
 DriftResultCommittedConsumer 校验+调 DriftProjectionService →
 ProactiveCandidate(origin=drift) 状态=evaluating。
 
@@ -24,10 +24,11 @@ import time
 from cogito.config import DriftConfig
 from cogito.domain.task import Task, TaskStatus
 from cogito.service.drift_runner import handle_drift_run
-from cogito.service.event_consumers import DriftResultCommittedConsumer, OutboxLease
-from cogito.service.outbox_worker import OutboxWorker
+from cogito.service.event_consumers import DriftResultCommittedConsumer
+from cogito.service.event_subscription import CanonicalConsumerEvent
 from cogito.service.scheduler import Scheduler
 from cogito.service.task_dispatcher import TaskDispatcher
+from cogito.store.event_store import EventStore
 from cogito.store.migration import migrate
 
 
@@ -85,8 +86,8 @@ def _worker_claim_and_run(conn, task_id):
     return attempt.task_attempt_id
 
 
-def _dispatch_outbox(conn, dry_run=False):
-    """模拟 application.process_background_once 的 Outbox 消费路径。"""
+def _dispatch_events(conn, dry_run=False):
+    """模拟 EventStore 驱动的后台订阅消费路径。"""
     dr_cfg = DriftConfig(
         enabled=True,
         dry_run=dry_run,
@@ -95,23 +96,13 @@ def _dispatch_outbox(conn, dry_run=False):
         allow_candidate_projection=True,
     )
     consumer = DriftResultCommittedConsumer(default_principal_id="owner", drift_config=dr_cfg)
-    outbox = OutboxWorker(conn)
-    worker_id = "wkr-outbox"
     result = {"candidates": 0, "consumed": 0}
-    while True:
-        lease = outbox.lease_next(worker_id)
-        if lease is None:
-            break
-        if consumer.can_handle(lease):
-            ok = consumer.handle(conn, lease)
-            if ok:
-                outbox.publish(lease, worker_id)
-                result["consumed"] += 1
-                if lease.event_type == "DriftResultCommitted":
-                    result["candidates"] += 1
-            else:
-                outbox.retry(lease, worker_id)
-                break
+    for event in EventStore(conn).read_events_by_type(frozenset({"drift.result.committed"})):
+        envelope = CanonicalConsumerEvent.from_event(event)
+        assert envelope is not None
+        if consumer.can_handle(envelope) and consumer.handle(conn, envelope):
+            result["consumed"] += 1
+            result["candidates"] += 1
     return result
 
 
@@ -136,16 +127,17 @@ def test_full_pipeline_emits_candidate():
     ).fetchone()
     assert res is not None
     assert res["result_kind"] in ("candidate_emission", "internal_only")
-    # Outbox 中 DriftResultCommitted event 必须存在
+    # 规范 EventLog 中 Drift 结果事实必须存在
     ev = conn.execute(
-        "SELECT event_id, event_type FROM outbox_events WHERE "
-        "payload_ref=? AND event_type='DriftResultCommitted'",
+        "SELECT event_id, event_type FROM event_log WHERE "
+        "payload_ref=? AND event_type='drift.result.committed'",
         (run_id,),
     ).fetchone()
-    assert ev is not None, "Outbox 必须含 DriftResultCommitted"
+    assert ev is not None, "EventLog 必须含 drift.result.committed"
+    assert conn.execute("SELECT COUNT(*) FROM outbox_events").fetchone()[0] == 0
 
-    # consumer 消费 Outbox 后投影为 Candidate
-    counts = _dispatch_outbox(conn, dry_run=False)
+    # consumer 消费规范 Event 后投影为 Candidate
+    counts = _dispatch_events(conn, dry_run=False)
     assert counts["consumed"] >= 1
 
     cand = conn.execute(
@@ -171,9 +163,9 @@ def test_idempotent_reconsume_no_duplicate():
     conn = _fresh_db()
     run_id, task_id = _run_scheduler_admit(conn)
     _worker_claim_and_run(conn, task_id)
-    _dispatch_outbox(conn, dry_run=False)
+    _dispatch_events(conn, dry_run=False)
     # 第二次 dispatch 属幂等，不应新增 Candidate
-    _dispatch_outbox(conn, dry_run=False)
+    _dispatch_events(conn, dry_run=False)
     n = conn.execute(
         "SELECT COUNT(*) FROM proactive_candidates WHERE source_payload_ref=?",
         (run_id,),
@@ -186,8 +178,8 @@ def test_consumer_does_not_call_delivery():
     conn = _fresh_db()
     run_id, task_id = _run_scheduler_admit(conn)
     _worker_claim_and_run(conn, task_id)
-    _dispatch_outbox(conn, dry_run=False)
-    # Outbox/ProactiveCandidate 的状态只能为 evaluating，不能已是 sent/delivered
+    _dispatch_events(conn, dry_run=False)
+    # Candidate 的状态只能为 evaluating，不能已是 sent/delivered
     c = conn.execute(
         "SELECT status FROM proactive_candidates WHERE source_payload_ref=?",
         (run_id,),

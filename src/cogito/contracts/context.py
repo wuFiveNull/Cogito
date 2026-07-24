@@ -226,6 +226,9 @@ class ContextSnapshot:
     snapshot_id: str = ""
     turn_id: str = ""
     attempt_id: str = ""
+    trace_id: str = ""
+    correlation_id: str = ""
+    causation_id: str = ""
     input_message_id: str = ""
     session_id: str = ""
     conversation_id: str = ""
@@ -267,6 +270,14 @@ class KnowledgeReader(Protocol):
     ) -> list[dict]: ...
 
 
+class MessageReader(Protocol):
+    """Authorized read access to event-sourced message envelopes."""
+
+    def list_for_session(self, session_id: str) -> list[dict[str, Any]]: ...
+
+    def find_receive_sequence(self, message_id: str) -> int: ...
+
+
 class ContextBuilder:
     """构建不可变 ContextSnapshot。
 
@@ -306,6 +317,7 @@ class ContextBuilder:
         policy_version: str = "1",
         query_plan_version: str = "1",
         memory_reader: MemoryReader | None = None,
+        message_reader: MessageReader | None = None,
         multimodal_reader: MultimodalContextReader | None = None,
         knowledge_reader: KnowledgeReader | None = None,
         knowledge_top_k: int = 8,
@@ -320,6 +332,7 @@ class ContextBuilder:
         self._policy_version = policy_version
         self._query_plan_version = query_plan_version
         self._memory_reader = memory_reader
+        self._message_reader = message_reader
         self._multimodal_reader = multimodal_reader
         self._knowledge_reader = knowledge_reader
         self._knowledge_top_k = knowledge_top_k
@@ -1009,6 +1022,8 @@ class ContextBuilder:
         return trimmed, excluded
 
     def _load_session_messages(self, session_id: str) -> list[dict[str, Any]]:
+        if self._message_reader is not None:
+            return self._event_session_messages(session_id)
         rows = self._conn.execute(
             "SELECT m.message_id, m.role, m.direction, m.receive_sequence, "
             "  m.trust_label, m.session_id, m.sender_principal_id, "
@@ -1075,7 +1090,55 @@ class ContextBuilder:
         result.sort(key=lambda m: m["sequence"])
         return result
 
+    def _event_session_messages(self, session_id: str) -> list[dict[str, Any]]:
+        """Build the context view from immutable message Events and payloads."""
+        result: list[dict[str, Any]] = []
+        for message in self._message_reader.list_for_session(session_id):
+            parts = [
+                str(part.get("inline_data", ""))
+                for part in message.get("content_parts", [])
+                if isinstance(part, dict)
+                and part.get("content_type") in ("text", "markdown")
+                and part.get("inline_data")
+            ]
+            if self._multimodal_reader is not None:
+                for asset in self._multimodal_reader.list_for_message(message.get("message_id", "")):
+                    status = asset.get("status", "queued")
+                    description = asset.get("short_description", "")
+                    if status == "succeeded" and description:
+                        external = description
+                    elif status == "failed":
+                        external = "Visual analysis failed; continue using text-only context."
+                    else:
+                        external = "Visual analysis is pending."
+                    parts.append(
+                        "<multimodal_asset "
+                        f'asset_id="{asset.get("asset_id", "")}" '
+                        f'mime_type="{asset.get("mime_type", "")}" '
+                        f'status="{status}">\n'
+                        '<external_data trust="unverified">\n'
+                        f"{external}\n"
+                        "</external_data>\n"
+                        "</multimodal_asset>"
+                    )
+            result.append(
+                {
+                    "message_id": message.get("message_id", ""),
+                    "role": message.get("role", "user"),
+                    "direction": message.get("direction", "inbound"),
+                    "sequence": int(message.get("receive_sequence", 0)),
+                    "trust_label": message.get("trust_label", "unverified"),
+                    "session_id": message.get("session_id", session_id),
+                    "sender_principal_id": message.get("sender_principal_id", ""),
+                    "content": "\n".join(parts),
+                }
+            )
+        result.sort(key=lambda message: (message["sequence"], message["message_id"]))
+        return result
+
     def _find_input_sequence(self, input_message_id: str) -> int:
+        if self._message_reader is not None:
+            return self._message_reader.find_receive_sequence(input_message_id)
         row = self._conn.execute(
             "SELECT receive_sequence FROM messages WHERE message_id=?",
             (input_message_id,),

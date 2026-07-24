@@ -29,6 +29,16 @@ from cogito.service.task_handlers import TaskHandlerContext, TaskHandlerRegistry
 TASK_WORKER_ID_PREFIX = "task-wkr-"
 
 
+def _is_sqlite_lock_error(error: BaseException) -> bool:
+    """检查异常链是否包含 SQLite 锁冲突。"""
+    current: BaseException | None = error
+    while current is not None:
+        if isinstance(current, sqlite3.OperationalError) and "locked" in str(current).lower():
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 class TaskRunOutcome(StrEnum):
     idle = "idle"  # 无可用 Task
     completed = "completed"  # 成功完成
@@ -110,21 +120,12 @@ class TaskWorker:
 
         def _lease_checker() -> bool:
             try:
-                conn = self._conn
-                row = conn.execute(
-                    "SELECT lease_version, lease_expires_at FROM tasks "
-                    "WHERE task_id=? AND lease_owner=? AND status='running'",
-                    (_task_id, _worker),
-                ).fetchone()
-                if row is None:
-                    return False
-                if row["lease_version"] != _lease_version:
-                    return False
-                exp = row["lease_expires_at"]
-                # lease_expires_at stored as epoch ms int
-                if isinstance(exp, (int, float)):
-                    return exp > int(datetime.now(UTC).timestamp() * 1000)
-                return True
+                return self._dispatcher.lease_valid(
+                    _task_id,
+                    _worker,
+                    _lease_version,
+                    clock=self._clock.now(),
+                )
             except Exception:
                 return False
 
@@ -154,6 +155,18 @@ class TaskWorker:
             )
         except Exception as e:
             _LOGGER.exception("Task handler failed: %s", e)
+            if _is_sqlite_lock_error(e):
+                # 该连接就是 RuntimeApplication/TaskWorker 共用的主连接。
+                # 它与 Handler 临时连接的状态对照可区分本进程未提交写事务
+                # 和外部进程持锁；不执行额外 SQL，避免诊断本身扩大锁竞争。
+                _LOGGER.error(
+                    "TaskWorker SQLite lock context: task=%s attempt=%s "
+                    "worker_connection=%s worker_in_transaction=%s",
+                    task.task_id,
+                    attempt.task_attempt_id,
+                    hex(id(self._conn)),
+                    self._conn.in_transaction,
+                )
             heartbeat_task.cancel()
             try:
                 policy = task.retry_policy or {}
@@ -181,21 +194,18 @@ class TaskWorker:
 
         if isinstance(result, TaskHandlerWait):
             try:
-                now_ms = int(datetime.now(UTC).timestamp() * 1000)
-                self._conn.execute(
-                    "UPDATE task_attempts SET status='succeeded',finished_at=? "
-                    "WHERE task_attempt_id=? AND status='running'",
-                    (now_ms, attempt.task_attempt_id),
+                from cogito.domain.task import TaskStatus
+
+                ok = self._dispatcher.wait(
+                    task,
+                    attempt,
+                    worker_id,
+                    TaskStatus(result.status),
+                    result.waiting_id,
+                    clock=self._clock.now(),
                 )
-                self._conn.execute(
-                    "UPDATE tasks SET status=?,lease_owner=NULL,lease_expires_at=NULL,"
-                    "checkpoint_ref=? WHERE task_id=? AND status='running' AND lease_owner=?",
-                    (result.status, result.waiting_id, task.task_id, worker_id),
-                )
-                self._conn.commit()
-                return TaskRunOutcome.completed
+                return TaskRunOutcome.completed if ok else TaskRunOutcome.lost
             except Exception:
-                self._conn.rollback()
                 return TaskRunOutcome.failed
 
         # ── 4. 完成 ──

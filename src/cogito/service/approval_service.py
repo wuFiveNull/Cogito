@@ -1,22 +1,19 @@
-"""ApprovalService —— Approval 聚合的唯一公开写入口。
-
-SYSTEM-BOUNDARIES / 4: Approval 的唯一写入者是 ApprovalService。
-入站 Tool 审批、高风险操作授权、等待恢复都经此接口。
-
-当前实现：`SqliteApprovalService`（SQLite 后端）。
-"""
+"""Approval aggregate backed exclusively by canonical Event streams."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
+from uuid import uuid4
+
+from cogito.domain.event import Event, EventClass, EventContext
+from cogito.store.event_replay import ApprovalProjection, replay_approval
+from cogito.store.event_store import EventStore, StreamVersionConflictError
 
 
 @dataclass(frozen=True)
 class ApprovalRequest:
-    """审批请求参数。"""
-
     approval_id: str
     turn_id: str
     request: dict[str, Any]
@@ -25,354 +22,329 @@ class ApprovalRequest:
 
 @dataclass(frozen=True)
 class ApprovalDecision:
-    """审批决策结果。"""
-
     approval_id: str
-    status: str  # 'approved' | 'rejected'
+    status: str
     responder_id: str
     decided_at: datetime
 
 
 class ApprovalService(Protocol):
-    """Approval 生命周期管理接口。
-
-    唯一写入口：所有 Approval 的状态变更经此接口。
-    """
+    """The sole write boundary for an Approval aggregate."""
 
     def create(
-        self,
-        *,
-        turn_id: str,
-        request: dict[str, Any],
-        ttl_seconds: int = 3600,
-    ) -> ApprovalRequest:
-        """创建一个 pending 的 Approval。"""
-        ...
+        self, *, turn_id: str, request: dict[str, Any], ttl_seconds: int = 3600
+    ) -> ApprovalRequest: ...
 
     def approve(
-        self,
-        approval_id: str,
-        responder_id: str,
-        *,
-        expected_version: int | None = None,
+        self, approval_id: str, responder_id: str, *, expected_version: int | None = None,
         action_hash: str = "",
-    ) -> ApprovalDecision:
-        """批准。返回新状态；非法转换由异常表达。"""
-        ...
+    ) -> ApprovalDecision: ...
 
     def reject(
-        self,
-        approval_id: str,
-        responder_id: str,
-        *,
-        expected_version: int | None = None,
-    ) -> ApprovalDecision:
-        """拒绝。返回新状态；非法转换由异常表达。"""
-        ...
+        self, approval_id: str, responder_id: str, *, expected_version: int | None = None,
+    ) -> ApprovalDecision: ...
 
-    def expire(self, approval_id: str) -> bool:
-        """标记过期（仅 pending 可过期）。"""
-        ...
+    def expire(self, approval_id: str) -> bool: ...
 
-    def cancel(self, approval_id: str) -> bool:
-        """取消（仅 pending 可取消）。"""
-        ...
+    def cancel(self, approval_id: str) -> bool: ...
 
-    def get(self, approval_id: str) -> dict[str, Any] | None:
-        """按 ID 获取 Approval 原始记录。"""
-        ...
+    def get(self, approval_id: str) -> dict[str, Any] | None: ...
 
 
 class ApprovalStateError(ValueError):
-    """审批状态非法转换。"""
+    """An attempted approval transition is no longer valid."""
 
 
 class ApprovalNotFoundError(KeyError):
-    """审批不存在。"""
+    """The requested approval stream does not exist."""
 
 
 class SqliteApprovalService:
-    """ApprovalService 的 SQLite 实现。"""
+    """Event-sourced Approval service; ``approvals`` is never consulted."""
 
     VALID_TERMINAL = {"approved", "rejected", "expired", "cancelled"}
 
     def __init__(self, conn: Any) -> None:
         self._conn = conn
+        self._events = EventStore(conn)
 
-    def create(
-        self,
-        *,
-        turn_id: str,
-        request: dict[str, Any],
-        ttl_seconds: int = 3600,
-    ) -> ApprovalRequest:
-        import json
-        import uuid
-        from datetime import timedelta
+    def _state(self, approval_id: str) -> ApprovalProjection | None:
+        return replay_approval(self._events.read_stream("approval", approval_id), approval_id)
 
-        now = datetime.now(UTC)
-        approval_id = uuid.uuid4().hex
-        expires_at = now + timedelta(seconds=ttl_seconds)
-        allowed = sorted({"owner", str(request.get("principal_id", "owner"))})
-        columns = self._columns()
-        if "subject_type" not in columns:
-            self._conn.execute(
-                "INSERT INTO approvals(approval_id,turn_id,request,status,expires_at,created_at) "
-                "VALUES (?,?,?,'pending',?,?)",
-                (
-                    approval_id,
-                    turn_id,
-                    json.dumps(request, ensure_ascii=False),
-                    expires_at.isoformat(),
-                    now.isoformat(),
-                ),
-            )
-            self._conn.commit()
-            return ApprovalRequest(approval_id, turn_id, request, expires_at)
-        self._conn.execute(
-            "INSERT INTO approvals "
-            "(approval_id, turn_id, request, status, expires_at, created_at, "
-            "subject_type,subject_id,requester_attempt_id,capability_id,capability_version,"
-            "arguments_snapshot_ref,action_hash,requested_permissions,risk_level,"
-            "policy_version,auto_mode_version,constraints_json,"
-            "allowed_responder_principal_ids,version) "
-            "VALUES (?, ?, ?, 'pending', ?, ?, ?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
-            (
-                approval_id,
-                turn_id,
-                json.dumps(request, ensure_ascii=False),
-                expires_at.isoformat(),
-                now.isoformat(),
-                "tool_call",
-                str(request.get("tool_call_id", "")),
-                str(request.get("attempt_id", "")),
-                str(request.get("capability_id", "")),
-                str(request.get("tool_version", "")),
-                str(request.get("arguments_snapshot_ref", "")),
-                str(request.get("arguments_hash", "")),
-                json.dumps(request.get("permissions", []), ensure_ascii=False),
-                str(request.get("risk_level", "low")),
-                str(request.get("policy_version", "")),
-                str(request.get("auto_mode_version", "")),
-                json.dumps(request.get("constraints", {}), ensure_ascii=False),
-                json.dumps(allowed, ensure_ascii=False),
-            ),
-        )
-        self._conn.commit()
-        return ApprovalRequest(
-            approval_id=approval_id,
-            turn_id=turn_id,
-            request=request,
-            expires_at=expires_at,
-        )
+    def _all_states(self) -> list[ApprovalProjection]:
+        events = self._events.read_stream_type("approval")
+        ids = {event.stream_id for event in events}
+        return [state for approval_id in ids if (state := replay_approval(events, approval_id))]
 
-    def _transition(
-        self,
-        approval_id: str,
-        responder_id: str,
-        decision: str,
-        *,
-        expected_version: int | None = None,
-        action_hash: str = "",
-    ) -> ApprovalDecision:
-        now = datetime.now(UTC)
-        columns = self._columns()
-        if "version" not in columns:
-            row = self._conn.execute(
-                "SELECT status,expires_at FROM approvals WHERE approval_id=?",
-                (approval_id,),
-            ).fetchone()
-            if row is None:
-                raise ApprovalNotFoundError(approval_id)
-            if row["status"] != "pending":
-                raise ApprovalStateError(f"approval {approval_id} already {row['status']}")
-            if row["expires_at"] and datetime.fromisoformat(row["expires_at"]) < now:
-                raise ApprovalStateError(f"approval {approval_id} expired")
-            cur = self._conn.execute(
-                "UPDATE approvals SET status=?,responder_id=?,decided_at=? "
-                "WHERE approval_id=? AND status='pending'",
-                (decision, responder_id, now.isoformat(), approval_id),
-            )
-            if not cur.rowcount:
-                raise ApprovalStateError("approval was concurrently decided")
-            self._conn.commit()
-            return ApprovalDecision(approval_id, decision, responder_id, now)
-        row = self._conn.execute(
-            "SELECT status, expires_at, version, action_hash, "
-            "allowed_responder_principal_ids FROM approvals WHERE approval_id=?",
-            (approval_id,),
-        ).fetchone()
-        if row is None:
-            raise ApprovalNotFoundError(approval_id)
-        if row["status"] != "pending":
-            raise ApprovalStateError(f"approval {approval_id} already {row['status']}")
-        if row["expires_at"] and datetime.fromisoformat(row["expires_at"]) < now:
-            raise ApprovalStateError(f"approval {approval_id} expired")
-        import json
+    @staticmethod
+    def _expires_at(value: int | None) -> datetime:
+        return datetime.fromtimestamp((value or 0) / 1000, tz=UTC)
 
-        allowed = set(json.loads(row["allowed_responder_principal_ids"] or "[]"))
-        if allowed and responder_id not in allowed:
-            raise ApprovalStateError("responder principal is not allowed")
-        if expected_version is not None and int(row["version"]) != expected_version:
-            raise ApprovalStateError("approval version conflict")
-        if action_hash and row["action_hash"] != action_hash:
-            raise ApprovalStateError("approval action hash mismatch")
-        cur = self._conn.execute(
-            "UPDATE approvals SET status=?, responder_id=?, decided_at=?, responded_at=?, "
-            "version=version+1 WHERE approval_id=? AND status='pending' AND version=?",
-            (decision, responder_id, now.isoformat(), now.isoformat(), approval_id, row["version"]),
-        )
-        if not cur.rowcount:
-            raise ApprovalStateError("approval was concurrently decided")
-        self._conn.commit()
-        return ApprovalDecision(
-            approval_id=approval_id,
-            status=decision,
-            responder_id=responder_id,
-            decided_at=now,
-        )
+    @staticmethod
+    def _is_expired(state: ApprovalProjection, now: datetime) -> bool:
+        return state.expires_at is not None and state.expires_at <= int(now.timestamp() * 1000)
 
-    def approve(
-        self,
-        approval_id: str,
-        responder_id: str,
-        *,
-        expected_version: int | None = None,
-        action_hash: str = "",
-    ) -> ApprovalDecision:
-        return self._transition(
-            approval_id,
-            responder_id,
-            "approved",
-            expected_version=expected_version,
-            action_hash=action_hash,
-        )
-
-    def reject(
-        self,
-        approval_id: str,
-        responder_id: str,
-        *,
-        expected_version: int | None = None,
-    ) -> ApprovalDecision:
-        return self._transition(
-            approval_id,
-            responder_id,
-            "rejected",
-            expected_version=expected_version,
-        )
-
-    def expire(self, approval_id: str) -> bool:
-        version_update = ", version=version+1" if "version" in self._columns() else ""
-        cur = self._conn.execute(
-            f"UPDATE approvals SET status='expired'{version_update} "
-            "WHERE approval_id=? AND status='pending'",
-            (approval_id,),
-        )
-        self._conn.commit()
-        return cur.rowcount > 0
-
-    def cancel(self, approval_id: str) -> bool:
-        version_update = ", version=version+1" if "version" in self._columns() else ""
-        cur = self._conn.execute(
-            f"UPDATE approvals SET status='cancelled'{version_update} "
-            "WHERE approval_id=? AND status='pending'",
-            (approval_id,),
-        )
-        self._conn.commit()
-        return cur.rowcount > 0
-
-    def get(self, approval_id: str) -> dict[str, Any] | None:
-        row = self._conn.execute(
-            "SELECT * FROM approvals WHERE approval_id=?", (approval_id,)
-        ).fetchone()
-        return dict(row) if row else None
-
-    def _columns(self) -> set[str]:
+    @staticmethod
+    def _request_from(state: ApprovalProjection) -> dict[str, Any]:
+        """Reconstruct the safe execution envelope without raw tool arguments."""
         return {
-            str(row["name"] if hasattr(row, "keys") else row[1])
-            for row in self._conn.execute("PRAGMA table_info(approvals)").fetchall()
+            "kind": state.subject_type or "tool_call",
+            "tool_call_id": state.subject_id,
+            "tool_name": state.tool_name,
+            "capability_id": state.capability_id,
+            "tool_version": state.capability_version,
+            "tool_schema_hash": state.tool_schema_hash,
+            "arguments_snapshot_ref": state.arguments_snapshot_ref or "",
+            "arguments_hash": state.action_hash,
+            "turn_id": state.turn_id,
+            "attempt_id": state.attempt_id,
+            "policy_version": state.policy_version,
+            "auto_mode_version": state.auto_mode_version,
+            "risk_level": state.risk_level,
+            "permissions": list(state.permissions),
+            "constraints": state.constraints or {},
         }
 
-    def find_or_create_tool_approval(
+    def _append_event(
         self,
         *,
-        turn_id: str,
-        request: dict[str, Any],
-        ttl_seconds: int = 3600,
+        event_type: str,
+        approval_id: str,
+        state: ApprovalProjection | None,
+        request: dict[str, Any] | None = None,
+        responder_id: str = "",
+        outcome: str = "",
+        idempotency_key: str,
+        occurred_at: datetime | None = None,
+        expected_version: int | None = None,
+        expires_at: datetime | None = None,
+        allowed_responders: list[str] | None = None,
+    ) -> Event:
+        """Append one safe lifecycle fact against the replayed stream version."""
+        request = request or self._request_from(state) if state else request or {}
+        source = self._events.read_stream("approval", approval_id)
+        previous = source[-1] if source else None
+        at = occurred_at or datetime.now(UTC)
+        attributes = {
+            "subject_type": str(request.get("kind", "tool_call")),
+            "subject_id": str(request.get("tool_call_id", "")),
+            "tool_name": str(request.get("tool_name", "")),
+            "capability_id": str(request.get("capability_id", "")),
+            "capability_version": str(request.get("tool_version", "")),
+            "tool_schema_hash": str(request.get("tool_schema_hash", "")),
+            "action_hash": str(request.get("arguments_hash", "")),
+            "policy_version": str(request.get("policy_version", "")),
+            "auto_mode_version": str(request.get("auto_mode_version", "")),
+            "risk_level": str(request.get("risk_level", "")),
+            "permissions": [str(item) for item in request.get("permissions", [])],
+            "constraints": dict(request.get("constraints", {})),
+        }
+        if expires_at is not None:
+            attributes["expires_at"] = int(expires_at.timestamp() * 1000)
+        elif state is not None and state.expires_at is not None:
+            attributes["expires_at"] = state.expires_at
+        if allowed_responders is not None:
+            attributes["allowed_responder_principal_ids"] = sorted(set(allowed_responders))
+        elif state is not None:
+            attributes["allowed_responder_principal_ids"] = list(
+                state.allowed_responder_principal_ids
+            )
+        return self._events.append(
+            Event(
+                event_type=event_type,
+                stream_type="approval",
+                stream_id=approval_id,
+                producer="approval-service",
+                event_class=(
+                    EventClass.OPERATION if event_type == "approval.consumed" else EventClass.DOMAIN
+                ),
+                context=EventContext(
+                    trace_id=(previous.context.trace_id if previous else "")
+                    or (state.turn_id if state else ""),
+                    correlation_id=(previous.context.correlation_id if previous else "")
+                    or (state.turn_id if state else ""),
+                    causation_id=previous.event_id if previous else "",
+                    principal_id=responder_id or str(request.get("principal_id", "")),
+                    turn_id=(state.turn_id if state else "") or str(request.get("turn_id", "")),
+                    attempt_id=(state.attempt_id if state else "") or str(request.get("attempt_id", "")),
+                ),
+                summary=f"Approval {outcome or event_type.rsplit('.', 1)[-1]}",
+                attributes=attributes,
+                payload_ref=str(request.get("arguments_snapshot_ref", "")) or None,
+                outcome=outcome,
+                occurred_at=int(at.timestamp() * 1000),
+                idempotency_key=idempotency_key,
+            ),
+            expected_version=expected_version,
+        )
+
+    def create(
+        self, *, turn_id: str, request: dict[str, Any], ttl_seconds: int = 3600
     ) -> ApprovalRequest:
-        """Return an equivalent pending approval or create one.
+        now = datetime.now(UTC)
+        approval_id = uuid4().hex
+        expires_at = now + timedelta(seconds=ttl_seconds)
+        allowed = sorted({"owner", str(request.get("principal_id", "owner"))})
+        event_request = {**request, "turn_id": turn_id}
+        self._append_event(
+            event_type="approval.requested",
+            approval_id=approval_id,
+            state=None,
+            request=event_request,
+            outcome="pending",
+            occurred_at=now,
+            expires_at=expires_at,
+            allowed_responders=allowed,
+            expected_version=0,
+            idempotency_key=f"approval:{approval_id}:requested",
+        )
+        self._conn.commit()
+        return ApprovalRequest(approval_id, turn_id, dict(request), expires_at)
 
-        Equivalence is intentionally strict: capability version and canonical
-        argument hash must match.  This prevents repeated model iterations from
-        flooding the approval queue while preserving argument binding.
-        """
-        import json
+    def _transition(
+        self, approval_id: str, responder_id: str, decision: str, *,
+        expected_version: int | None = None, action_hash: str = "",
+    ) -> ApprovalDecision:
+        state = self._state(approval_id)
+        if state is None:
+            raise ApprovalNotFoundError(approval_id)
+        now = datetime.now(UTC)
+        if state.status != "pending":
+            raise ApprovalStateError(f"approval {approval_id} already {state.status}")
+        if self._is_expired(state, now):
+            raise ApprovalStateError(f"approval {approval_id} expired")
+        if expected_version is not None and state.stream_version != expected_version:
+            raise ApprovalStateError("approval version conflict")
+        if state.allowed_responder_principal_ids and responder_id not in state.allowed_responder_principal_ids:
+            raise ApprovalStateError("responder principal is not allowed")
+        if action_hash and state.action_hash != action_hash:
+            raise ApprovalStateError("approval action hash mismatch")
+        try:
+            self._append_event(
+                event_type="approval.responded",
+                approval_id=approval_id,
+                state=state,
+                responder_id=responder_id,
+                outcome=decision,
+                occurred_at=now,
+                expected_version=state.stream_version,
+                idempotency_key=f"approval:{approval_id}:responded",
+            )
+        except StreamVersionConflictError as exc:
+            raise ApprovalStateError("approval was concurrently decided") from exc
+        self._conn.commit()
+        return ApprovalDecision(approval_id, decision, responder_id, now)
 
-        rows = self._conn.execute(
-            "SELECT * FROM approvals WHERE turn_id=? AND status='pending' ORDER BY created_at DESC",
-            (turn_id,),
-        ).fetchall()
-        for row in rows:
-            try:
-                existing = json.loads(row["request"] or "{}")
-            except (TypeError, json.JSONDecodeError):
-                continue
+    def approve(self, approval_id: str, responder_id: str, *, expected_version: int | None = None,
+                action_hash: str = "") -> ApprovalDecision:
+        return self._transition(approval_id, responder_id, "approved",
+                                expected_version=expected_version, action_hash=action_hash)
+
+    def reject(self, approval_id: str, responder_id: str, *, expected_version: int | None = None) -> ApprovalDecision:
+        return self._transition(approval_id, responder_id, "rejected", expected_version=expected_version)
+
+    def _pending_terminal(self, approval_id: str, event_type: str, outcome: str) -> bool:
+        state = self._state(approval_id)
+        if state is None or state.status != "pending":
+            return False
+        try:
+            self._append_event(
+                event_type=event_type, approval_id=approval_id, state=state, outcome=outcome,
+                expected_version=state.stream_version,
+                idempotency_key=f"approval:{approval_id}:{outcome}",
+            )
+        except StreamVersionConflictError:
+            return False
+        self._conn.commit()
+        return True
+
+    def expire(self, approval_id: str) -> bool:
+        return self._pending_terminal(approval_id, "approval.expired", "expired")
+
+    def cancel(self, approval_id: str) -> bool:
+        return self._pending_terminal(approval_id, "approval.cancelled", "cancelled")
+
+    def get(self, approval_id: str) -> dict[str, Any] | None:
+        state = self._state(approval_id)
+        if state is None:
+            return None
+        return {
+            "approval_id": state.approval_id,
+            "turn_id": state.turn_id,
+            "status": state.status,
+            "version": state.stream_version,
+            "request": self._request_from(state),
+            "expires_at": self._expires_at(state.expires_at).isoformat() if state.expires_at else "",
+            "responder_id": state.responder_id,
+            "consumed_at": bool(state.consumed),
+            "action_hash": state.action_hash,
+            "allowed_responder_principal_ids": list(state.allowed_responder_principal_ids),
+        }
+
+    def find_or_create_tool_approval(self, *, turn_id: str, request: dict[str, Any],
+                                     ttl_seconds: int = 3600) -> ApprovalRequest:
+        for state in self._all_states():
+            existing = self._request_from(state)
             if (
-                existing.get("kind") == "tool_call"
+                state.turn_id == turn_id and state.status == "pending"
+                and not self._is_expired(state, datetime.now(UTC))
+                and existing.get("kind") == "tool_call"
                 and existing.get("capability_id") == request.get("capability_id")
                 and existing.get("tool_version") == request.get("tool_version")
                 and existing.get("tool_schema_hash") == request.get("tool_schema_hash")
                 and existing.get("arguments_hash") == request.get("arguments_hash")
             ):
-                return ApprovalRequest(
-                    approval_id=row["approval_id"],
-                    turn_id=turn_id,
-                    request=existing,
-                    expires_at=datetime.fromisoformat(row["expires_at"]),
-                )
+                return ApprovalRequest(state.approval_id, turn_id, existing, self._expires_at(state.expires_at))
         return self.create(turn_id=turn_id, request=request, ttl_seconds=ttl_seconds)
 
     def claim_approved_tool_call(self, turn_id: str) -> dict[str, Any] | None:
-        """Read one approved call; consumption happens after runtime revalidation."""
-        import json
-
-        rows = self._conn.execute(
-            "SELECT approval_id, request, version, consumed_at FROM approvals "
-            "WHERE turn_id=? AND status='approved' AND consumed_at IS NULL "
-            "ORDER BY decided_at ASC",
-            (turn_id,),
-        ).fetchall()
-        for row in rows:
-            try:
-                request = json.loads(row["request"] or "{}")
-            except (TypeError, json.JSONDecodeError):
+        candidates = sorted(
+            (state for state in self._all_states() if state.turn_id == turn_id),
+            key=lambda state: state.requested_at or 0,
+        )
+        for state in candidates:
+            if state.status != "approved" or state.consumed or self._is_expired(state, datetime.now(UTC)):
                 continue
-            if request.get("kind") != "tool_call" or row["consumed_at"]:
+            request = self._request_from(state)
+            if request["kind"] != "tool_call":
                 continue
-            request["approval_id"] = row["approval_id"]
-            request["approval_version"] = row["version"]
+            request["approval_id"] = state.approval_id
+            request["approval_version"] = state.stream_version
             return request
         return None
 
     def consume_approved_tool_call(self, approval_id: str, expected_version: int) -> bool:
-        """Atomically consume a fully revalidated approved call exactly once."""
-        now = datetime.now(UTC).isoformat()
-        cur = self._conn.execute(
-            "UPDATE approvals SET consumed_at=?,version=version+1 "
-            "WHERE approval_id=? AND status='approved' AND consumed_at IS NULL "
-            "AND version=? AND expires_at>?",
-            (now, approval_id, expected_version, now),
-        )
+        state = self._state(approval_id)
+        if (
+            state is None or state.status != "approved" or state.consumed
+            or state.stream_version != expected_version or self._is_expired(state, datetime.now(UTC))
+        ):
+            return False
+        try:
+            self._append_event(
+                event_type="approval.consumed", approval_id=approval_id, state=state,
+                outcome="consumed", expected_version=state.stream_version,
+                idempotency_key=f"approval:{approval_id}:consumed",
+            )
+        except StreamVersionConflictError:
+            return False
         self._conn.commit()
-        return cur.rowcount == 1
+        return True
 
     def invalidate_approved_tool_call(self, approval_id: str, expected_version: int) -> bool:
-        """Invalidate a stale approved call without executing it."""
-        cur = self._conn.execute(
-            "UPDATE approvals SET status='cancelled',version=version+1 "
-            "WHERE approval_id=? AND status='approved' AND consumed_at IS NULL AND version=?",
-            (approval_id, expected_version),
-        )
+        state = self._state(approval_id)
+        if (
+            state is None or state.status != "approved" or state.consumed
+            or state.stream_version != expected_version
+        ):
+            return False
+        try:
+            self._append_event(
+                event_type="approval.cancelled", approval_id=approval_id, state=state,
+                outcome="cancelled", expected_version=state.stream_version,
+                idempotency_key=f"approval:{approval_id}:cancelled",
+            )
+        except StreamVersionConflictError:
+            return False
         self._conn.commit()
-        return cur.rowcount == 1
+        return True

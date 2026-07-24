@@ -78,7 +78,6 @@ const STATUS_TONE: Record<string, Tone> = {
   candidate: "accent",
   failed: "danger",
   error: "danger",
-  dead_letter: "danger",
   auth_error: "danger",
   blocked: "danger",
   cancelled: "muted",

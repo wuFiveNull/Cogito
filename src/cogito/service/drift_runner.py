@@ -46,6 +46,34 @@ class _RunContext:
     resume_budget: dict[str, int] = field(default_factory=dict)
     resume_cursor: dict[str, Any] = field(default_factory=dict)
     lease_checker: Any = None  # Callable[[], bool] | None
+    payload_store: Any = None
+
+
+def _drift_repository(conn):
+    """Use Event replay once a canonical Drift stream exists; retain import fallback."""
+    from cogito.store.drift_repo import DriftRunRepository
+    from cogito.store.event_store import EventStore
+
+    return DriftRunRepository(
+        conn,
+        event_sourced=bool(EventStore(conn).read_stream_type("drift_run", limit=1)),
+    )
+
+
+def _make_payload_store(ctx: Any, conn: Any) -> Any:
+    """Build a PayloadStore bound to the handler's short-lived connection.
+
+    Older test contexts exposed a zero-argument factory, while the application
+    factory accepts the current connection.  Supporting both keeps the
+    checkpoint storage boundary explicit without adding a process-global store.
+    """
+    factory = getattr(ctx, "payload_store_factory", None)
+    if factory is None:
+        return None
+    try:
+        return factory(conn)
+    except TypeError:
+        return factory()
 
 
 def handle_drift_run(task: Task, ctx: Any) -> str:
@@ -85,14 +113,11 @@ def handle_drift_run(task: Task, ctx: Any) -> str:
         workspace_path=getattr(ctx, "workspace_path", ""),
         attempt_id=getattr(ctx, "_attempt_id", "") or "",
         lease_checker=getattr(ctx, "lease_checker", None),
+        payload_store=_make_payload_store(ctx, conn),
     )
 
     # resume 检测
-    run_row = conn.execute(
-        "SELECT status, result_ref, budget_used_json, steps_taken "
-        "FROM drift_runs WHERE drift_run_id=?",
-        (run_id,),
-    ).fetchone()
+    run_row = _drift_repository(conn).get(run_id)
     if run_row and run_row["status"] == "paused" and run_row["result_ref"]:
         return _resume_drift_run(run, run_row)
 
@@ -119,11 +144,8 @@ def _start_drift_run(run: _RunContext) -> str:
     max_runtime_ms = max(1, run.manifest.max_runtime_seconds) * 1000
 
     # 读取 principal_id
-    principal_row = run.conn.execute(
-        "SELECT principal_id FROM drift_runs WHERE drift_run_id=?",
-        (run.drift_run_id,),
-    ).fetchone()
-    principal_id = principal_row["principal_id"] if principal_row else "owner"
+    stored_run = _drift_repository(run.conn).get(run.drift_run_id)
+    principal_id = str(stored_run.get("principal_id") or "owner") if stored_run else "owner"
 
     while step_index < max_steps:
         # 时间耗尽 → 进入 wrap-up
@@ -157,6 +179,7 @@ def _start_drift_run(run: _RunContext) -> str:
                 completed_actions=completed_actions,
                 budget_used=budget_used,
                 config_version_id=run.config_version_id,
+                payload_store=run.payload_store,
             )
             _finish_drift(
                 run.conn,
@@ -226,6 +249,7 @@ def _start_drift_run(run: _RunContext) -> str:
             completed_actions=completed_actions,
             budget_used=budget_used,
             config_version_id=run.config_version_id,
+            payload_store=run.payload_store,
         )
 
         # ④ Skill 主动宣告做完 / no_value
@@ -269,7 +293,7 @@ def _resume_drift_run(run: _RunContext, run_row: Any) -> str:
     """真正的 resume：读持久化 checkpoint 校验版本 → 从 pause step 续跑 (P0-02/04)。
 
      版本权威的 checkpoint 来源优先级：
-     1. 持久化 task_checkpoints 表（写入时 snapshot，不受当前 config_version 影响）；
+     1. Event Store 中的受限 Checkpoint Payload（写入时 snapshot，不受当前 config_version 影响）；
      2. follow-up Task payload_ref（P0-02 follow-up 携带）。
      当前 config_version 只作为「当前值」用于与历史做 diff，不可回退用作历史值，
     否则版本变化永远被掩盖。
@@ -278,7 +302,9 @@ def _resume_drift_run(run: _RunContext, run_row: Any) -> str:
     from cogito.store.drift_repo import DriftRunRepository
     from cogito.store.task_checkpoint_repo import TaskCheckpointRepository
 
-    stored = TaskCheckpointRepository(run.conn).latest_for_task(run.task.task_id)
+    stored = TaskCheckpointRepository(
+        run.conn, payload_store=run.payload_store
+    ).latest_for_task(run.task.task_id)
     # follow-up payload（P0-02）；仅作兜底，config_version 以 stored 为准
     payload: dict[str, Any] = {}
     payload_ref = getattr(run.task, "payload_ref", None)
@@ -309,7 +335,7 @@ def _resume_drift_run(run: _RunContext, run_row: Any) -> str:
     else:
         compatible, reason = True, ""
     if not compatible:
-        DriftRunRepository(run.conn).update_status(
+        _drift_repository(run.conn).update_status(
             run.drift_run_id,
             DriftRunStatus.needs_review.value,
             preemption_reason=f"resume incompatible: {reason}",
@@ -502,12 +528,15 @@ def _create_resume_followup(
 
     idempotency = f"drift-resume:{resume_drift_run_id}:{resume_step}"
     # 幂等：同一 pause 点不重复创建 follow-up
-    existing = conn.execute(
-        "SELECT task_id FROM tasks WHERE idempotency_key=?",
-        (idempotency,),
-    ).fetchone()
+    from cogito.store.task_repo import TaskRepository
+
+    task_repo = TaskRepository(conn)
+    existing = next(
+        (task for task in task_repo.list_filtered(limit=50_000) if task.idempotency_key == idempotency),
+        None,
+    )
     if existing is not None:
-        return existing[0]
+        return existing.task_id
     payload = {
         "resume_drift_run_id": resume_drift_run_id,
         "resume_step": resume_step,
@@ -518,21 +547,18 @@ def _create_resume_followup(
         "config_version_id": config_version_id,
     }
     task_id = f"task-dr-{uuid.uuid4().hex[:16]}"
-    conn.execute(
-        "INSERT INTO tasks "
-        "(task_id, task_type, payload_ref, status, priority, "
-        " idempotency_key, origin, created_at) "
-        "VALUES (?,?,?,?, ?,?,?,?)",
-        (
-            task_id,
-            "drift.run",
-            __import__("json").dumps(payload, ensure_ascii=False),
-            "queued",
-            5,
-            idempotency,
-            "drift-resume",
-            int(time.time() * 1000),
-        ),
+    from cogito.domain.task import TaskStatus
+
+    task_repo.insert(
+        Task(
+            task_id=task_id,
+            task_type="drift.run",
+            payload_ref=json.dumps(payload, ensure_ascii=False),
+            status=TaskStatus.queued,
+            priority=5,
+            idempotency_key=idempotency,
+            origin="drift-resume",
+        )
     )
     # 注意：不改动 drift_runs.task_id，保持与原始 task 的关联（任务 T 完成/关
     # 联不变）。follow-up 任务通过 payload.resume_drift_run_id 自我定位。
@@ -548,12 +574,13 @@ def _create_resume_followup(
 
 def _resolve_drift_run_id(conn, task: Task) -> str | None:
     """通过 task_id 找 drift_run_id；follow-up 任务通过 payload.resume_drift_run_id 定位。"""
-    row = conn.execute(
-        "SELECT drift_run_id FROM drift_runs WHERE task_id=?",
-        (task.task_id,),
-    ).fetchone()
-    if row is not None:
-        return row[0]
+    repository = _drift_repository(conn)
+    existing = next(
+        (run for run in repository.list_runs() if run.get("task_id") == task.task_id),
+        None,
+    )
+    if existing is not None:
+        return str(existing["drift_run_id"])
     # follow-up 任务 (origin=drift-resume) 带新的 task_id，由 payload 指向原始 run
     payload_ref = getattr(task, "payload_ref", None)
     if payload_ref:
@@ -563,27 +590,21 @@ def _resolve_drift_run_id(conn, task: Task) -> str | None:
             payload = {}
         resume_run_id = payload.get("resume_drift_run_id")
         if resume_run_id:
-            row = conn.execute(
-                "SELECT drift_run_id FROM drift_runs WHERE drift_run_id=?",
-                (resume_run_id,),
-            ).fetchone()
-            if row is not None:
-                return row[0]
+            if repository.get(str(resume_run_id)) is not None:
+                return str(resume_run_id)
     return None
 
 
 def _resolve_manifest(conn, run_id: str) -> DriftSkillManifest | None:
     """解析当前 Skill manifest（优先内置目录）。"""
-    row = conn.execute(
-        "SELECT skill_name FROM drift_runs WHERE drift_run_id=?",
-        (run_id,),
-    ).fetchone()
-    if row is None:
+    run = _drift_repository(conn).get(run_id)
+    if run is None:
         return None
     from cogito.service.drift_skill_catalog import load_builtin_skills
 
     catalog = load_builtin_skills()
-    return catalog[row[0]].manifest if row[0] in catalog else None
+    skill_name = str(run.get("skill_name") or "")
+    return catalog[skill_name].manifest if skill_name in catalog else None
 
 
 def _budget_remaining(run: _RunContext, used: dict[str, int]) -> int:
@@ -614,19 +635,18 @@ def _finish_drift(
     create ProactiveCandidate(origin=drift) (PLAN-17 R5)。dry_run 由调用方控制
     (config.dry_run on DriftProjectionService)，不在 _finish_drift 之内断言。
     """
-    from cogito.store.drift_repo import DriftRunRepository
-
     rc = reason_code.value if hasattr(reason_code, "value") else str(reason_code)
     fields: dict[str, Any] = {"finish_summary": summary}
     if status == DriftRunStatus.paused:
         fields["preemption_reason"] = rc
     if result_ref is not None:
         fields["result_ref"] = result_ref
-    DriftRunRepository(conn).update_status(run_id, status.value, **fields)
+    repository = _drift_repository(conn)
+    repository.update_status(run_id, status.value, **fields)
 
     # REPLACE 语义写入累计 budget/steps (P0-04 修复后 resume 基线下仍是累计总值)
     if budget_used and steps_taken:
-        DriftRunRepository(conn).update_progress(
+        repository.update_progress(
             run_id, budget_used=budget_used, steps_taken=steps_taken
         )
 
@@ -650,21 +670,20 @@ def _finish_drift(
             _LOGGER.warning("emit drift result failed", exc_info=True)
 
     # 同步 drift_skill_state
-    row = conn.execute(
-        "SELECT skill_name, skill_version, principal_id FROM drift_runs WHERE drift_run_id=?",
-        (run_id,),
-    ).fetchone()
-    if row:
+    run = repository.get(run_id)
+    if run:
         try:
             from cogito.store.drift_repo import DriftSkillStateRepository
 
-            DriftSkillStateRepository(conn).upsert(
-                principal_id=row[2],
-                skill_name=row[0],
-                skill_version=row[1],
+            DriftSkillStateRepository(
+                conn, event_sourced=bool(_drift_repository(conn)._event_sourced)
+            ).upsert(
+                principal_id=str(run.get("principal_id") or ""),
+                skill_name=str(run.get("skill_name") or ""),
+                skill_version=str(run.get("skill_version") or ""),
                 last_status=status.value,
                 last_run_at=int(time.time() * 1000),
                 run_count=1,
             )
         except Exception:
-            _LOGGER.warning("upsert drift_skill_state failed for %s", row[0])
+            _LOGGER.warning("upsert drift_skill_state failed for %s", run.get("skill_name"))

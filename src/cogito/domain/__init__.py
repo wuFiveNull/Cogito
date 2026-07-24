@@ -2,7 +2,7 @@
 
 from .conversation import Conversation, ConversationType, Session, SessionStatus
 from .delivery import Delivery, DeliveryAttempt, DeliveryStatus
-from .events import DomainEvent
+from .event import Event, EventClass, EventContext
 from .memory import MemoryItem, MemoryKind, MemoryStatus
 from .message import ContentPart, Message, MessageDirection, MessageRole
 from .principal import Endpoint, EndpointStatus, Principal, PrincipalStatus, PrincipalType
@@ -37,5 +37,7 @@ __all__ = [
     "MemoryItem",
     "MemoryKind",
     "MemoryStatus",
-    "DomainEvent",
+    "Event",
+    "EventClass",
+    "EventContext",
 ]

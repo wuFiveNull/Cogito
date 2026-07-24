@@ -12,7 +12,7 @@ QQ-ONEBOT-E2E-01 / PR 4:
 真实 NapCat/Lagrange 人工验收见 PR 5。
 
 FakeChannelAdapter 在内存中模拟 OneBot send_*_msg 响应，
-验证 Core 的 Inbound/AgentLoop/DeliveryWorker/Receipt 完整链路。
+验证 Core 的 Inbound/AgentLoop/canonical Delivery Event 完整链路。
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ import asyncio
 import sqlite3
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import pytest
@@ -36,7 +38,9 @@ from cogito.channel.drivers.onebot_models import OneBotPolicy
 from cogito.config import Config, QQOneBotConfig
 from cogito.inbound.dispatcher import InboundDispatcher
 from cogito.inbound.models import Inbound, InboundContent, InboundRoute
+from cogito.infrastructure.payload_store import PayloadStore
 from cogito.service.inbound_service import InboundService
+from cogito.store.event_store import EventStore
 from cogito.store.migration import migrate
 
 OWNER_QQ = "12345678"
@@ -218,6 +222,8 @@ class _AgentStub:
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
+        self._payload_dir = TemporaryDirectory()
+        self.payload_store = PayloadStore(Path(self._payload_dir.name), conn)
 
     def process_queued_turn(self, worker_id: str = "test-worker") -> str | None:
         """领取一个 queued Turn，使用 Dispatcher + TurnCompletionService 完成。
@@ -241,7 +247,7 @@ class _AgentStub:
         attempt = claimed.attempt
 
         # 2. Complete turn
-        service = TurnCompletionService(self._conn)
+        service = TurnCompletionService(self._conn, effect_payload_store=self.payload_store)
         message_id = service.complete_reply(
             turn=turn,
             attempt=attempt,
@@ -250,14 +256,16 @@ class _AgentStub:
         if message_id is None:
             return None
 
-        # 读取刚创建的 Delivery
-        delivery = self._conn.execute(
-            "SELECT delivery_id FROM deliveries WHERE content_ref=? AND status='pending' LIMIT 1",
-            (message_id,),
-        ).fetchone()
-        if delivery is None:
-            return None
-        return delivery["delivery_id"]
+        request = next(
+            (
+                event
+                for event in EventStore(self._conn).read_stream_type("delivery")
+                if event.event_type == "delivery.requested"
+                and event.context.turn_id == turn.turn_id
+            ),
+            None,
+        )
+        return request.stream_id if request is not None else None
 
 
 class TestE2EPrivateLoop:
@@ -265,7 +273,7 @@ class TestE2EPrivateLoop:
 
     @pytest.mark.asyncio
     async def test_private_text_full_cycle(self) -> None:
-        """QQ-A14: 私聊文本 → Agent Turn → Delivery → send → platform_message_id 落库。"""
+        """QQ-A14: 私聊文本 → Agent Turn → Event Delivery → platform receipt。"""
         conn = sqlite3.connect(":memory:", check_same_thread=False)
         conn.execute("PRAGMA foreign_keys=ON;")
         conn.execute("PRAGMA busy_timeout=5000;")
@@ -291,42 +299,30 @@ class TestE2EPrivateLoop:
         delivery_id = agent.process_queued_turn()
         assert delivery_id is not None, "Agent 应创建 Delivery"
 
-        # 3. 验证 Delivery 创建
-        delivery_row = conn.execute(
-            "SELECT delivery_id, target_snapshot, content_ref, status FROM deliveries WHERE delivery_id=?",
-            (delivery_id,),
-        ).fetchone()
-        assert delivery_row is not None, "应创建 Delivery"
-        assert delivery_row["status"] == "pending"
-        assert delivery_row["content_ref"] is not None
-
-        # 4. 执行 Delivery send (直接 await adapter.send_request 模拟 Gateway)
+        # 3. 执行 canonical Delivery effect，通过真实 ChannelGateway 边界发送。
         fake_adapter = FakeChannelAdapter()
         await fake_adapter.start()
-        # 构建 ChannelSendRequest
-        from cogito.channel.base import ChannelSendRequest
-        import json as _json
-
-        target = _json.loads(delivery_row["target_snapshot"])
-        request = ChannelSendRequest(
-            delivery_id=target.get("delivery_id", ""),
-            attempt_id="",
-            idempotency_key=target.get("idempotency_key", ""),
-            channel_instance_id=target.get("adapter_id", "qq-main"),
-            target_endpoint_ref=target.get("target_endpoint_ref", ""),
-            platform_conversation_id=delivery_row["target_snapshot"],  # 仅用于解析
-            reply_to_platform_message_id=target.get("reply_route", {}).get(
-                "reply_to_platform_message_id"
-            ),
-            text="Stub reply: hello from Cogito",
+        from cogito.service.canonical_delivery_effect_executor import (
+            CanonicalDeliveryEffectExecutor,
         )
-        result = await fake_adapter.send_request(request)
-        assert result.status == "sent", f"send 应成功，得到 {result}"
-        assert result.platform_message_id is not None
+        from cogito.service.channel_gateway import ChannelGateway
+        from cogito.service.event_effect_worker import CanonicalEffectWorker
+        from cogito.service.loopback_gateway_client import LoopbackGatewayClient
 
-        # 5. 验证 FakeAdapter 被调用
+        gateway = LoopbackGatewayClient(ChannelGateway(conn, _MockManager(fake_adapter)))
+        worker = CanonicalEffectWorker(
+            EventStore(conn),
+            CanonicalDeliveryEffectExecutor(agent.payload_store, gateway),
+            effect_types=frozenset({"delivery"}),
+        )
+        assert worker.run_pending() == 1
+        stream = EventStore(conn).read_stream("delivery", delivery_id)
+        assert stream[-1].event_type == "delivery.completed"
+        assert stream[-1].attributes["platform_message_id"]
+
+        # 4. 验证 FakeAdapter 被调用
         assert len(fake_adapter.sent_log) == 1
-        assert fake_adapter.sent_log[0]["message_id"] == int(result.platform_message_id)
+        assert fake_adapter.sent_log[0]["text"] == "Stub reply: hello from Cogito"
 
 
 class TestE2EGroupIdempotency:
@@ -360,129 +356,6 @@ class TestE2EGroupIdempotency:
             "SELECT COUNT(*) FROM turns",
         ).fetchone()[0]
         assert turn_count == 1, "重复 message_id 只创建一个 Turn"
-
-
-class TestE2ETemporaryFailure:
-    """QQ-A19 / QQ-A21: 临时失败 → retry_scheduled → 重试 → sent。"""
-
-    @pytest.mark.asyncio
-    async def test_temporary_then_retry(self) -> None:
-        conn = sqlite3.connect(":memory:", check_same_thread=False)
-        conn.execute("PRAGMA foreign_keys=ON;")
-        conn.execute("PRAGMA busy_timeout=5000;")
-        conn.row_factory = sqlite3.Row
-        migrate(conn)
-
-        inbound_svc = InboundService(conn)
-        dispatcher = InboundDispatcher(inbound_svc)
-        fake_adapter = FakeChannelAdapter(fail_mode="temporary")
-        from cogito.service.channel_gateway import ChannelGateway
-        from cogito.service.delivery_worker import DeliveryWorker
-
-        gateway = ChannelGateway(conn, _MockManager(fake_adapter))
-        worker = DeliveryWorker(conn, gateway, lease_ttl_s=120)
-
-        # 入站 + Turn + Delivery 创建
-        inbound = _make_private_inbound("tmp_001")
-        await dispatcher.dispatch(inbound)
-        agent = _AgentStub(conn)
-        delivery_id = agent.process_queued_turn()
-        assert delivery_id is not None
-
-        # 第一次 send：临时失败
-        lease = worker.lease_next("test-worker")
-        assert lease is not None
-        result_str = worker.deliver(lease, "test-worker")
-
-        # 应进入 retry_scheduled
-        after = conn.execute(
-            "SELECT status FROM deliveries WHERE delivery_id=?",
-            (delivery_id,),
-        ).fetchone()
-        assert after["status"] == "retry_scheduled", f"status={after['status']} result={result_str}"
-
-        # Receipt 应为 temporary
-        receipt = conn.execute(
-            "SELECT receipt_kind FROM delivery_receipts WHERE delivery_id=?",
-            (delivery_id,),
-        ).fetchone()
-        assert receipt is not None, f"no receipt, result={result_str}"
-        assert receipt["receipt_kind"] == "temporary"
-
-        # 模拟临时失败恢复
-        fake_adapter.set_fail_mode("")
-        conn.execute(
-            "UPDATE deliveries SET next_attempt_at=0 WHERE delivery_id=?",
-            (delivery_id,),
-        )
-        conn.commit()
-
-        # 第二次 send：成功
-        lease2 = worker.lease_next("test-worker")
-        assert lease2 is not None
-        worker.deliver(lease2, "test-worker")
-
-        after2 = conn.execute(
-            "SELECT status, platform_message_id FROM deliveries WHERE delivery_id=?",
-            (delivery_id,),
-        ).fetchone()
-        assert after2["status"] == "sent"
-        assert after2["platform_message_id"] is not None
-
-
-class TestE2EUnknownNoRetry:
-    """QQ-A22 / QQ-A23: 发送后响应丢失 → unknown → 重启不重发。"""
-
-    @pytest.mark.asyncio
-    async def test_unknown_does_not_auto_retry(self) -> None:
-        conn = sqlite3.connect(":memory:", check_same_thread=False)
-        conn.execute("PRAGMA foreign_keys=ON;")
-        conn.execute("PRAGMA busy_timeout=5000;")
-        conn.row_factory = sqlite3.Row
-        migrate(conn)
-
-        inbound_svc = InboundService(conn)
-        dispatcher = InboundDispatcher(inbound_svc)
-        fake_adapter = FakeChannelAdapter(drop_response=True)
-        from cogito.service.channel_gateway import ChannelGateway
-        from cogito.service.delivery_worker import DeliveryWorker
-
-        gateway = ChannelGateway(conn, _MockManager(fake_adapter))
-        worker = DeliveryWorker(conn, gateway, lease_ttl_s=120)
-
-        # 入站 + Turn + Delivery 创建
-        inbound = _make_private_inbound("unk_001")
-        await dispatcher.dispatch(inbound)
-        agent = _AgentStub(conn)
-        delivery_id = agent.process_queued_turn()
-        assert delivery_id is not None
-
-        # 发送（响应丢失）
-        lease = worker.lease_next("test-worker")
-        assert lease is not None
-        result = worker.deliver(lease, "test-worker")
-        assert result == "unknown"
-
-        after = conn.execute(
-            "SELECT status FROM deliveries WHERE delivery_id=?",
-            (delivery_id,),
-        ).fetchone()
-        assert after["status"] == "unknown"
-
-        # 验证 send 只被调用了一次（external call count）
-        assert len(fake_adapter.sent_log) == 0  # drop_response → adapter 内部不调用
-
-        # Receipt 应为 uncertain
-        receipt = conn.execute(
-            "SELECT receipt_kind FROM delivery_receipts WHERE delivery_id=?",
-            (delivery_id,),
-        ).fetchone()
-        assert receipt is not None
-        assert receipt["receipt_kind"] == "uncertain"
-
-        # 重启后不自动重发：unknown 不进入 lease_next 的领取范围
-        lease2 = worker.lease_next("test-worker")
-        assert lease2 is None, "unknown delivery 不应被领取"
 
 
 # ── Mock Helpers ─────────────────────────────────────────────────────────

@@ -47,6 +47,7 @@ class Task:
         lease_owner: str | None = None,
         lease_expires_at: datetime | None = None,
         checkpoint_ref: str | None = None,
+        lease_version: int = 0,
         idempotency_key: str = "",
         origin: str = "system",
         created_at: datetime | None = None,
@@ -62,6 +63,7 @@ class Task:
         self.lease_owner = lease_owner
         self.lease_expires_at = lease_expires_at
         self.checkpoint_ref = checkpoint_ref
+        self.lease_version = lease_version
         self.idempotency_key = idempotency_key
         self.origin = origin
         self.created_at = created_at or datetime.now(UTC)
@@ -81,6 +83,7 @@ class Task:
             if self.lease_expires_at
             else None,
             "checkpoint_ref": self.checkpoint_ref,
+            "lease_version": self.lease_version,
             "idempotency_key": self.idempotency_key,
             "origin": self.origin,
             "created_at": self.created_at.isoformat(),
@@ -104,6 +107,7 @@ class Task:
             if data.get("lease_expires_at")
             else None,
             checkpoint_ref=data.get("checkpoint_ref"),
+            lease_version=int(data.get("lease_version", 0)),
             idempotency_key=data.get("idempotency_key", ""),
             origin=data.get("origin", "system"),
             created_at=datetime.fromisoformat(data["created_at"])

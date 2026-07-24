@@ -11,6 +11,7 @@ import sqlite3
 from datetime import UTC, datetime
 from typing import Protocol
 
+from cogito.domain.event import Event, EventClass, EventContext
 from cogito.domain.knowledge import (
     KnowledgeDocument,
     KnowledgeResource,
@@ -25,8 +26,21 @@ from cogito.service.knowledge.parser import (
     PlainTextParser,
 )
 from cogito.store import knowledge_repo
+from cogito.store.event_store import EventStore
 
 _LOGGER = logging.getLogger("cogito.knowledge")
+
+_KNOWLEDGE_EVENT_TYPES = {
+    "KnowledgeResourceDiscovered": "knowledge.resource.created",
+    "KnowledgeResourceChanged": "knowledge.resource.updated",
+    "KnowledgeDocumentParsed": "knowledge.document.parsed",
+    "KnowledgeSegmentsIndexed": "knowledge.resource.ingested",
+    "KnowledgeResourceInvalidated": "knowledge.resource.invalidated",
+    "KnowledgeResourceDeleted": "knowledge.resource.deleted",
+}
+_KNOWLEDGE_EVENT_ATTRIBUTE_KEYS = frozenset(
+    {"resource_id", "source_version", "document_id", "segment_count", "reason", "receipt_id"}
+)
 
 
 # ── Embedding Port（P13-09 扩展）──
@@ -102,26 +116,41 @@ class KnowledgeService:
         # PLAN-16 M4 完整 payload 边界：PayloadStore 工厂（供 ingest/embed/search 使用）
         self._payload_store_factory = payload_store_factory
 
-    def _emit(self, event_type: str, aggregate_id: str, payload: dict | None = None) -> None:
-        from cogito.domain.events import DomainEvent
-        from cogito.store.repositories import OutboxRepository
-
-        # 完整：复用 OutboxRepository.next_aggregate_version（同事务 MAX+1，严格单调）
-        version = OutboxRepository(self._conn).next_aggregate_version(
-            "knowledge_resource", aggregate_id
-        )
-        data = payload or {}
-        import json
-
-        OutboxRepository(self._conn).insert(
-            DomainEvent(
-                event_type=event_type,
-                aggregate_type="knowledge_resource",
-                aggregate_id=aggregate_id,
-                aggregate_version=version,
-                payload=data,
-                payload_ref=json.dumps(data, ensure_ascii=False),
-                origin="knowledge_service",
+    def _emit(self, event_type: str, aggregate_id: str, payload: dict | None = None) -> Event:
+        """在资源变更的同一事务内写入受限的规范 Event。"""
+        canonical_type = _KNOWLEDGE_EVENT_TYPES[event_type]
+        attributes = {
+            key: value
+            for key, value in (payload or {}).items()
+            if key in _KNOWLEDGE_EVENT_ATTRIBUTE_KEYS and isinstance(value, str | int | float | bool)
+        }
+        store = EventStore(self._conn)
+        stream = store.read_stream("knowledge_resource", aggregate_id)
+        source = stream[-1] if stream else None
+        source_context = source.context if source else EventContext()
+        resource = self._conn.execute(
+            "SELECT principal_id FROM knowledge_resources WHERE resource_id=?", (aggregate_id,)
+        ).fetchone()
+        return store.append(
+            Event(
+                event_type=canonical_type,
+                stream_type="knowledge_resource",
+                stream_id=aggregate_id,
+                producer="knowledge-service",
+                event_class=(
+                    EventClass.OPERATION
+                    if canonical_type == "knowledge.document.parsed"
+                    else EventClass.DOMAIN
+                ),
+                context=EventContext(
+                    trace_id=source_context.trace_id,
+                    correlation_id=source_context.correlation_id,
+                    causation_id=source.event_id if source else source_context.causation_id,
+                    principal_id=(str(resource[0]) if resource else ""),
+                ),
+                summary=canonical_type.replace(".", " "),
+                attributes=attributes,
+                outcome=canonical_type.rsplit(".", 1)[-1],
             )
         )
 
@@ -474,34 +503,7 @@ class KnowledgeService:
             "WHERE source_type='knowledge_resource' AND source_id=? AND deleted_at IS NULL",
             (resource_id,),
         ).fetchall()
-        import json
-
-        from cogito.domain.events import DomainEvent
-        from cogito.store.repositories import OutboxRepository
-
-        outbox = OutboxRepository(self._conn)
-        for row in affected:
-            memory_id = row["memory_id"]
-            data = {
-                "memory_id": memory_id,
-                "resource_id": resource_id,
-                "reason": reason,
-                "receipt_id": receipt_id,
-            }
-            # 完整：严格单调递增事件版本（同事务 MAX+1），不再是固定 1
-            ver = outbox.next_aggregate_version("memory", memory_id)
-            outbox.insert(
-                DomainEvent(
-                    event_type="MemorySourceInvalidated",
-                    aggregate_type="memory",
-                    aggregate_id=memory_id,
-                    aggregate_version=ver,
-                    payload=data,
-                    payload_ref=json.dumps(data, ensure_ascii=False),
-                    origin="knowledge_service",
-                )
-            )
-        self._emit(
+        deleted_event = self._emit(
             "KnowledgeResourceDeleted",
             resource_id,
             {
@@ -511,6 +513,31 @@ class KnowledgeService:
                 "receipt_id": receipt_id,
             },
         )
+        store = EventStore(self._conn)
+        for row in affected:
+            memory_id = row["memory_id"]
+            store.append(
+                Event(
+                    event_type="memory.source.invalidated",
+                    stream_type="memory",
+                    stream_id=memory_id,
+                    producer="knowledge-service",
+                    event_class=EventClass.DOMAIN,
+                    context=EventContext(
+                        trace_id=deleted_event.context.trace_id,
+                        correlation_id=deleted_event.context.correlation_id,
+                        causation_id=deleted_event.event_id,
+                        principal_id=deleted_event.context.principal_id,
+                    ),
+                    summary="Memory source invalidated",
+                    attributes={
+                        "resource_id": resource_id,
+                        "reason": reason,
+                        "receipt_id": receipt_id,
+                    },
+                    outcome="invalidated",
+                )
+            )
         # PLAN-16 M2 TX-05: 不再内部 commit，由调用方统一提交。
         return count
 

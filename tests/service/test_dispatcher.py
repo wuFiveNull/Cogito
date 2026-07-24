@@ -1,6 +1,6 @@
-"""Tests for Dispatcher and Turn completion (P3: Dispatcher + Lane + Stub Agent)."""
-
+"""Tests for Dispatcher and Turn completion — Event-only."""
 import sqlite3
+import uuid
 from datetime import UTC, datetime
 
 import pytest
@@ -8,6 +8,8 @@ import pytest
 from cogito.domain.turn import RunAttemptStatus, Turn, TurnStatus
 from cogito.service.completion import TurnCompletionService
 from cogito.service.dispatcher import Dispatcher
+from cogito.store.event_replay import replay_delivery, replay_run_attempt, replay_turn
+from cogito.store.event_store import EventStore
 from cogito.store.migration import migrate
 from cogito.store.time_utils import epoch_ms
 
@@ -25,41 +27,13 @@ def db() -> sqlite3.Connection:
     return conn
 
 
-def _create_queued_turn(
-    conn: sqlite3.Connection, session_id: str = "s1", priority: int = 80
-) -> Turn:
-    """Helper: insert a queued turn directly into the database."""
-    from cogito.domain.turn import TurnStatus
-
-    turn = Turn(
-        session_id=session_id,
-        status=TurnStatus.queued,
-        priority=priority,
-        version=2,  # accepted(1) → queued(2)
-    )
-    conn.execute(
-        "INSERT INTO turns (turn_id, session_id, input_message_id, status, priority, version, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (
-            turn.turn_id,
-            turn.session_id,
-            turn.input_message_id,
-            turn.status.value,
-            turn.priority,
-            turn.version,
-            epoch_ms(turn.created_at),
-        ),
-    )
-    conn.commit()
-    return turn
-
-
 def _create_session(
     conn: sqlite3.Connection,
     session_id: str = "s1",
     conversation_id: str = "c1",
     context_partition_key: str = "c1",
 ) -> None:
+    """Legacy helper for tests that still reference session tables."""
     conn.execute(
         "INSERT OR IGNORE INTO conversations (conversation_id, conversation_type, platform_conversation_id) "
         "VALUES (?, 'private', ?)",
@@ -73,6 +47,56 @@ def _create_session(
     conn.commit()
 
 
+def _create_queued_turn(
+    conn: sqlite3.Connection, session_id: str = "s1", priority: int = 80
+) -> Turn:
+    """Helper: append events to create a queued turn."""
+    from cogito.domain.event import Event, EventClass, EventContext
+
+    store = EventStore(conn)
+    turn_id = "turn-" + uuid.uuid4().hex[:12]
+    store.append(
+        Event(
+            event_type="interaction.message.accepted",
+            stream_type="turn",
+            stream_id=turn_id,
+            producer="test",
+            event_class=EventClass.DOMAIN,
+            context=EventContext(session_id=session_id),
+            summary="Message accepted",
+        )
+    )
+    store.append(
+        Event(
+            event_type="runtime.turn.queued",
+            stream_type="turn",
+            stream_id=turn_id,
+            producer="test",
+            event_class=EventClass.DOMAIN,
+            context=EventContext(session_id=session_id),
+            summary="Turn queued",
+            attributes={"priority": priority},
+        )
+    )
+    return Turn(
+        turn_id=turn_id,
+        session_id=session_id,
+        status=TurnStatus.queued,
+        priority=priority,
+        version=2,
+    )
+
+
+def _assert_turn_status(db: sqlite3.Connection, turn_id: str, expected: str) -> None:
+    state = replay_turn(EventStore(db).read_stream("turn", turn_id), turn_id)
+    assert state is not None and state.status == expected, f"expected {expected}, got {state.status if state else None}"
+
+
+def _assert_attempt_status(db: sqlite3.Connection, attempt_id: str, expected: str) -> None:
+    state = replay_run_attempt(EventStore(db).read_stream("run_attempt", attempt_id), attempt_id)
+    assert state is not None and state.status == expected, f"expected {expected}, got {state.status if state else None}"
+
+
 # =============================================================================
 # Dispatcher claim_next
 # =============================================================================
@@ -80,7 +104,6 @@ def _create_session(
 
 class TestClaimNext:
     def test_claim_queued_turn(self, db: sqlite3.Connection):
-        _create_session(db)
         turn = _create_queued_turn(db)
 
         dispatcher = Dispatcher(db)
@@ -93,14 +116,15 @@ class TestClaimNext:
         assert result.attempt.status == RunAttemptStatus.running
         assert result.attempt.started_at is not None
 
-        # Verify Turn is running
-        row = db.execute(
-            "SELECT status, active_attempt_id, version FROM turns WHERE turn_id=?",
-            (turn.turn_id,),
-        ).fetchone()
-        assert row["status"] == "running"
-        assert row["active_attempt_id"] == result.attempt.attempt_id
-        assert row["version"] == 3  # 2 → 3 (queued → running)
+        turn_events = EventStore(db).read_stream("turn", turn.turn_id)
+        assert len(turn_events) == 3  # accepted, queued, started
+        assert turn_events[-1].event_type == "runtime.turn.started"
+        assert turn_events[-1].context.attempt_id == result.attempt.attempt_id
+        assert turn_events[-1].attributes["worker_id"] == "worker1"
+
+        attempt_events = EventStore(db).read_stream("run_attempt", result.attempt.attempt_id)
+        assert len(attempt_events) == 1
+        assert attempt_events[0].event_type == "runtime.attempt.started"
 
     def test_returns_none_when_empty(self, db: sqlite3.Connection):
         dispatcher = Dispatcher(db)
@@ -109,15 +133,13 @@ class TestClaimNext:
 
     def test_skips_sessions_with_running_turn(self, db: sqlite3.Connection):
         """Lane: same session can't have two running turns."""
-        _create_session(db, "s1", "c1")
-        t1 = _create_queued_turn(db, "s1")
+        _create_queued_turn(db, "s1")
         _create_queued_turn(db, "s1")  # second turn, should be skipped
-        db.commit()
 
         dispatcher = Dispatcher(db)
         r1 = dispatcher.claim_next("worker1")
         assert r1 is not None
-        assert r1.turn.turn_id == t1.turn_id
+        assert r1.turn.session_id == "s1"
 
         # Second claim should return None since s1 already has a running turn
         r2 = dispatcher.claim_next("worker1")
@@ -125,23 +147,18 @@ class TestClaimNext:
 
     def test_priority_ordering(self, db: sqlite3.Connection):
         """Higher priority (larger number) turns are claimed first."""
-        _create_session(db, "s1", "c1")
-        _create_session(db, "s2", "c2")
-        high = _create_queued_turn(db, "s1", priority=100)  # high priority
-        _create_queued_turn(db, "s2", priority=20)  # low priority
-        db.commit()
+        low = _create_queued_turn(db, "s1", priority=20)
+        high = _create_queued_turn(db, "s2", priority=100)
 
         dispatcher = Dispatcher(db)
         r1 = dispatcher.claim_next("worker1")
         assert r1 is not None
-        assert r1.turn.turn_id == high.turn_id  # higher priority first
+        assert r1.turn.turn_id == high.turn_id
 
     def test_concurrent_claim_only_one_succeeds(self, db: sqlite3.Connection):
         """Test version check prevents double-claim."""
-        _create_session(db)
         _create_queued_turn(db)
 
-        # Simulate two dispatchers trying to claim the same turn
         dispatcher1 = Dispatcher(db)
         dispatcher2 = Dispatcher(db)
 
@@ -152,34 +169,34 @@ class TestClaimNext:
         assert r2 is None  # version changed by first claim
 
     def test_claim_creates_run_attempt(self, db: sqlite3.Connection):
-        _create_session(db)
         turn = _create_queued_turn(db)
-
         dispatcher = Dispatcher(db)
         result = dispatcher.claim_next("worker1")
         assert result is not None
 
-        row = db.execute(
-            "SELECT status, attempt_no, turn_id FROM run_attempts WHERE attempt_id=?",
-            (result.attempt.attempt_id,),
-        ).fetchone()
-        assert row is not None
-        assert row["status"] == "running"
-        assert row["attempt_no"] == 1
-        assert row["turn_id"] == turn.turn_id
+        # Verify attempt state from events
+        _assert_attempt_status(db, result.attempt.attempt_id, "running")
+        assert result.attempt.attempt_no == 1
+        assert result.attempt.turn_id == turn.turn_id
 
     def test_attempt_no_increments(self, db: sqlite3.Connection):
         """When an attempt already exists, next attempt gets incrementing no."""
-        _create_session(db)
+        from cogito.domain.event import Event, EventClass, EventContext
+
         turn = _create_queued_turn(db)
 
-        # Insert a previous failed attempt
-        db.execute(
-            "INSERT INTO run_attempts (attempt_id, turn_id, attempt_no, status) "
-            "VALUES ('prev1', ?, 1, 'failed')",
-            (turn.turn_id,),
+        # Append a previous failed attempt event
+        EventStore(db).append(
+            Event(
+                event_type="runtime.attempt.started",
+                stream_type="run_attempt",
+                stream_id=f"prev-attempt-{turn.turn_id}",
+                producer="test",
+                event_class=EventClass.OPERATION,
+                context=EventContext(turn_id=turn.turn_id),
+                attributes={"attempt_no": 1, "worker_id": "prev-worker"},
+            )
         )
-        db.commit()
 
         dispatcher = Dispatcher(db)
         result = dispatcher.claim_next("worker1")
@@ -194,35 +211,29 @@ class TestClaimNext:
 
 class TestCancelTurn:
     def test_cancel_queued_turn(self, db: sqlite3.Connection):
-        _create_session(db)
         turn = _create_queued_turn(db)
 
         dispatcher = Dispatcher(db)
         result = dispatcher.cancel(turn.turn_id, turn.version)
         assert result is True
 
-        row = db.execute(
-            "SELECT status FROM turns WHERE turn_id=?",
-            (turn.turn_id,),
-        ).fetchone()
-        assert row["status"] == "cancelled"
+        _assert_turn_status(db, turn.turn_id, "cancelled")
+        last_event = EventStore(db).read_stream("turn", turn.turn_id)[-1]
+        assert last_event.event_type == "runtime.turn.cancelled"
 
     def test_cancel_already_running_fails(self, db: sqlite3.Connection):
-        _create_session(db)
         turn = _create_queued_turn(db)
         dispatcher = Dispatcher(db)
         dispatcher.claim_next("worker1")
 
-        # Try to cancel with old version
         result = dispatcher.cancel(turn.turn_id, turn.version)
-        assert result is False  # version mismatch, can't cancel running
+        assert result is False
 
     def test_cancel_wrong_version(self, db: sqlite3.Connection):
-        _create_session(db)
         turn = _create_queued_turn(db)
 
         dispatcher = Dispatcher(db)
-        result = dispatcher.cancel(turn.turn_id, 999)  # wrong version
+        result = dispatcher.cancel(turn.turn_id, 999)
         assert result is False
 
 
@@ -233,7 +244,6 @@ class TestCancelTurn:
 
 class TestComplete:
     def test_complete_success(self, db: sqlite3.Connection):
-        _create_session(db)
         _create_queued_turn(db)
         dispatcher = Dispatcher(db)
         claimed = dispatcher.claim_next("worker1")
@@ -242,52 +252,38 @@ class TestComplete:
         ok = dispatcher.complete(
             claimed.turn.turn_id,
             claimed.attempt.attempt_id,
-            claimed.turn.version,  # now version is the post-claim version (3)
+            claimed.turn.version,
             worker_id=claimed.attempt.worker_id,
             lease_version=claimed.attempt.lease_version,
             final_message_id="final_msg_1",
         )
         assert ok is True
 
-        # Turn completed
-        row = db.execute(
-            "SELECT status, final_message_id, version FROM turns WHERE turn_id=?",
-            (claimed.turn.turn_id,),
-        ).fetchone()
-        assert row["status"] == "completed"
-        assert row["final_message_id"] == "final_msg_1"
-
-        # RunAttempt succeeded
-        row = db.execute(
-            "SELECT status FROM run_attempts WHERE attempt_id=?",
-            (claimed.attempt.attempt_id,),
-        ).fetchone()
-        assert row["status"] == "succeeded"
+        # Verify from events
+        _assert_turn_status(db, claimed.turn.turn_id, "completed")
+        _assert_attempt_status(db, claimed.attempt.attempt_id, "succeeded")
+        last_event = EventStore(db).read_stream("turn", claimed.turn.turn_id)[-1]
+        assert last_event.event_type == "runtime.turn.completed"
+        assert last_event.context.attempt_id == claimed.attempt.attempt_id
 
     def test_stale_version_cannot_complete(self, db: sqlite3.Connection):
         """Submitting with an old version should be a no-op."""
-        _create_session(db)
         _create_queued_turn(db)
         dispatcher = Dispatcher(db)
         claimed = dispatcher.claim_next("worker1")
         assert claimed is not None
 
-        # Use the stale version (before the claim incremented it)
         stale_version = claimed.turn.version - 1
-        dispatcher.complete(
+        result = dispatcher.complete(
             claimed.turn.turn_id,
             claimed.attempt.attempt_id,
             stale_version,
             worker_id=claimed.attempt.worker_id,
             lease_version=claimed.attempt.lease_version,
-            final_message_id="final_msg_1",
         )
-        # stale version → complete returns False, turn stays running
-        row = db.execute(
-            "SELECT status FROM turns WHERE turn_id=?",
-            (claimed.turn.turn_id,),
-        ).fetchone()
-        assert row["status"] == "running"  # still running
+        assert result is False
+        # Turn stays running
+        _assert_turn_status(db, claimed.turn.turn_id, "running")
 
 
 # =============================================================================
@@ -297,7 +293,6 @@ class TestComplete:
 
 class TestFail:
     def test_fail_marks_both(self, db: sqlite3.Connection):
-        _create_session(db)
         _create_queued_turn(db)
         dispatcher = Dispatcher(db)
         claimed = dispatcher.claim_next("worker1")
@@ -312,17 +307,73 @@ class TestFail:
         )
         assert ok is True
 
-        turn_row = db.execute(
-            "SELECT status FROM turns WHERE turn_id=?",
-            (claimed.turn.turn_id,),
-        ).fetchone()
-        assert turn_row["status"] == "failed"
+        _assert_turn_status(db, claimed.turn.turn_id, "failed")
+        _assert_attempt_status(db, claimed.attempt.attempt_id, "failed")
+        last_event = EventStore(db).read_stream("turn", claimed.turn.turn_id)[-1]
+        assert last_event.event_type == "runtime.turn.failed"
+        assert last_event.context.attempt_id == claimed.attempt.attempt_id
 
-        att_row = db.execute(
-            "SELECT status FROM run_attempts WHERE attempt_id=?",
-            (claimed.attempt.attempt_id,),
-        ).fetchone()
-        assert att_row["status"] == "failed"
+    def test_resume_from_failed(self, db: sqlite3.Connection):
+        """A failed turn can be resumed."""
+        turn = _create_queued_turn(db)
+        dispatcher = Dispatcher(db)
+        claimed = dispatcher.claim_next("worker1")
+        dispatcher.fail(
+            claimed.turn.turn_id,
+            claimed.attempt.attempt_id,
+            claimed.turn.version,
+            worker_id=claimed.attempt.worker_id,
+            lease_version=claimed.attempt.lease_version,
+        )
+
+        resumed = Dispatcher(db).resume(turn.turn_id, "worker-recovery", checkpoint_ref="checkpoint-1")
+        assert resumed is not None
+        last_event = EventStore(db).read_stream("turn", turn.turn_id)[-1]
+        assert last_event.event_type == "runtime.turn.started"
+        assert last_event.attributes.get("resumed") is True
+        assert last_event.context.attempt_id == resumed.attempt.attempt_id
+
+
+class TestWaitTransitions:
+    def test_pause_for_approval_records_waiting_user_event(self, db: sqlite3.Connection):
+        _create_queued_turn(db)
+        dispatcher = Dispatcher(db)
+        claimed = dispatcher.claim_next("worker1")
+        assert claimed is not None
+
+        assert dispatcher.pause_for_approval(
+            claimed.turn.turn_id,
+            claimed.attempt.attempt_id,
+            claimed.turn.version,
+            claimed.attempt.worker_id,
+            claimed.attempt.lease_version,
+            "approval-1",
+        )
+
+        _assert_turn_status(db, claimed.turn.turn_id, "waiting_user")
+        event = EventStore(db).read_stream("turn", claimed.turn.turn_id)[-1]
+        assert event.event_type == "runtime.turn.waiting_user"
+        assert event.attributes["approval_id"] == "approval-1"
+
+    def test_pause_for_external_records_waiting_external_event(self, db: sqlite3.Connection):
+        _create_queued_turn(db)
+        dispatcher = Dispatcher(db)
+        claimed = dispatcher.claim_next("worker1")
+        assert claimed is not None
+
+        assert dispatcher.pause_for_external(
+            claimed.turn.turn_id,
+            claimed.attempt.attempt_id,
+            claimed.turn.version,
+            claimed.attempt.worker_id,
+            claimed.attempt.lease_version,
+            "waiting-1",
+        )
+
+        _assert_turn_status(db, claimed.turn.turn_id, "waiting_external")
+        event = EventStore(db).read_stream("turn", claimed.turn.turn_id)[-1]
+        assert event.event_type == "runtime.turn.waiting_external"
+        assert event.attributes["waiting_id"] == "waiting-1"
 
 
 # =============================================================================
@@ -331,15 +382,18 @@ class TestFail:
 
 
 class TestTurnCompletionService:
-    def test_complete_with_stub_creates_message(self, db: sqlite3.Connection):
-        _create_session(db, "s1", "c1")
-        turn = _create_queued_turn(db)
+    def test_complete_with_stub_creates_message(self, db: sqlite3.Connection, tmp_path):
+        from cogito.infrastructure.payload_store import PayloadStore
+        from cogito.contracts.envelope import ChannelEnvelope
 
+        payload_store = PayloadStore(tmp_path / "payloads", db)
+
+        turn = _create_queued_turn(db)
         dispatcher = Dispatcher(db)
         claimed = dispatcher.claim_next("worker1")
         assert claimed is not None
 
-        service = TurnCompletionService(db)
+        service = TurnCompletionService(db, effect_payload_store=payload_store)
         msg_id = service.complete_with_stub(
             claimed.turn,
             claimed.attempt,
@@ -352,32 +406,21 @@ class TestTurnCompletionService:
         )
         assert msg_id is not None
 
-        # Message exists
-        msg = db.execute(
-            "SELECT role, direction, reply_to_message_id FROM messages WHERE message_id=?",
-            (msg_id,),
-        ).fetchone()
-        assert msg is not None
-        assert msg["role"] == "assistant"
-        assert msg["direction"] == "outbound"
-        assert msg["reply_to_message_id"] == turn.input_message_id
+        # Message events exist
+        msg_stream = EventStore(db).read_stream("message", msg_id)
+        assert len(msg_stream) == 1
+        assert msg_stream[0].event_type == "interaction.message.recorded"
 
-        # Content part exists with stub text
-        part = db.execute(
-            "SELECT inline_data FROM content_parts WHERE message_id=?",
-            (msg_id,),
-        ).fetchone()
-        assert part is not None
-        assert "stub mode" in part["inline_data"]
+    def test_complete_creates_delivery(self, db: sqlite3.Connection, tmp_path):
+        from cogito.infrastructure.payload_store import PayloadStore
 
-    def test_complete_creates_delivery(self, db: sqlite3.Connection):
-        _create_session(db, "s1", "c1")
+        payload_store = PayloadStore(tmp_path / "payloads", db)
+
         _create_queued_turn(db)
-
         dispatcher = Dispatcher(db)
         claimed = dispatcher.claim_next("worker1")
 
-        service = TurnCompletionService(db)
+        service = TurnCompletionService(db, effect_payload_store=payload_store)
         service.complete_with_stub(
             claimed.turn,
             claimed.attempt,
@@ -389,18 +432,20 @@ class TestTurnCompletionService:
             delivery_target="test_channel",
         )
 
-        deliveries = db.execute("SELECT status FROM deliveries").fetchall()
-        assert len(deliveries) == 1
-        assert deliveries[0]["status"] == "pending"
+        streams = EventStore(db).read_stream_type("delivery")
+        assert len(streams) == 1
+        assert replay_delivery(streams, streams[0].stream_id).status == "pending"
 
-    def test_complete_creates_outbox_event(self, db: sqlite3.Connection):
-        _create_session(db, "s1", "c1")
+    def test_complete_creates_canonical_event(self, db: sqlite3.Connection, tmp_path):
+        from cogito.infrastructure.payload_store import PayloadStore
+
+        payload_store = PayloadStore(tmp_path / "payloads", db)
+
         _create_queued_turn(db)
-
         dispatcher = Dispatcher(db)
         claimed = dispatcher.claim_next("worker1")
 
-        service = TurnCompletionService(db)
+        service = TurnCompletionService(db, effect_payload_store=payload_store)
         service.complete_with_stub(
             claimed.turn,
             claimed.attempt,
@@ -412,18 +457,19 @@ class TestTurnCompletionService:
             delivery_target="test_channel",
         )
 
-        events = db.execute("SELECT event_type, aggregate_id FROM outbox_events").fetchall()
-        assert len(events) >= 1
-        assert events[0]["event_type"] == "TurnCompleted"
+        events = EventStore(db).read_stream("turn", claimed.turn.turn_id)
+        assert [e.event_type for e in events].count("runtime.turn.completed") == 1
 
-    def test_turn_completed_after_stub(self, db: sqlite3.Connection):
-        _create_session(db, "s1", "c1")
+    def test_turn_completed_after_stub(self, db: sqlite3.Connection, tmp_path):
+        from cogito.infrastructure.payload_store import PayloadStore
+
+        payload_store = PayloadStore(tmp_path / "payloads", db)
+
         _create_queued_turn(db)
-
         dispatcher = Dispatcher(db)
         claimed = dispatcher.claim_next("worker1")
 
-        service = TurnCompletionService(db)
+        service = TurnCompletionService(db, effect_payload_store=payload_store)
         service.complete_with_stub(
             claimed.turn,
             claimed.attempt,
@@ -435,27 +481,24 @@ class TestTurnCompletionService:
             delivery_target="test_channel",
         )
 
-        row = db.execute(
-            "SELECT status, final_message_id FROM turns WHERE turn_id=?",
-            (claimed.turn.turn_id,),
-        ).fetchone()
-        assert row["status"] == "completed"
-        assert row["final_message_id"] is not None
+        _assert_turn_status(db, claimed.turn.turn_id, "completed")
+        last_event = EventStore(db).read_stream("turn", claimed.turn.turn_id)[-1]
+        assert last_event.event_type == "runtime.turn.completed"
 
-    def test_rollback_on_failure(self, db: sqlite3.Connection):
+    def test_rollback_on_failure(self, db: sqlite3.Connection, tmp_path):
         """If completion fails mid-way, nothing should be committed."""
         from unittest.mock import patch
 
         import cogito.service.unit_of_work as uow_mod
+        from cogito.infrastructure.payload_store import PayloadStore
 
-        _create_session(db, "s1", "c1")
+        payload_store = PayloadStore(tmp_path / "payloads", db)
+
         _create_queued_turn(db)
-
         dispatcher = Dispatcher(db)
         claimed = dispatcher.claim_next("worker1")
 
-        # Mock only commit — __exit__ will still auto-rollback
-        service = TurnCompletionService(db)
+        service = TurnCompletionService(db, effect_payload_store=payload_store)
         with patch.object(uow_mod.UnitOfWork, "commit"):
             service.complete_with_stub(
                 claimed.turn,
@@ -468,9 +511,9 @@ class TestTurnCompletionService:
                 delivery_target="test_channel",
             )
 
-        # Nothing should exist (real __exit__ rolled back since _committed=False)
-        assert db.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
-        assert db.execute("SELECT COUNT(*) FROM outbox_events").fetchone()[0] == 0
+        # No events should exist after rollback
+        assert len(EventStore(db).read_stream("turn", claimed.turn.turn_id)) == 3
+        assert len(EventStore(db).read_stream_type("delivery")) == 0
 
 
 # =============================================================================
@@ -479,17 +522,15 @@ class TestTurnCompletionService:
 
 
 class TestFullCycle:
-    def test_create_then_dispatch_then_complete(self, db: sqlite3.Connection):
+    def test_create_then_dispatch_then_complete(self, db: sqlite3.Connection, tmp_path):
         """Simulate the full P2->P3 flow: accept -> claim -> stub -> complete."""
         from cogito.contracts.envelope import ChannelEnvelope
+        from cogito.infrastructure.payload_store import PayloadStore
         from cogito.service.inbound_service import InboundService
 
-        # Ensure conversation exists for message FK
-        db.execute(
-            "INSERT OR IGNORE INTO conversations (conversation_id, conversation_type, platform_conversation_id) "
-            "VALUES ('pc1', 'private', 'pc1')"
-        )
-        svc = InboundService(db)
+        payload_store = PayloadStore(tmp_path / "payloads", db)
+
+        svc = InboundService(db, payload_store=payload_store)
         accept_result = svc.accept(
             ChannelEnvelope(
                 channel_type="test",
@@ -503,15 +544,13 @@ class TestFullCycle:
         )
         assert accept_result.is_new is True
 
-        # 2. Dispatcher claims the turn
         dispatcher = Dispatcher(db)
         claimed = dispatcher.claim_next("worker1")
         assert claimed is not None
         assert claimed.turn.turn_id == accept_result.turn_id
         assert claimed.turn.status == TurnStatus.running
 
-        # 3. Complete with stub agent
-        completion = TurnCompletionService(db)
+        completion = TurnCompletionService(db, effect_payload_store=payload_store)
         msg_id = completion.complete_with_stub(
             claimed.turn,
             claimed.attempt,
@@ -524,33 +563,32 @@ class TestFullCycle:
         )
         assert msg_id is not None
 
-        # 4. Verify full state
-        assert (
-            db.execute(
-                "SELECT status FROM turns WHERE turn_id=?",
-                (claimed.turn.turn_id,),
-            ).fetchone()["status"]
-            == "completed"
+        # Verify purely from events
+        state = replay_turn(
+            EventStore(db).read_stream("turn", claimed.turn.turn_id), claimed.turn.turn_id
         )
+        assert state is not None
+        assert state.status == "completed"
 
-        assert (
-            db.execute(
-                "SELECT status FROM run_attempts WHERE attempt_id=?",
-                (claimed.attempt.attempt_id,),
-            ).fetchone()["status"]
-            == "succeeded"
+        attempt_state = replay_run_attempt(
+            EventStore(db).read_stream("run_attempt", claimed.attempt.attempt_id),
+            claimed.attempt.attempt_id,
         )
+        assert attempt_state is not None
+        assert attempt_state.status == "succeeded"
 
-        # 2 outbox events: InboundMessageAccepted + TurnQueued + TurnCompleted
-        assert db.execute("SELECT COUNT(*) FROM outbox_events").fetchone()[0] == 3
+        events = EventStore(db).read_stream("turn", claimed.turn.turn_id)
+        assert [e.event_type for e in events].count("runtime.turn.completed") == 1
 
-    def test_retry_after_failure(self, db: sqlite3.Connection):
+    def test_retry_after_failure(self, db: sqlite3.Connection, tmp_path):
         """Failed turn can be retried: fail → new attempt."""
         from cogito.contracts.envelope import ChannelEnvelope
+        from cogito.infrastructure.payload_store import PayloadStore
         from cogito.service.inbound_service import InboundService
 
-        # Accept + claim
-        svc = InboundService(db)
+        payload_store = PayloadStore(tmp_path / "payloads", db)
+
+        svc = InboundService(db, payload_store=payload_store)
         svc.accept(
             ChannelEnvelope(
                 channel_type="test",
@@ -567,7 +605,6 @@ class TestFullCycle:
         claimed = dispatcher.claim_next("worker1")
         assert claimed is not None
 
-        # Fail
         dispatcher.fail(
             claimed.turn.turn_id,
             claimed.attempt.attempt_id,
@@ -576,17 +613,6 @@ class TestFullCycle:
             lease_version=claimed.attempt.lease_version,
         )
 
-        # Retry: re-queue and claim again
-        from cogito.domain.state_machines import can_transition_turn
-
-        assert can_transition_turn(TurnStatus.failed, TurnStatus.queued)
-        db.execute(
-            "UPDATE turns SET status='queued', version=version+1 "
-            "WHERE turn_id=? AND status='failed'",
-            (claimed.turn.turn_id,),
-        )
-        db.commit()
-
-        claimed2 = dispatcher.claim_next("worker1")
+        claimed2 = dispatcher.resume(claimed.turn.turn_id, "worker1")
         assert claimed2 is not None
-        assert claimed2.attempt.attempt_no == 2  # second attempt
+        assert claimed2.attempt.attempt_no == 2

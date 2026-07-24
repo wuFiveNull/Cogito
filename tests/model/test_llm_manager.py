@@ -52,6 +52,65 @@ def _single_cfg() -> ModelConfig:
 
 
 class TestLLMManagerBuild:
+    def test_direct_main_fast_vlm_role_routing(self):
+        cfg = ModelConfig._from_raw(
+            {
+                "provider": "openai_compat",
+                "main": {
+                    "model": "deepseek-v4-flash",
+                    "api_key": "sk-main",
+                    "base_url": "https://opencode.ai/v1",
+                    "modalities": ["text"],
+                },
+                "fast": {
+                    "model": "deepseek-v4-flash",
+                    "api_key": "sk-fast",
+                    "base_url": "https://opencode.ai/v1",
+                    "modalities": ["text"],
+                },
+                "vlm": {
+                    "model": "vision-model",
+                    "api_key": "sk-vlm",
+                    "base_url": "https://opencode.ai/v1",
+                    "modalities": ["text", "image"],
+                },
+            }
+        )
+
+        mgr = LLMManager.build(cfg)
+
+        assert isinstance(mgr.get("main"), OpenAICompatProvider)
+        assert isinstance(mgr.get("fast"), OpenAICompatProvider)
+        assert isinstance(mgr.get("vlm"), OpenAICompatProvider)
+        assert mgr.get("fast")._model == "deepseek-v4-flash"
+        assert mgr.get("vlm")._model == "vision-model"
+        assert mgr.router._role_map == {
+            "fast": "direct:fast",
+            "vlm": "direct:vlm",
+            "main": "main",
+        }
+
+    def test_explicit_role_overrides_direct_role_endpoint(self):
+        cfg = ModelConfig._from_raw(
+            {
+                "main": {"model": "main", "api_key": "sk-main", "base_url": "https://a"},
+                "fast": {"model": "direct-fast", "api_key": "sk-fast", "base_url": "https://a"},
+                "providers": {
+                    "override": {
+                        "model": "override-fast",
+                        "api_key": "sk-override",
+                        "base_url": "https://b",
+                    }
+                },
+                "roles": {"fast": {"provider": "override"}},
+            }
+        )
+
+        mgr = LLMManager.build(cfg)
+
+        assert mgr.get("fast")._model == "override-fast"
+        assert mgr.router._role_map["fast"] == "override"
+
     def test_multi_role_routing(self):
         mgr = LLMManager.build(_multi_cfg())
         assert isinstance(mgr.get("main"), AnthropicProvider)
@@ -121,6 +180,19 @@ class TestCreateProvider:
 
 
 class TestConfigResolveRole:
+    def test_resolve_direct_role_endpoint(self):
+        cfg = ModelConfig._from_raw(
+            {
+                "main": {"model": "main", "api_key": "sk-main", "base_url": "https://a"},
+                "fast": {"model": "fast", "api_key": "sk-fast", "base_url": "https://b"},
+            }
+        )
+
+        key, ep = cfg.resolve_role("fast")
+
+        assert key == "direct:fast"
+        assert ep.model == "fast"
+
     def test_resolve_role_overrides_model(self):
         cfg = _multi_cfg()
         key, ep = cfg.resolve_role("main")

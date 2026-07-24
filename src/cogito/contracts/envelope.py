@@ -234,8 +234,6 @@ class ChannelEnvelope:
             ),
             metadata=data.get("metadata", {}),
         )
-
-
 # ─── AgentRequest / AgentReply ───
 
 
@@ -480,75 +478,3 @@ class CommandEnvelope:
         )
 
 
-# ─── EventEnvelope ───
-
-
-@dataclass
-class EventEnvelope:
-    """事件信封。"""
-
-    schema_version: str = "1.0"
-    event_id: str = ""
-    event_type: str = ""
-    source: str = ""
-    aggregate_type: str = ""
-    aggregate_id: str = ""
-    aggregate_version: int = 1
-    occurred_at: str = ""
-    ingested_at: str | None = None
-    payload_ref: str | None = None
-    content_hash: str = ""
-    trust_label: str = "unverified"
-    origin: str = "system"
-    correlation_id: str = ""
-    causation_id: str = ""
-    trace_context: TraceContext | None = None
-
-    def __post_init__(self) -> None:
-        if not self.event_id:
-            self.event_id = uuid.uuid4().hex
-        if not self.occurred_at:
-            self.occurred_at = datetime.now(UTC).isoformat()
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "schema_version": self.schema_version,
-            "event_id": self.event_id,
-            "event_type": self.event_type,
-            "source": self.source,
-            "aggregate_type": self.aggregate_type,
-            "aggregate_id": self.aggregate_id,
-            "aggregate_version": self.aggregate_version,
-            "occurred_at": self.occurred_at,
-            "ingested_at": self.ingested_at,
-            "payload_ref": self.payload_ref,
-            "content_hash": self.content_hash,
-            "trust_label": self.trust_label,
-            "origin": self.origin,
-            "correlation_id": self.correlation_id,
-            "causation_id": self.causation_id,
-            "trace_context": self.trace_context.to_dict() if self.trace_context else None,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> EventEnvelope:
-        return cls(
-            schema_version=data.get("schema_version", "1.0"),
-            event_id=data.get("event_id", ""),
-            event_type=data.get("event_type", ""),
-            source=data.get("source", ""),
-            aggregate_type=data.get("aggregate_type", ""),
-            aggregate_id=data.get("aggregate_id", ""),
-            aggregate_version=data.get("aggregate_version", 1),
-            occurred_at=data.get("occurred_at", ""),
-            ingested_at=data.get("ingested_at"),
-            payload_ref=data.get("payload_ref"),
-            content_hash=data.get("content_hash", ""),
-            trust_label=data.get("trust_label", "unverified"),
-            origin=data.get("origin", "system"),
-            correlation_id=data.get("correlation_id", ""),
-            causation_id=data.get("causation_id", ""),
-            trace_context=(
-                TraceContext.from_dict(data["trace_context"]) if data.get("trace_context") else None
-            ),
-        )

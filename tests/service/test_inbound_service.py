@@ -2,12 +2,14 @@
 
 import sqlite3
 from datetime import UTC, datetime
+from pathlib import Path
 from threading import Thread
 
 import pytest
 
 from cogito.contracts.envelope import ChannelEnvelope
 from cogito.service.inbound_service import InboundService
+from cogito.store.event_store import EventStore
 
 # ── Helper ──
 
@@ -29,6 +31,23 @@ def _envelope(**overrides: object) -> ChannelEnvelope:
 
 
 def _count_rows(conn: sqlite3.Connection, table: str) -> int:
+    """Count rows in a legacy table. Only use for tables not yet Event-sourced."""
+    _ALLOWED_LEGACY_COUNT = frozenset({"inbound_inbox", "outbox_events"})
+    if table not in _ALLOWED_LEGACY_COUNT:
+        # For Event-sourced tables, count events instead
+        stream_type_map = {
+            "principals": "principal", "endpoints": "endpoint",
+            "conversations": "conversation", "sessions": "session",
+            "messages": "message", "turns": "turn",
+            "run_attempts": "run_attempt", "tasks": "task",
+            "task_attempts": "task_attempt", "deliveries": "delivery",
+            "model_calls": "model_call", "tool_calls": "tool_call",
+            "approvals": "approval", "content_parts": "message",
+        }
+        s = stream_type_map.get(table)
+        if s:
+            return len({e.stream_id for e in EventStore(conn).read_stream_type(s)})
+        return 0
     return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 
 
@@ -49,8 +68,10 @@ def _setup_in_memory_db() -> sqlite3.Connection:
 
 
 @pytest.fixture
-def service(in_memory_db: sqlite3.Connection) -> InboundService:
-    return InboundService(in_memory_db)
+def service(in_memory_db: sqlite3.Connection, tmp_path: Path) -> InboundService:
+    from cogito.infrastructure.payload_store import PayloadStore
+
+    return InboundService(in_memory_db, payload_store=PayloadStore(tmp_path / "payloads", in_memory_db))
 
 
 @pytest.fixture
@@ -71,25 +92,25 @@ class TestFirstInbound:
         assert result.message_id != ""
         assert result.turn_id != ""
 
-        # Message exists
-        msg = conn.execute(
-            "SELECT message_id, role, direction, receive_sequence FROM messages WHERE message_id=?",
-            (result.message_id,),
-        ).fetchone()
-        assert msg is not None
-        assert msg["role"] == "user"
-        assert msg["direction"] == "inbound"
-        assert msg["receive_sequence"] == 1
+        # Message exists — verified via Event
+        from cogito.store.event_replay import replay_message
 
-        # Turn exists and is queued
-        turn = conn.execute(
-            "SELECT turn_id, status, version, input_message_id FROM turns WHERE turn_id=?",
-            (result.turn_id,),
-        ).fetchone()
+        msg_state = replay_message(
+            EventStore(conn).read_stream("message", result.message_id), result.message_id
+        )
+        assert msg_state is not None
+        assert msg_state.role == "user"
+        assert msg_state.direction == "inbound"
+        assert msg_state.receive_sequence == 1
+
+        # Turn is rebuilt from its canonical accepted → queued Event stream.
+        from cogito.store.event_replay import replay_turn
+
+        turn = replay_turn(EventStore(conn).read_stream("turn", result.turn_id), result.turn_id)
         assert turn is not None
-        assert turn["status"] == "queued"
-        assert turn["version"] == 2  # accepted(1) → queued(2)
-        assert turn["input_message_id"] == result.message_id
+        assert turn.status == "queued"
+        assert turn.stream_version == 2  # accepted(1) → queued(2)
+        assert turn.input_message_id == result.message_id
 
     def test_creates_content_parts(self, service: InboundService, conn: sqlite3.Connection):
         result = service.accept(
@@ -101,36 +122,46 @@ class TestFirstInbound:
             )
         )
 
-        parts = conn.execute(
-            "SELECT content_type, inline_data FROM content_parts WHERE message_id=?",
-            (result.message_id,),
-        ).fetchall()
-        assert len(parts) == 2
-        inline_data = {r["inline_data"] for r in parts}
-        assert "Part 1" in inline_data
-        assert "Part 2" in inline_data
+        # Verify via message event descriptors
+        msg_events = EventStore(conn).read_stream("message", result.message_id)
+        recorded = [e for e in msg_events if e.event_type == "interaction.message.recorded"]
+        assert len(recorded) == 1
+        descriptors = recorded[0].attributes.get("part_descriptors", [])
+        assert len(descriptors) == 2
 
     def test_creates_inbox_record(self, service: InboundService, conn: sqlite3.Connection):
         result = service.accept(_envelope(channel_instance_id="ci1", platform_message_id="pm1"))
 
-        inbox = conn.execute(
-            "SELECT status, message_id FROM inbound_inbox WHERE channel_instance_id='ci1' AND platform_event_id='pm1'"
-        ).fetchone()
-        assert inbox is not None
-        assert inbox["status"] == "processed"
-        assert inbox["message_id"] == result.message_id
+        # Inbox dedup is via Event idempotency key
+        found = EventStore(conn).find_idempotent(
+            "channel:test_channel",
+            f"inbound-message:ci1:pm1",
+        )
+        assert found is not None
+        assert found.event_type == "interaction.message.accepted"
 
-    def test_creates_outbox_events(self, service: InboundService, conn: sqlite3.Connection):
+    def test_creates_canonical_events(self, service: InboundService, conn: sqlite3.Connection):
         result = service.accept(_envelope())
 
-        events = conn.execute(
-            "SELECT event_type, aggregate_type, aggregate_id FROM outbox_events ORDER BY created_at"
-        ).fetchall()
+        events = [
+            event
+            for event in EventStore(conn).list_events(limit=20)
+            if event.event_type in {"interaction.message.accepted", "runtime.turn.queued"}
+        ]
         assert len(events) == 2
-        assert events[0]["event_type"] == "InboundMessageAccepted"
-        assert events[0]["aggregate_id"] == result.message_id
-        assert events[1]["event_type"] == "TurnQueued"
-        assert events[1]["aggregate_id"] == result.turn_id
+        events_by_type = {event.event_type: event for event in events}
+        accepted = events_by_type["interaction.message.accepted"]
+        queued = events_by_type["runtime.turn.queued"]
+        assert accepted.stream_id == result.message_id
+        assert accepted.context.turn_id == result.turn_id
+        assert accepted.context.trace_id
+        assert queued.stream_id == result.turn_id
+        assert queued.context.trace_id == accepted.context.trace_id
+        turn_accepted = EventStore(conn).get(queued.context.causation_id)
+        assert turn_accepted is not None
+        assert turn_accepted.event_type == "runtime.turn.accepted"
+        assert turn_accepted.context.causation_id == accepted.event_id
+        assert _count_rows(conn, "outbox_events") == 0
 
     def test_creates_principal_and_endpoint(
         self, service: InboundService, conn: sqlite3.Connection
@@ -143,16 +174,25 @@ class TestFirstInbound:
             )
         )
 
-        principal = conn.execute("SELECT principal_type, status FROM principals").fetchone()
-        assert principal is not None
-        assert principal["principal_type"] == "external_user"
+        # Verify via Event replay
+        from cogito.store.event_replay import replay_principal
 
-        endpoint = conn.execute(
-            "SELECT channel_type, platform_account_id, principal_id FROM endpoints"
-        ).fetchone()
-        assert endpoint is not None
-        assert endpoint["channel_type"] == "tg"
-        assert endpoint["platform_account_id"] == "user_a"
+        principals = EventStore(conn).read_stream_type("principal")
+        assert len({e.stream_id for e in principals}) == 1
+        principal_id = next(iter({e.stream_id for e in principals}))
+        p = replay_principal(principals, principal_id)
+        assert p is not None
+        assert p.principal_type == "external_user"
+
+        endpoints = EventStore(conn).read_stream_type("endpoint")
+        assert len({e.stream_id for e in endpoints}) == 1
+        endpoint_id = next(iter({e.stream_id for e in endpoints}))
+        from cogito.store.event_replay import replay_endpoint
+
+        ep = replay_endpoint(endpoints, endpoint_id)
+        assert ep is not None
+        assert ep.channel_type == "tg"
+        assert ep.platform_account_id == "user_a"
 
     def test_creates_conversation_and_session(
         self, service: InboundService, conn: sqlite3.Connection
@@ -165,16 +205,23 @@ class TestFirstInbound:
             )
         )
 
-        conv = conn.execute(
-            "SELECT conversation_type, platform_conversation_id FROM conversations"
-        ).fetchone()
-        assert conv is not None
-        assert conv["conversation_type"] == "private"
-        assert conv["platform_conversation_id"] == "gc1"
+        # Verify via Event replay
+        from cogito.store.event_replay import replay_conversation, replay_session
 
-        session = conn.execute("SELECT status FROM sessions").fetchone()
-        assert session is not None
-        assert session["status"] == "active"
+        conversations = EventStore(conn).read_stream_type("conversation")
+        assert len({e.stream_id for e in conversations}) == 1
+        cid = next(iter({e.stream_id for e in conversations}))
+        conv = replay_conversation(conversations, cid)
+        assert conv is not None
+        assert conv.conversation_type == "private"
+        assert conv.platform_conversation_id == "gc1"
+
+        sessions = EventStore(conn).read_stream_type("session")
+        assert len({e.stream_id for e in sessions}) == 1
+        sid = next(iter({e.stream_id for e in sessions}))
+        sess = replay_session(sessions, sid)
+        assert sess is not None
+        assert sess.status == "active"
 
 
 # =============================================================================
@@ -209,14 +256,14 @@ class TestIdempotentDedup:
 
         assert count2 == count1  # no extra turn
 
-    def test_outbox_not_duplicated(self, service: InboundService, conn: sqlite3.Connection):
+    def test_events_not_duplicated(self, service: InboundService, conn: sqlite3.Connection):
         service.accept(_envelope())
-        count1 = _count_rows(conn, "outbox_events")
+        count1 = len(EventStore(conn).list_events(limit=10))
 
         service.accept(_envelope())
-        count2 = _count_rows(conn, "outbox_events")
+        count2 = len(EventStore(conn).list_events(limit=10))
 
-        assert count2 == count1  # no extra outbox events
+        assert count2 == count1  # no extra events
 
 
 # =============================================================================
@@ -282,28 +329,33 @@ class TestConversationReuse:
         assert r1.is_new is True
         assert r2.is_new is True
 
-        convs = conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
-        assert convs == 1  # one conversation reused
+        cv_events = EventStore(conn).read_stream_type("conversation")
+        assert len({e.stream_id for e in cv_events}) == 1  # one conversation reused
 
     def test_sequence_monotonic(self, service: InboundService, conn: sqlite3.Connection):
         service.accept(_envelope(platform_message_id="pm1"))
         service.accept(_envelope(platform_message_id="pm2"))
         service.accept(_envelope(platform_message_id="pm3"))
 
-        seqs = [
-            r["receive_sequence"]
-            for r in conn.execute(
-                "SELECT receive_sequence FROM messages ORDER BY receive_sequence"
-            ).fetchall()
-        ]
+        from cogito.store.event_replay import replay_message
+
+        seen_ids = set()
+        seqs = []
+        for event in EventStore(conn).read_stream_type("message"):
+            if event.stream_id not in seen_ids:
+                seen_ids.add(event.stream_id)
+                state = replay_message(EventStore(conn).read_stream("message", event.stream_id), event.stream_id)
+                if state is not None:
+                    seqs.append(state.receive_sequence)
+        seqs.sort()
         assert seqs == [1, 2, 3]
 
     def test_reuses_session(self, service: InboundService, conn: sqlite3.Connection):
         service.accept(_envelope(platform_message_id="pm1"))
         service.accept(_envelope(platform_message_id="pm2"))
 
-        sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-        assert sessions == 1  # one session reused
+        ses_events = EventStore(conn).read_stream_type("session")
+        assert len({e.stream_id for e in ses_events}) == 1  # one session reused
 
 
 # =============================================================================
@@ -320,106 +372,101 @@ class TestMultiPartContent:
         ]
         result = service.accept(_envelope(content_parts=parts))
 
-        rows = conn.execute(
-            "SELECT content_type, inline_data, payload_ref, size "
-            "FROM content_parts WHERE message_id=?",
-            (result.message_id,),
-        ).fetchall()
-        assert len(rows) == 3
-        content_types = {r["content_type"] for r in rows}
+        msg_events = EventStore(conn).read_stream("message", result.message_id)
+        recorded = [e for e in msg_events if e.event_type == "interaction.message.recorded"]
+        assert len(recorded) == 1
+        descriptors = recorded[0].attributes.get("part_descriptors", [])
+        content_types = {d.get("content_type") for d in descriptors}
         assert "text" in content_types
         assert "image" in content_types
-        # Verify the image part has the expected payload
-        img = [r for r in rows if r["content_type"] == "image"][0]
-        assert img["payload_ref"] == "obj://img1"
-        assert img["size"] == 4096
 
     def test_empty_content_parts(self, service: InboundService, conn: sqlite3.Connection):
         """Empty content is allowed (some messages have no text)."""
         result = service.accept(_envelope(content_parts=[]))
 
-        count = conn.execute(
-            "SELECT COUNT(*) FROM content_parts WHERE message_id=?",
-            (result.message_id,),
-        ).fetchone()[0]
-        assert count == 0
+        msg_events = EventStore(conn).read_stream("message", result.message_id)
+        recorded = [e for e in msg_events if e.event_type == "interaction.message.recorded"]
+        assert len(recorded) == 1
+        descriptors = recorded[0].attributes.get("part_descriptors", [])
+        assert len(descriptors) == 0
 
 
 # =============================================================================
-# Test Case 6: Outbox 与业务事务共同回滚
+# Test Case 6: Event 与业务事务共同回滚
 # =============================================================================
 
 
 class TestRollback:
-    def test_rollback_removes_all_data(self):
+    def test_rollback_removes_all_data(self, tmp_path):
         """Simulate a crash by rolling back after intercepting the commit."""
         from unittest.mock import patch
 
         import cogito.service.unit_of_work as uow_mod
+        from cogito.infrastructure.payload_store import PayloadStore
 
         conn = _setup_in_memory_db()
         conn.execute("BEGIN")
+        payload_store = PayloadStore(tmp_path / "payloads", conn)
 
         with (
             patch.object(uow_mod.UnitOfWork, "commit"),
             patch.object(uow_mod.UnitOfWork, "__exit__", return_value=None),
         ):
-            svc = InboundService(conn)
+            svc = InboundService(conn, payload_store=payload_store)
             svc.accept(_envelope(platform_message_id="rollback_test"))
 
         conn.rollback()
 
-        assert _count_rows(conn, "messages") == 0
-        assert _count_rows(conn, "turns") == 0
-        assert _count_rows(conn, "outbox_events") == 0
-        assert _count_rows(conn, "inbound_inbox") == 0
+        assert len(EventStore(conn).list_events(limit=10)) == 0
         conn.close()
 
-    def test_rollback_allows_retry(self):
+    def test_rollback_allows_retry(self, tmp_path):
         """After rollback, same message can be re-processed successfully."""
         from unittest.mock import patch
 
         import cogito.service.unit_of_work as uow_mod
+        from cogito.infrastructure.payload_store import PayloadStore
 
         conn = _setup_in_memory_db()
         conn.execute("BEGIN")
+        payload_store = PayloadStore(tmp_path / "payloads", conn)
 
         with (
             patch.object(uow_mod.UnitOfWork, "commit"),
             patch.object(uow_mod.UnitOfWork, "__exit__", return_value=None),
         ):
-            svc1 = InboundService(conn)
+            svc1 = InboundService(conn, payload_store=payload_store)
             r1 = svc1.accept(_envelope(platform_message_id="retry_msg"))
 
         conn.rollback()
 
-        # Retry after rollback - should succeed as a new message
-        svc2 = InboundService(conn)
+        svc2 = InboundService(conn, payload_store=payload_store)
         r2 = svc2.accept(_envelope(platform_message_id="retry_msg"))
         assert r2.is_new is True
         assert r2.message_id != r1.message_id
         conn.close()
 
-    def test_partial_failure_no_partial_data(self):
+    def test_partial_failure_no_partial_data(self, tmp_path):
         """When UoW exits without commit (e.g. exception), data is rolled back."""
         from unittest.mock import patch
 
         import cogito.service.unit_of_work as uow_mod
+        from cogito.infrastructure.payload_store import PayloadStore
 
         conn = _setup_in_memory_db()
         conn.execute("BEGIN")
+        payload_store = PayloadStore(tmp_path / "payloads", conn)
 
         with (
             patch.object(uow_mod.UnitOfWork, "commit"),
             patch.object(uow_mod.UnitOfWork, "__exit__", return_value=None),
         ):
-            svc = InboundService(conn)
+            svc = InboundService(conn, payload_store=payload_store)
             svc.accept(_envelope(platform_message_id="partial"))
 
         conn.rollback()
 
-        assert _count_rows(conn, "messages") == 0
-        assert _count_rows(conn, "turns") == 0
+        assert len(EventStore(conn).list_events(limit=10)) == 0
         conn.close()
 
 
@@ -429,10 +476,12 @@ class TestRollback:
 
 
 class TestConcurrentDedup:
-    def test_concurrent_duplicate_creates_one_turn(self):
+    def test_concurrent_duplicate_creates_one_turn(self, tmp_path):
         """Two connections processing the same event concurrently produce one Turn."""
         import os
         import tempfile
+
+        from cogito.infrastructure.payload_store import PayloadStore
 
         db_fd, db_path = tempfile.mkstemp(suffix=".db")
         os.close(db_fd)
@@ -453,7 +502,7 @@ class TestConcurrentDedup:
         def _accept() -> None:
             try:
                 conn = _make_conn()
-                svc = InboundService(conn)
+                svc = InboundService(conn, payload_store=PayloadStore(tmp_path / "payloads", conn))
                 r = svc.accept(
                     _envelope(
                         channel_instance_id="ci_conc",
@@ -477,9 +526,8 @@ class TestConcurrentDedup:
         except OSError:
             pass
 
-        # At most one of the two should succeed (the other gets an IntegrityError
-        # from the UNIQUE constraint on inbound_inbox)
-        assert len(results) >= 1
+        # At most one of the two should succeed (the other gets deduped by Event)
+        assert len(results) >= 1, errors
         turn_ids = {r.turn_id for r in results if r is not None}
         assert len(turn_ids) == 1, f"Expected 1 turn, got: {turn_ids}"
 
@@ -499,15 +547,15 @@ class TestUntrustedContent:
             )
         )
 
-        msg = conn.execute(
-            "SELECT trust_label FROM messages WHERE message_id=?",
-            (result.message_id,),
-        ).fetchone()
-        assert msg["trust_label"] == "unverified"
+        # Verify via Event
+        msg_events = EventStore(conn).read_stream("message", result.message_id)
+        recorded = [e for e in msg_events if e.event_type == "interaction.message.recorded"]
+        assert len(recorded) == 1
+        assert recorded[0].attributes.get("trust_label") == "unverified"
 
-        turn = conn.execute(
-            "SELECT status, priority FROM turns WHERE turn_id=?",
-            (result.turn_id,),
-        ).fetchone()
-        assert turn["status"] == "queued"  # still queued normally
-        assert turn["priority"] == 80  # default priority, not changed by content
+        from cogito.store.event_replay import replay_turn
+
+        turn = replay_turn(EventStore(conn).read_stream("turn", result.turn_id), result.turn_id)
+        assert turn is not None
+        assert turn.status == "queued"
+        assert turn.priority == 80

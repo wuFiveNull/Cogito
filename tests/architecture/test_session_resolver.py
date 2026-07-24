@@ -64,6 +64,8 @@ def test_resolver_creates_new_session(db: Any) -> None:
     assert res.session_id
     assert res.is_new_generation is True
     assert "principal:owner" in res.context_partition_key
+    assert db.execute("SELECT COUNT(*) FROM conversations").fetchone()[0] == 0
+    assert db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
 
 
 def test_resolver_reuses_existing_session(db: Any) -> None:

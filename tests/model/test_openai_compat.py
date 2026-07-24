@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import httpx
 import pytest
@@ -129,6 +130,28 @@ class TestSuccess:
         assert sent_payload.get("temperature") == 0.7
         assert sent_payload.get("model") == "test-model"
         assert sent_payload.get("stream") is False
+
+
+class TestHealth:
+    @pytest.mark.asyncio
+    async def test_unhealthy_result_uses_short_cache_then_rechecks(self):
+        provider = _make_provider(
+            [
+                httpx.Response(status_code=503, text="temporarily unavailable"),
+                httpx.Response(status_code=200, json={"data": []}),
+            ]
+        )
+
+        first = await provider.health()
+        assert first.healthy is False
+
+        # 模拟短失败缓存到期；不应等待成功检查的 30 秒 TTL。
+        provider._health_cache = (
+            first,
+            time.monotonic() - provider.UNHEALTHY_CACHE_TTL_S - 0.1,
+        )
+        second = await provider.health()
+        assert second.healthy is True
 
 
 # =============================================================================

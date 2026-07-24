@@ -124,16 +124,16 @@ function ConnectorDetail({ connectorId, onBack }: { connectorId: string; onBack:
 
       {/* Events */}
       {events.length > 0 && (
-        <Section title="Outbox 事件" subtitle={`${events.length} 条`}>
+        <Section title="关联事件" subtitle={`${events.length} 条`}>
           <div className="space-y-1.5">
             {events.map((e) => (
               <div key={String(e.event_id)} className="flex items-center justify-between rounded-xl border border-borderc bg-surface-2 p-3 text-xs">
                 <div className="flex items-center gap-2">
-                  <StatusPill status={String(e.status)} />
+                  <StatusPill status={String(e.outcome || "recorded")} />
                   <span className="font-mono text-ink">{String(e.event_type)}</span>
-                  <span className="text-muted">{e.status === "dead_letter" ? `· ${e.dead_letter_reason || ""}` : ""}</span>
+                  <span className="text-muted">{e.summary ? `· ${String(e.summary)}` : ""}</span>
                 </div>
-                <span className="text-muted">{fmtTime(e.created_at)}</span>
+                <span className="text-muted">{fmtTime(e.occurred_at)}</span>
               </div>
             ))}
           </div>

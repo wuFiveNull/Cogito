@@ -168,15 +168,10 @@ function DeliveryDetail({ deliveryId, onBack }: { deliveryId: string; onBack: ()
       )}
 
       {/* 操作 */}
-      {(d.status === "failed" || d.status === "cancelled" || d.status === "unknown") && (
+      {d.status === "unknown" && (
         <Section title="操作">
           <div className="flex flex-wrap gap-2">
-            {d.status === "unknown" && (
-              <CommandButton onClick={reconcile}>对账（标记为已送达）</CommandButton>
-            )}
-            <CommandButton variant="ghost" onClick={() => api.command("replay-delivery", { delivery_id: deliveryId }).then((r) => setMsg(r.message)).catch((e) => setMsg(String(e)))}>
-              重放投递
-            </CommandButton>
+            <CommandButton onClick={reconcile}>对账（标记为已送达）</CommandButton>
           </div>
         </Section>
       )}
@@ -191,16 +186,6 @@ export default function DeliveriesPage() {
   const [msg, setMsg] = useState<string | null>(null);
   const [offset, setOffset] = useState(0);
   const deliveries = useAsync(() => api.deliveries({ limit: PAGE_SIZE, offset }), [offset]);
-
-  const replay = async (id: string) => {
-    try {
-      const r = await api.command("replay-delivery", { delivery_id: id });
-      setMsg(r.message);
-      deliveries.reload();
-    } catch (e) {
-      setMsg(`重放失败：${e instanceof Error ? e.message : "未知错误"}`);
-    }
-  };
 
   const items = deliveries.data?.items ?? [];
   const total = deliveries.data?.total ?? 0;
@@ -249,13 +234,6 @@ export default function DeliveriesPage() {
                       {d.last_error != null && String(d.last_error) !== "" && <span className="text-danger"> · 错误：{String(d.last_error)}</span>}
                       {String(d.content_mode ?? "final") === "streaming" && <span className="text-warn"> · 流式</span>}
                     </div>
-                  </div>
-                  <div className="flex shrink-0 gap-1">
-                    {(d.status === "failed" || d.status === "cancelled" || d.status === "unknown") && (
-                      <CommandButton variant="ghost" onClick={() => replay(String(d.delivery_id))}>
-                        {d.status === "unknown" ? "对账" : "重放"}
-                      </CommandButton>
-                    )}
                   </div>
                 </div>
               </div>

@@ -78,7 +78,7 @@ class ToolExecutor:
         self._registry = registry
         self._policy = policy or ToolPolicy()
         self._sink = sink  # ToolCallSink — 由组合根注入
-        self._on_event = on_event  # DomainEvent 回调（D8）
+        self._on_event = on_event  # Event metadata callback (D8)
         self._auto_mode = auto_mode
         self._approval_service = approval_service
         self._payload_store = payload_store

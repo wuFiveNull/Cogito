@@ -1,7 +1,7 @@
 """M3: DriftAdmissionService 全局 idle admission 测试。
 
 Admission 矩阵 (PROACTIVE-IDLE / 9):
-active_turn, priority_backlog, delivery_backlog, outbox_critical,
+active_turn, priority_backlog, delivery_backlog, pending-delivery critical age,
 recovery_in_progress, budget_exhausted, not_idle_long_enough,
 drift_already_active → 各 deny；全满足 → admit。
 
@@ -17,6 +17,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from cogito.service.drift_admission import admit
+from cogito.domain.event import Event, EventClass
+from cogito.store.event_store import EventStore
 from cogito.store.migration import migrate
 
 
@@ -88,23 +90,33 @@ def _seed_drift_run(conn, run_id, task_id=None, status="completed"):
 
 def _seed_delivery(conn, status="pending"):
     did = _uniq("del")
-    conn.execute(
-        "INSERT INTO deliveries (delivery_id, status, idempotency_key, created_at) "
-        "VALUES (?,?,?,?)",
-        (did, status, f"idem-{did}", int(time.time() * 1000)),
+    EventStore(conn).append(
+        Event(
+            event_type="delivery.requested",
+            stream_type="delivery",
+            stream_id=did,
+            producer="test-drift-admission",
+            event_class=EventClass.DOMAIN,
+            outcome=status,
+            occurred_at=int(time.time() * 1000),
+        )
     )
     conn.commit()
 
 
-def _seed_outbox(conn, age_ms=0):
-    eid = _uniq("evt")
+def _seed_pending_delivery(conn, age_ms=0):
+    delivery_id = _uniq("critical-delivery")
     created = int(time.time() * 1000) - age_ms
-    conn.execute(
-        "INSERT INTO outbox_events "
-        "(event_id, event_type, aggregate_type, aggregate_id, "
-        " status, created_at) "
-        "VALUES (?,?,?,?,?,?)",
-        (eid, "TestEvent", "test", "agg-1", "pending", created),
+    EventStore(conn).append(
+        Event(
+            event_type="delivery.requested",
+            stream_type="delivery",
+            stream_id=delivery_id,
+            producer="test-drift-admission",
+            event_class=EventClass.DOMAIN,
+            outcome="pending",
+            occurred_at=created,
+        )
     )
     conn.commit()
 
@@ -165,18 +177,19 @@ class TestAdmissionMatrix:
         assert r.admit is False
         assert "delivery_backlog" in r.reasons
 
-    def test_outbox_critical_denies(self, memory_db):
-        """pending outbox age >= 阈值 → deny。"""
-        _seed_outbox(memory_db, age_ms=10_000)  # 10s > 默认 5s 阈值
+    def test_critical_pending_delivery_denies(self, memory_db):
+        """Pending delivery age >= 阈值 → deny，不依赖 Outbox。"""
+        _seed_pending_delivery(memory_db, age_ms=10_000)  # 10s > 默认 5s 阈值
         r = admit(memory_db)
         assert r.admit is False
         assert "outbox_critical" in r.reasons
 
-    def test_outbox_fresh_does_not_block(self, memory_db):
-        """pending outbox age < 阈值 → 不因此 deny。"""
-        _seed_outbox(memory_db, age_ms=1_000)  # 1s < 5s
+    def test_fresh_pending_delivery_does_not_block(self, memory_db):
+        """Fresh pending delivery triggers backlog, but not critical-age denial。"""
+        _seed_pending_delivery(memory_db, age_ms=1_000)  # 1s < 5s
         r = admit(memory_db)
-        assert r.admit is True
+        assert "delivery_backlog" in r.reasons
+        assert "outbox_critical" not in r.reasons
 
     def test_budget_exhausted_denies(self, memory_db):
         """当日 run 数已达 max → deny。"""

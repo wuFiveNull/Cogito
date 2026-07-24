@@ -20,7 +20,9 @@ import asyncio
 import json
 import logging
 import sqlite3
+from dataclasses import replace
 from enum import StrEnum
+from typing import Any
 
 _LOGGER = logging.getLogger("cogito.agent_runner")
 
@@ -30,6 +32,7 @@ from cogito.capability.executor import ToolExecutor
 from cogito.config import Config, ModelConfig
 from cogito.contracts.clock import Clock, ProductionClock, epoch_ms
 from cogito.contracts.context import ContextBuilder
+from cogito.domain.event import Event, EventClass, EventContext
 from cogito.model.llm_manager import LLMManager, create_provider
 from cogito.model.provider import ModelProvider
 from cogito.model.router import ModelRouter
@@ -42,7 +45,11 @@ from cogito.service.streaming_delivery import (
     StreamInputMeta,
     StreamPolicy,
 )
+from cogito.store.connection import get_connection
+from cogito.store.event_message_reader import EventMessageReader
 from cogito.store.model_call_repo import ModelCallRecord, ModelCallRepository
+from cogito.store.event_store import EventStore
+from cogito.store.event_replay import replay_run_attempt, replay_turn
 
 # ── 默认模式-Toolset 映射 (AGENT-COGNITION / 2.2) ──
 
@@ -77,6 +84,33 @@ def _parse_json(value: Any) -> dict:
     except (json.JSONDecodeError, TypeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _model_call_connection_factory(
+    conn: sqlite3.Connection,
+) -> callable | None:
+    """Create short-lived audit connections for file-backed SQLite databases.
+
+    ModelRouter invokes its completion callback after every provider request.
+    Keeping the audit ``INSERT`` on the long-lived application connection leaves
+    an implicit SQLite write transaction open until some unrelated code commits.
+    That blocks background handlers (notably ``memory.extract``) which correctly
+    use their own short-lived write connection.
+
+    An in-memory connection cannot be reopened, so callers retain the shared
+    connection fallback in that case; file-backed production databases get an
+    independent connection per audit record.
+    """
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+    except sqlite3.Error:
+        return None
+
+    for row in rows:
+        if row[1] == "main" and row[2]:
+            db_path = str(row[2])
+            return lambda: get_connection(db_path)
+    return None
 
 
 class RunOutcome(StrEnum):
@@ -118,6 +152,7 @@ class AgentRunner:
         knowledge_top_k: int = 8,
         knowledge_budget_ratio: float = 0.20,
         agent_mode: str = "reactive",
+        effect_payload_store: Any | None = None,
     ) -> None:
         self._conn = conn
         self._router = router
@@ -131,11 +166,18 @@ class AgentRunner:
         self._toolsets = toolsets or set()
 
         self._dispatcher = Dispatcher(conn, clock=self._clock)
+        self._payload_store = effect_payload_store
+        self._message_reader = (
+            EventMessageReader(conn, effect_payload_store)
+            if effect_payload_store is not None
+            else None
+        )
         self._context_builder = ContextBuilder(
             conn,
             clock=self._clock,
             max_input_tokens=max_input_tokens,
             memory_reader=memory_service,
+            message_reader=self._message_reader,
             multimodal_reader=multimodal_reader,
             knowledge_reader=knowledge_reader,
             knowledge_top_k=knowledge_top_k,
@@ -144,10 +186,11 @@ class AgentRunner:
         self._vision_service = vision_service
         # 记录每次 Provider 调用到 model_calls（可观察性 / 链路追踪）
         self._model_call_repo = ModelCallRepository(conn)
+        self._model_call_connection_factory = _model_call_connection_factory(conn)
         router._on_call_completed = self._record_model_call
         from cogito.store.checkpoint_repo import CheckpointRepository
 
-        checkpoint_repo = CheckpointRepository(conn)
+        checkpoint_repo = CheckpointRepository(conn, payload_store=effect_payload_store)
         self._loop = AgentLoop(
             router,
             registry=registry,
@@ -160,7 +203,12 @@ class AgentRunner:
             checkpoint_loader=checkpoint_repo.load_latest,
             agent_mode=agent_mode,
         )
-        self._completion = TurnCompletionService(conn, clock=self._clock)
+        self._completion = TurnCompletionService(
+            conn,
+            clock=self._clock,
+            effect_payload_store=effect_payload_store,
+            message_payload_store=effect_payload_store,
+        )
         # ── Plan 05 M4：流式投递依赖（由组合根注入）──
         self.channel_gateway = channel_gateway
         self.channel_manager = channel_manager
@@ -210,6 +258,7 @@ class AgentRunner:
             input_message_id=turn.input_message_id,
             system_policy=self._system_prompt,
         )
+        context = self._attach_event_context(context, turn, attempt)
         self._persist_context_snapshot(context, attempt)
         _bench_timing.checkpoint("context:built")
 
@@ -397,21 +446,20 @@ class AgentRunner:
 
     def _read_stream_input_meta(self, turn: Any) -> StreamInputMeta | None:
         """读取输入消息元数据，构造 StreamInputMeta。"""
-        row = self._conn.execute(
-            "SELECT conversation_id, session_id, sender_principal_id, "
-            "sender_endpoint_id, reply_route_json, capability_snapshot_json "
-            "FROM messages WHERE message_id=?",
-            (turn.input_message_id,),
-        ).fetchone()
+        if self._message_reader is None:
+            return None
+        row = self._message_reader.get(turn.input_message_id)
         if row is None:
             return None
         return StreamInputMeta(
-            conversation_id=row["conversation_id"] or "",
-            session_id=row["session_id"] or turn.session_id or "",
-            endpoint_id=row["sender_endpoint_id"] or "",
-            principal_id=row["sender_principal_id"] or "",
-            reply_route=_parse_json(row["reply_route_json"]),
-            capability_snapshot=_parse_json(row["capability_snapshot_json"]),
+            conversation_id=str(row.get("conversation_id") or ""),
+            session_id=str(row.get("session_id") or turn.session_id or ""),
+            endpoint_id=str(row.get("sender_endpoint_id") or ""),
+            principal_id=str(row.get("sender_principal_id") or ""),
+            reply_route=_parse_json(row.get("reply_route_json") or row.get("reply_route")),
+            capability_snapshot=_parse_json(
+                row.get("capability_snapshot_json") or row.get("capability_snapshot")
+            ),
             input_message_id=turn.input_message_id,
         )
 
@@ -449,6 +497,7 @@ class AgentRunner:
             clock=self._clock,
             policy=self._stream_policy or StreamPolicy(),
             dispatcher=self._dispatcher,
+            payload_store=self._payload_store,
         )
 
         cancel_check = self._make_cancel_check(turn.turn_id)
@@ -499,11 +548,7 @@ class AgentRunner:
             nonlocal cancelled
             if cancelled:
                 return True
-            row = self._conn.execute(
-                "SELECT cancel_requested_at FROM turns WHERE turn_id=?",
-                (turn_id,),
-            ).fetchone()
-            if row and row["cancel_requested_at"] is not None:
+            if self._is_cancelled(turn_id):
                 cancelled = True
                 return True
             return False
@@ -512,11 +557,8 @@ class AgentRunner:
 
     def _is_cancelled(self, turn_id: str) -> bool:
         """检查 Turn 是否已被取消。"""
-        row = self._conn.execute(
-            "SELECT cancel_requested_at FROM turns WHERE turn_id=?",
-            (turn_id,),
-        ).fetchone()
-        return bool(row and row["cancel_requested_at"] is not None)
+        state = replay_turn(EventStore(self._conn).read_stream("turn", turn_id), turn_id)
+        return bool(state and state.cancel_requested_at is not None)
 
     def _is_lease_valid(
         self,
@@ -526,14 +568,18 @@ class AgentRunner:
         lease_version: int,
     ) -> bool:
         """验证 Lease 有效性（不修改状态）。"""
-        row = self._conn.execute(
-            "SELECT 1 FROM run_attempts "
-            "WHERE attempt_id=? AND turn_id=? "
-            "AND status='running' AND worker_id=? AND lease_version=? "
-            "AND lease_expires_at IS NOT NULL AND lease_expires_at > ?",
-            (attempt_id, turn_id, worker_id, lease_version, epoch_ms(self._clock.now())),
-        ).fetchone()
-        return row is not None
+        state = replay_run_attempt(
+            EventStore(self._conn).read_stream("run_attempt", attempt_id), attempt_id
+        )
+        return bool(
+            state
+            and state.turn_id == turn_id
+            and state.status == "running"
+            and state.worker_id == worker_id
+            and state.lease_version == lease_version
+            and state.lease_expires_at is not None
+            and state.lease_expires_at > epoch_ms(self._clock.now())
+        )
 
     def _record_memory_exposed(self, context) -> None:
         """PLAN-14 R-05: 被注入 Turn 上下文的记忆 → exposed 信号（非阻塞）。"""
@@ -569,70 +615,33 @@ class AgentRunner:
 
     def _pause_for_approval(self, turn, attempt, approval_id: str) -> bool:
         """Finish the current Attempt and put its Turn in waiting_user."""
-        now = epoch_ms(self._clock.now())
         try:
-            self._conn.execute("BEGIN IMMEDIATE")
-            attempt_cur = self._conn.execute(
-                "UPDATE run_attempts SET status='succeeded', finished_at=? "
-                "WHERE attempt_id=? AND turn_id=? AND status='running' "
-                "AND worker_id=? AND lease_version=?",
-                (now, attempt.attempt_id, turn.turn_id, attempt.worker_id, attempt.lease_version),
-            )
-            turn_cur = self._conn.execute(
-                "UPDATE turns SET status='waiting_user', active_attempt_id=NULL, "
-                "version=version+1 WHERE turn_id=? AND version=? "
-                "AND status='running' AND active_attempt_id=?",
-                (turn.turn_id, turn.version, attempt.attempt_id),
-            )
-            if attempt_cur.rowcount != 1 or turn_cur.rowcount != 1:
-                self._conn.rollback()
-                return False
-            self._conn.commit()
-            _LOGGER.info(
-                "Turn %s paused for Tool approval %s",
+            return self._dispatcher.pause_for_approval(
                 turn.turn_id,
+                attempt.attempt_id,
+                turn.version,
+                attempt.worker_id,
+                attempt.lease_version,
                 approval_id,
+                clock=self._clock.now(),
             )
-            return True
         except Exception:
-            self._conn.rollback()
             _LOGGER.exception("failed to pause Turn for approval")
             return False
 
     def _pause_for_external(self, turn, attempt, waiting_id: str) -> bool:
         """Finish the Attempt and leave the Turn resumable by a join evaluator."""
-        now = epoch_ms(self._clock.now())
         try:
-            self._conn.execute("BEGIN IMMEDIATE")
-            attempt_cur = self._conn.execute(
-                "UPDATE run_attempts SET status='succeeded',finished_at=? "
-                "WHERE attempt_id=? AND turn_id=? AND status='running' "
-                "AND worker_id=? AND lease_version=?",
-                (now, attempt.attempt_id, turn.turn_id, attempt.worker_id, attempt.lease_version),
+            return self._dispatcher.pause_for_external(
+                turn.turn_id,
+                attempt.attempt_id,
+                turn.version,
+                attempt.worker_id,
+                attempt.lease_version,
+                waiting_id,
+                clock=self._clock.now(),
             )
-            turn_cur = self._conn.execute(
-                "UPDATE turns SET status='waiting_external',active_attempt_id=NULL,"
-                "version=version+1 "
-                "WHERE turn_id=? AND version=? AND status='running' AND active_attempt_id=?",
-                (turn.turn_id, turn.version, attempt.attempt_id),
-            )
-            if attempt_cur.rowcount != 1 or turn_cur.rowcount != 1:
-                self._conn.rollback()
-                return False
-            # A very fast child may satisfy the join before the parent reaches
-            # waiting_external. In that race, queue the parent immediately.
-            self._conn.execute(
-                "UPDATE turns SET status='queued',version=version+1 WHERE turn_id=? "
-                "AND status='waiting_external' AND EXISTS ("
-                "SELECT 1 FROM waiting_conditions WHERE owner_type='turn' AND owner_id=? "
-                "AND waiting_id=? AND status='satisfied')",
-                (turn.turn_id, turn.turn_id, waiting_id),
-            )
-            self._conn.commit()
-            _LOGGER.info("Turn %s paused for external work %s", turn.turn_id, waiting_id)
-            return True
         except Exception:
-            self._conn.rollback()
             _LOGGER.exception("failed to pause Turn for external work")
             return False
 
@@ -648,8 +657,9 @@ class AgentRunner:
             from cogito.model.contracts import Usage
 
             usage = Usage()
+        trace = info.get("trace_context") or {}
         record = ModelCallRecord(
-            attempt_id=info.get("attempt_id", ""),
+            attempt_id=info.get("attempt_id", "") or str(trace.get("attempt_id", "")),
             request_id=info.get("request_id", ""),
             provider_id=info.get("provider_id", ""),
             model_id=info.get("model_id", ""),
@@ -661,12 +671,83 @@ class AgentRunner:
             latency_ms=info.get("latency_ms", 0),
             error_category=info.get("error_category"),
             retry_count=info.get("retry_count", 0),
-            trace_id=info.get("trace_id", ""),
+            started_at=info.get("started_at"),
+            completed_at=info.get("completed_at"),
+            trace_id=info.get("trace_id", "") or str(trace.get("trace_id", "")),
+            event_context=EventContext(
+                trace_id=str(trace.get("trace_id", "")),
+                correlation_id=str(trace.get("correlation_id", "")),
+                causation_id=str(trace.get("causation_id", "")),
+                principal_id=str(trace.get("principal_id", "")),
+                conversation_id=str(trace.get("conversation_id", "")),
+                session_id=str(trace.get("session_id", "")),
+                turn_id=str(trace.get("turn_id", "")),
+                attempt_id=str(trace.get("attempt_id", "")),
+            ),
         )
         try:
-            self._model_call_repo.insert(record)
+            audit_connection_factory = self._model_call_connection_factory
+            if audit_connection_factory is None:
+                # ``:memory:`` cannot create a second connection to the same
+                # database. Commit immediately so the shared test/custom
+                # connection never keeps a write transaction open.
+                self._model_call_repo.insert(record)
+                self._conn.commit()
+                return
+
+            audit_conn = audit_connection_factory()
+            try:
+                ModelCallRepository(audit_conn).insert(record)
+                audit_conn.commit()
+            finally:
+                audit_conn.close()
         except Exception:
             _LOGGER.warning("model_call insert failed", exc_info=True)
+
+    def _attach_event_context(self, context, turn, attempt):
+        """Persist context assembly as a causal fact and return its immutable child context."""
+        stream = EventStore(self._conn).read_stream("turn", turn.turn_id)
+        source_event = next((event for event in reversed(stream) if event.context.trace_id), None)
+        source = source_event.context if source_event is not None else EventContext()
+        base = EventContext(
+            trace_id=source.trace_id,
+            correlation_id=source.correlation_id,
+            causation_id=source_event.event_id if source_event is not None else source.causation_id,
+            actor_id=source.actor_id,
+            principal_id=context.principal_id or source.principal_id,
+            conversation_id=context.conversation_id or source.conversation_id,
+            session_id=context.session_id or source.session_id or turn.session_id,
+            turn_id=turn.turn_id,
+            attempt_id=attempt.attempt_id,
+        )
+        assembled = EventStore(self._conn).append(
+            Event(
+                event_type="runtime.context.assembled",
+                stream_type="turn",
+                stream_id=turn.turn_id,
+                producer="agent-runner",
+                event_class=EventClass.OPERATION,
+                context=base,
+                summary="Runtime context assembled",
+                attributes={
+                    "context_snapshot_id": context.snapshot_id,
+                    "item_count": len(context.items),
+                    "memory_count": len(context.memory_ids),
+                    "total_tokens": context.total_tokens,
+                    "message_upper_bound": context.message_upper_bound,
+                },
+                outcome="assembled",
+                occurred_at=context.created_at,
+                idempotency_key=f"context:{attempt.attempt_id}:{context.snapshot_id}",
+            )
+        )
+        return replace(
+            context,
+            attempt_id=attempt.attempt_id,
+            trace_id=base.trace_id,
+            correlation_id=base.correlation_id,
+            causation_id=assembled.event_id,
+        )
 
     def _persist_context_snapshot(self, context, attempt) -> None:
         """Persist the exact immutable context selected for this RunAttempt."""
@@ -726,7 +807,7 @@ class AgentRunner:
 
     def _push_reply_event(self, meta: Any, text: str) -> None:
         """非流式 Turn 完成后：把最终回复文本作为 send 事件推入浏览器队列。"""
-        if not text or self.channel_gateway is None:
+        if not text or self.channel_gateway is None or meta is None:
             return
         if (meta.reply_route or {}).get("channel_instance_id") == "terminal":
             # process_terminal_message reads the persisted assistant message and
@@ -748,7 +829,7 @@ class AgentRunner:
 
     def _push_reply_error(self, meta: Any, message: str) -> None:
         """把错误提示推入浏览器队列，让用户至少看到反馈而非无声无息。"""
-        if not message or self.channel_gateway is None:
+        if not message or self.channel_gateway is None or meta is None:
             return
         if (meta.reply_route or {}).get("channel_instance_id") == "terminal":
             return
@@ -895,6 +976,7 @@ def build_agent_runner(
         knowledge_top_k=config.knowledge.retrieval.top_k,
         knowledge_budget_ratio=config.knowledge.retrieval.token_budget_ratio,
         agent_mode=config.agent.mode,
+        effect_payload_store=PayloadStore(config.resolve_payload_dir(), connection),
     )
 
 

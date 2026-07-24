@@ -1,12 +1,13 @@
-"""SideEffectReceiptRepository —— side_effect_receipts 表数据访问（Plan 03 M3）。
-
-记录每个 Tool 执行的外部操作 ID、请求哈希、状态与对账结果。
-"""
+"""Side-effect receipt Event boundary and replay read model."""
 
 from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+
+from cogito.domain.event import Event, EventClass, EventContext
+from cogito.store.event_replay import SideEffectReceiptProjection, replay_side_effect_receipt
+from cogito.store.event_store import EventStore
 
 
 @dataclass
@@ -32,57 +33,72 @@ class SideEffectReceiptRepository:
         self._conn = conn
 
     def insert(self, record: ReceiptRecord) -> None:
-        self._conn.execute(
-            "INSERT INTO side_effect_receipts (receipt_id, capability_id, operation_id, "
-            "request_hash, side_effect_class, status, reconcile_status, raw_ref, summary, "
-            "attempt_id, attempt_type, created_at, audit_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                record.receipt_id,
-                record.capability_id,
-                record.operation_id,
-                record.request_hash,
-                record.side_effect_class,
-                record.status,
-                record.reconcile_status,
-                record.raw_ref,
-                record.summary,
-                record.attempt_id,
-                record.attempt_type,
-                record.created_at,
-                record.audit_id,
-            ),
+        """Record a safe receipt fact; raw provider evidence stays behind payload_ref."""
+        EventStore(self._conn).append(
+            Event(
+                event_type="side_effect.receipt.recorded",
+                stream_type="side_effect_receipt",
+                stream_id=record.receipt_id,
+                producer="side-effect-receipt-repository",
+                event_class=EventClass.DOMAIN,
+                context=self._context_for_attempt(record.attempt_id),
+                summary=f"Side-effect receipt recorded: {record.capability_id}"[:2_000],
+                attributes={
+                    "capability_id": record.capability_id,
+                    "operation_id": record.operation_id or "",
+                    "request_hash": record.request_hash,
+                    "side_effect_class": record.side_effect_class,
+                    "reconcile_status": record.reconcile_status,
+                    "attempt_type": record.attempt_type,
+                    "audit_id": record.audit_id or "",
+                },
+                payload_ref=record.raw_ref,
+                outcome=record.status,
+                occurred_at=record.created_at or 0,
+                idempotency_key=f"side-effect-receipt:{record.receipt_id}:recorded",
+            )
         )
 
     def get(self, receipt_id: str) -> ReceiptRecord | None:
-        row = self._conn.execute(
-            "SELECT * FROM side_effect_receipts WHERE receipt_id=?",
-            (receipt_id,),
-        ).fetchone()
-        return self._row_to_record(row) if row else None
+        projection = replay_side_effect_receipt(self._events(), receipt_id)
+        return self._projection_to_record(projection) if projection is not None else None
 
     def find_by_attempt(self, attempt_type: str, attempt_id: str) -> list[ReceiptRecord]:
-        rows = self._conn.execute(
-            "SELECT * FROM side_effect_receipts WHERE attempt_type=? AND attempt_id=? "
-            "ORDER BY created_at ASC",
-            (attempt_type, attempt_id),
-        ).fetchall()
-        return [self._row_to_record(r) for r in rows]
+        return [
+            record
+            for record in self._replayed_records(self._events())
+            if record.attempt_type == attempt_type and record.attempt_id == attempt_id
+        ]
 
     def find_pending_reconcile(self, limit: int = 50) -> list[ReceiptRecord]:
         """查询需要人工/自动对账的 unknown 收据。"""
-        rows = self._conn.execute(
-            "SELECT * FROM side_effect_receipts "
-            "WHERE status='unknown' AND reconcile_status='pending' "
-            "ORDER BY created_at ASC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [self._row_to_record(r) for r in rows]
+        return [
+            record
+            for record in self._replayed_records(self._events())
+            if record.status == "unknown" and record.reconcile_status == "pending"
+        ][:limit]
 
     def update_status(self, receipt_id: str, status: str, resolved_at: int | None = None) -> None:
-        self._conn.execute(
-            "UPDATE side_effect_receipts SET status=?, resolved_at=? WHERE receipt_id=?",
-            (status, resolved_at, receipt_id),
+        existing = self.get(receipt_id)
+        if existing is None:
+            return
+        prior = EventStore(self._conn).read_stream("side_effect_receipt", receipt_id)
+        EventStore(self._conn).append(
+            Event(
+                event_type="side_effect.receipt.resolved",
+                stream_type="side_effect_receipt",
+                stream_id=receipt_id,
+                producer="side-effect-receipt-repository",
+                event_class=EventClass.DOMAIN,
+                context=self._child_context(
+                    existing.context, prior[-1].event_id if prior else receipt_id
+                ),
+                summary=f"Side-effect receipt resolved: {existing.capability_id}"[:2_000],
+                attributes={},
+                outcome=status,
+                occurred_at=resolved_at or 0,
+                idempotency_key=f"side-effect-receipt:{receipt_id}:resolved:{status}:{resolved_at or ''}",
+            )
         )
 
     def update_reconcile(
@@ -91,26 +107,100 @@ class SideEffectReceiptRepository:
         reconcile_status: str,
         summary: str | None = None,
     ) -> None:
-        self._conn.execute(
-            "UPDATE side_effect_receipts SET reconcile_status=?, summary=? WHERE receipt_id=?",
-            (reconcile_status, summary, receipt_id),
+        existing = self.get(receipt_id)
+        if existing is None:
+            return
+        prior = EventStore(self._conn).read_stream("side_effect_receipt", receipt_id)
+        EventStore(self._conn).append(
+            Event(
+                event_type="side_effect.receipt.reconciled",
+                stream_type="side_effect_receipt",
+                stream_id=receipt_id,
+                producer="side-effect-receipt-repository",
+                event_class=EventClass.DOMAIN,
+                context=self._child_context(
+                    existing.context, prior[-1].event_id if prior else receipt_id
+                ),
+                summary=f"Side-effect receipt reconciliation: {existing.capability_id}"[:2_000],
+                attributes={},
+                outcome=reconcile_status,
+                occurred_at=0,
+                idempotency_key=f"side-effect-receipt:{receipt_id}:reconcile:{reconcile_status}",
+            )
+        )
+
+    def list_recent(self, limit: int = 50) -> list[ReceiptRecord]:
+        return sorted(
+            self._replayed_records(self._events()),
+            key=lambda record: record.created_at,
+            reverse=True,
+        )[:limit]
+
+    def _context_for_attempt(self, attempt_id: str) -> EventContext:
+        if not attempt_id:
+            return EventContext()
+        source = next(
+            (
+                event
+                for event in EventStore(self._conn).list_events(attempt_id=attempt_id, limit=500)
+                if event.context.trace_id
+            ),
+            None,
+        )
+        if source is None:
+            return EventContext(attempt_id=attempt_id)
+        return self._child_context(source.context, source.event_id, attempt_id=attempt_id)
+
+    @staticmethod
+    def _child_context(
+        source: EventContext, causation_id: str, *, attempt_id: str | None = None
+    ) -> EventContext:
+        return EventContext(
+            trace_id=source.trace_id,
+            span_id=source.span_id,
+            parent_span_id=source.parent_span_id,
+            correlation_id=source.correlation_id,
+            causation_id=causation_id,
+            actor_id=source.actor_id,
+            principal_id=source.principal_id,
+            conversation_id=source.conversation_id,
+            session_id=source.session_id,
+            turn_id=source.turn_id,
+            attempt_id=attempt_id or source.attempt_id,
+            task_id=source.task_id,
+        )
+
+    def _events(self):
+        return EventStore(self._conn).read_stream_type("side_effect_receipt")
+
+    @staticmethod
+    def _replayed_records(events) -> list[ReceiptRecord]:
+        grouped: dict[str, list[Event]] = {}
+        for event in events:
+            grouped.setdefault(event.stream_id, []).append(event)
+        return sorted(
+            (
+                SideEffectReceiptRepository._projection_to_record(projection)
+                for receipt_id, stream in grouped.items()
+                if (projection := replay_side_effect_receipt(stream, receipt_id)) is not None
+            ),
+            key=lambda record: record.created_at,
         )
 
     @staticmethod
-    def _row_to_record(row: sqlite3.Row) -> ReceiptRecord:
+    def _projection_to_record(projection: SideEffectReceiptProjection) -> ReceiptRecord:
         return ReceiptRecord(
-            receipt_id=row["receipt_id"],
-            capability_id=row["capability_id"],
-            operation_id=row["operation_id"],
-            request_hash=row["request_hash"],
-            side_effect_class=row["side_effect_class"],
-            status=row["status"],
-            reconcile_status=row["reconcile_status"],
-            raw_ref=row["raw_ref"],
-            summary=row["summary"],
-            attempt_id=row["attempt_id"],
-            attempt_type=row["attempt_type"],
-            created_at=row["created_at"],
-            resolved_at=row["resolved_at"],
-            audit_id=row["audit_id"],
+            receipt_id=projection.receipt_id,
+            capability_id=projection.capability_id,
+            operation_id=projection.operation_id,
+            request_hash=projection.request_hash,
+            side_effect_class=projection.side_effect_class,
+            status=projection.status,
+            reconcile_status=projection.reconcile_status,
+            raw_ref=projection.raw_ref,
+            attempt_id=projection.attempt_id,
+            attempt_type=projection.attempt_type,
+            created_at=projection.created_at,
+            resolved_at=projection.resolved_at,
+            audit_id=projection.audit_id,
         )

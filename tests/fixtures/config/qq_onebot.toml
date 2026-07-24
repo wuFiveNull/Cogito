@@ -23,7 +23,6 @@ validate_origin = true
 concurrency = 1
 lease_duration_seconds = 300
 heartbeat_interval_seconds = 60
-outbox_lease_ttl_seconds = 120
 delivery_lease_ttl_seconds = 120
 recovery_grace_period_seconds = 30
 

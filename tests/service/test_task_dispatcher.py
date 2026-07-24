@@ -7,7 +7,6 @@
 - fail 标记失败
 - heartbeat 续期
 """
-
 from __future__ import annotations
 
 import sqlite3
@@ -15,9 +14,12 @@ from datetime import UTC, datetime
 
 import pytest
 
-from cogito.domain.task import TaskStatus
+from cogito.domain.task import Task, TaskStatus
 from cogito.service.task_dispatcher import TaskDispatcher
+from cogito.store.event_replay import replay_task, replay_task_attempt
+from cogito.store.event_store import EventStore
 from cogito.store.migration import migrate
+from cogito.store.task_repo import TaskRepository
 from cogito.store.time_utils import epoch_ms
 
 
@@ -35,19 +37,24 @@ def dispatcher(db) -> TaskDispatcher:
     return TaskDispatcher(db)
 
 
-def _insert_task(db, task_id="t1", task_type="memory.extract", priority=40):
-    now = epoch_ms(datetime.now(UTC))
-    db.execute(
-        "INSERT INTO tasks (task_id, task_type, idempotency_key, status, priority, created_at) "
-        "VALUES (?, ?, ?, 'queued', ?, ?)",
-        (task_id, task_type, f"{task_id}:{now}", priority, now),
+def _create_task(db, task_id="t1", task_type="memory.extract", priority=40):
+    """Create a queued task via Event-only TaskRepository."""
+    repo = TaskRepository(db)
+    repo.insert(
+        Task(
+            task_id=task_id,
+            task_type=task_type,
+            status=TaskStatus.queued,
+            priority=priority,
+            idempotency_key=f"{task_id}:{epoch_ms(datetime.now(UTC))}",
+            created_at=datetime.now(UTC),
+        )
     )
-    db.commit()
 
 
 class TestTaskDispatcher:
     def test_claim_next_returns_task_and_attempt(self, db, dispatcher):
-        _insert_task(db, task_id="t1")
+        _create_task(db, task_id="t1")
         claimed = dispatcher.claim_next("worker1")
         assert claimed is not None
         assert claimed.task.task_id == "t1"
@@ -56,8 +63,8 @@ class TestTaskDispatcher:
         assert claimed.attempt.lease_owner == "worker1"
 
     def test_claim_next_returns_highest_priority_first(self, db, dispatcher):
-        _insert_task(db, task_id="t_low", priority=20)
-        _insert_task(db, task_id="t_high", priority=80)
+        _create_task(db, task_id="t_low", priority=20)
+        _create_task(db, task_id="t_high", priority=80)
         claimed = dispatcher.claim_next("worker1")
         assert claimed is not None
         assert claimed.task.task_id == "t_high"
@@ -67,25 +74,24 @@ class TestTaskDispatcher:
         assert claimed is None
 
     def test_claim_next_only_queued(self, db, dispatcher):
-        _insert_task(db, task_id="t1")
-        # 第一次领取成功
+        _create_task(db, task_id="t1")
         assert dispatcher.claim_next("worker1") is not None
-        # 第二次无可用
         assert dispatcher.claim_next("worker2") is None
 
     def test_complete_success(self, db, dispatcher):
-        _insert_task(db, task_id="t1")
+        _create_task(db, task_id="t1")
         claimed = dispatcher.claim_next("worker1")
         assert claimed is not None
 
         ok = dispatcher.complete(claimed.task, claimed.attempt, "worker1")
         assert ok is True
 
-        row = db.execute("SELECT status FROM tasks WHERE task_id='t1'").fetchone()
-        assert row["status"] == "completed"
+        state = replay_task(EventStore(db).read_stream("task", "t1"), "t1")
+        assert state is not None
+        assert state.status == "completed"
 
     def test_complete_fails_wrong_worker(self, db, dispatcher):
-        _insert_task(db, task_id="t1")
+        _create_task(db, task_id="t1")
         claimed = dispatcher.claim_next("worker1")
         assert claimed is not None
 
@@ -93,18 +99,19 @@ class TestTaskDispatcher:
         assert ok is False
 
     def test_fail_success(self, db, dispatcher):
-        _insert_task(db, task_id="t1")
+        _create_task(db, task_id="t1")
         claimed = dispatcher.claim_next("worker1")
         assert claimed is not None
 
         ok = dispatcher.fail(claimed.task, claimed.attempt, "worker1")
         assert ok is True
 
-        row = db.execute("SELECT status FROM tasks WHERE task_id='t1'").fetchone()
-        assert row["status"] == "failed"
+        state = replay_task(EventStore(db).read_stream("task", "t1"), "t1")
+        assert state is not None
+        assert state.status == "failed"
 
     def test_heartbeat(self, db, dispatcher):
-        _insert_task(db, task_id="t1")
+        _create_task(db, task_id="t1")
         claimed = dispatcher.claim_next("worker1")
         assert claimed is not None
 
@@ -115,3 +122,38 @@ class TestTaskDispatcher:
             claimed.attempt.lease_version,
         )
         assert ok is True
+        assert db.in_transaction is False
+
+    def test_retry_appends_scheduled_event(self, db, dispatcher):
+        _create_task(db, task_id="t-retry")
+        claimed = dispatcher.claim_next("worker1")
+        assert claimed is not None
+
+        assert dispatcher.retry(claimed.task, claimed.attempt, "worker1", delay_seconds=30)
+
+        state = replay_task(EventStore(db).read_stream("task", "t-retry"), "t-retry")
+        assert state is not None
+        assert state.status == "scheduled"
+        event = EventStore(db).read_stream("task", "t-retry")[-1]
+        assert event.event_type == "task.retry_scheduled"
+        assert event.attributes["reason"] == "retry"
+
+    def test_wait_appends_waiting_event(self, db, dispatcher):
+        _create_task(db, task_id="t-wait")
+        claimed = dispatcher.claim_next("worker1")
+        assert claimed is not None
+
+        assert dispatcher.wait(
+            claimed.task,
+            claimed.attempt,
+            "worker1",
+            TaskStatus.waiting_user,
+            "approval-1",
+        )
+
+        state = replay_task(EventStore(db).read_stream("task", "t-wait"), "t-wait")
+        assert state is not None
+        assert state.status == "waiting_user"
+        event = EventStore(db).read_stream("task", "t-wait")[-1]
+        assert event.event_type == "task.waiting_user"
+        assert event.attributes["waiting_id"] == "approval-1"

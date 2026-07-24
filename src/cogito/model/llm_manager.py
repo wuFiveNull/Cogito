@@ -94,7 +94,7 @@ class LLMManager:
         配置了 roles 时走多 Provider 角色路由；否则退化到单 Provider，
         所有角色指向同一个 Provider（向后兼容当前行为）。
         """
-        if model_cfg.roles:
+        if model_cfg.roles or model_cfg.direct_role_endpoints:
             return cls._build_multi(model_cfg)
         return cls._build_single(model_cfg)
 
@@ -119,11 +119,26 @@ class LLMManager:
         providers: dict[str, ModelProvider] = {}
         role_map: dict[str, str] = {}
 
+        # [model.fast] / [model.vlm] 的直接端点。显式 [model.roles.*]
+        # 若配置同名角色，会在下面覆盖它，保持现有 roles 优先规则。
+        for role_name, endpoint in model_cfg.direct_role_endpoints.items():
+            if role_name in model_cfg.roles:
+                continue
+            provider_key = f"direct:{role_name}"
+            providers[provider_key] = create_provider(
+                endpoint,
+                default_adapter=model_cfg.provider,
+            )
+            role_map[role_name] = provider_key
+
         for role_name, role_cfg in model_cfg.roles.items():
             provider_key, endpoint = model_cfg.resolve_role(role_name)
             # 同 provider_key 复用同一实例，避免重复创建 HTTP 客户端
             if provider_key not in providers:
-                providers[provider_key] = create_provider(endpoint)
+                providers[provider_key] = create_provider(
+                    endpoint,
+                    default_adapter=model_cfg.provider,
+                )
             role_map[role_name] = provider_key
 
         # 至少保证 main 可用

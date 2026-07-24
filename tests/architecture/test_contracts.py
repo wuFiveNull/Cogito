@@ -19,7 +19,6 @@ from cogito.contracts.envelope import (
     CommandEnvelope,
     ErrorCategory,
     ErrorEnvelope,
-    EventEnvelope,
     ReplyMode,
     ReplyRoute,
     ToolRequest,
@@ -102,21 +101,6 @@ def test_command_envelope_roundtrip() -> None:
     assert restored.idempotency_key == "k1"
 
 
-def test_event_envelope_roundtrip() -> None:
-    ev = EventEnvelope(
-        event_type="TaskCompleted",
-        aggregate_type="task",
-        aggregate_id="t1",
-        origin="system",
-        trace_context=_trace(),
-        content_hash="abc",
-    )
-    restored = EventEnvelope.from_dict(ev.to_dict())
-    assert restored.event_type == "TaskCompleted"
-    assert restored.schema_version == "1.0"
-    assert restored.content_hash == "abc"
-
-
 def test_tool_request_frozen_and_roundtrip() -> None:
     req = ToolRequest(
         tool_name="echo",
@@ -167,13 +151,6 @@ def test_channel_envelope_accepts_previous_version() -> None:
     # Unknown-version payloads must still decode safely.
     restored = ChannelEnvelope.from_dict(data)
     assert restored.message_id == "x"
-
-
-def test_event_envelope_accepts_previous_version() -> None:
-    data = EventEnvelope(event_type="X").to_dict()
-    data["schema_version"] = "0.9"
-    restored = EventEnvelope.from_dict(data)
-    assert restored.event_type == "X"
 
 
 # ---------------------------------------------------------------------------

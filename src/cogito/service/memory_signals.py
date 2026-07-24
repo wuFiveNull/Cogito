@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 import sqlite3
 
+from cogito.domain.event import Event, EventClass, EventContext
+from cogito.store.event_store import EventStore
 from cogito.store.signal_repo import MemorySignal, SignalRepository
 
 _LOGGER = logging.getLogger("cogito.memory_signals")
@@ -53,32 +55,52 @@ class SignalWriter:
         )
         ok = self._repo.insert(signal)
         if ok:
-            self._emit_signal_event(signal_type, memory_id, signal_value, task_id)
+            self._emit_signal_event(
+                signal_type,
+                memory_id,
+                signal_value,
+                actor_principal_id,
+                turn_id,
+                task_id,
+                idempotency_key,
+            )
         return ok
 
     def _emit_signal_event(
-        self, signal_type: str, memory_id: str, signal_value: int, task_id: str
+        self,
+        signal_type: str,
+        memory_id: str,
+        signal_value: int,
+        actor_principal_id: str,
+        turn_id: str,
+        task_id: str,
+        idempotency_key: str,
     ) -> None:
-        """PLAN-14/16 R-08: MemorySignalRecorded 领域事件（PLAN-16 M2 TX-02/TX-03 + 完整版本单调）。
-
-        与信号行共享同一连接 / 事务：写入失败向上传播，确保信号与
-        Outbox 事件原子提交。aggregate_version 由 OutboxRepository 同事务 MAX+1
-        取得，保证严格单调。
-        """
-        from cogito.domain.events import DomainEvent
-        from cogito.store.repositories import OutboxRepository
-
-        payload = {"signal_type": signal_type, "signal_value": signal_value, "task_id": task_id}
-        version = OutboxRepository(self._conn).next_aggregate_version("memory", memory_id)
-        OutboxRepository(self._conn).insert(
-            DomainEvent(
-                event_type="MemorySignalRecorded",
-                aggregate_type="memory",
-                aggregate_id=memory_id,
-                aggregate_version=version,
-                payload=payload,
-                payload_ref=__import__("json").dumps(payload, ensure_ascii=False),
-                origin="signal_writer",
+        """在信号行所在事务内追加受限的规范事件。"""
+        store = EventStore(self._conn)
+        stream = store.read_stream("memory", memory_id)
+        source = stream[-1] if stream else None
+        context = source.context if source else EventContext()
+        store.append(
+            Event(
+                event_type="memory.signal.recorded",
+                stream_type="memory",
+                stream_id=memory_id,
+                producer="memory-signal-writer",
+                event_class=EventClass.DOMAIN,
+                context=EventContext(
+                    trace_id=context.trace_id,
+                    correlation_id=context.correlation_id,
+                    causation_id=source.event_id if source else context.causation_id,
+                    actor_id=actor_principal_id,
+                    principal_id=actor_principal_id or context.principal_id,
+                    turn_id=turn_id,
+                    task_id=task_id,
+                ),
+                summary="Memory signal recorded",
+                attributes={"signal_type": signal_type, "signal_value": signal_value},
+                outcome="recorded",
+                idempotency_key=(f"memory-signal:{idempotency_key}" if idempotency_key else ""),
             )
         )
 

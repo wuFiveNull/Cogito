@@ -1,0 +1,6 @@
+online_safe = false
+requires_backup = true
+estimated_space = "metadata only; drops legacy delivery rows after Event cutover"
+preconditions = ["event_delivery_cutover_complete"]
+post_checks = ["foreign_key_check", "integrity_check"]
+rollback = "restore the SQLite and payload backup created before maintenance"

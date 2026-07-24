@@ -80,10 +80,6 @@ class PauseConnectorPayload(BaseModel):
     paused: bool = True
 
 
-class ReplayDeliveryPayload(BaseModel):
-    delivery_id: str
-
-
 class DeleteSessionPayload(BaseModel):
     session_id: str
 
@@ -190,10 +186,6 @@ class UpdateProactivePolicyPayload(BaseCommandPayload):
     max_pushes_per_day: int | None = None
 
 
-class ReplayEventPayload(BaseCommandPayload):
-    event_id: str
-
-
 class ReconcileReceiptPayload(BaseCommandPayload):
     receipt_id: str
 
@@ -240,6 +232,12 @@ class ForceConnectorPollPayload(BaseCommandPayload):
 
 class FetchProactiveDataPayload(BaseCommandPayload):
     """手动触发固定 AIHOT 主动数据源；不允许前端指定任意 Connector。"""
+
+    pass
+
+
+class TriggerProactiveMockPayload(BaseCommandPayload):
+    """手动触发一次本地 mock 主动投递源。"""
 
     pass
 

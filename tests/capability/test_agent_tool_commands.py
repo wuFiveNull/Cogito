@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from cogito.capability.skill_parser import parse_skill_md
 from cogito.service.agent_tool_commands import AgentToolCommandService
+from cogito.store.event_store import EventStore
 
 
 def test_schedule_commands_are_exactly_idempotent(in_memory_db) -> None:
@@ -56,6 +57,16 @@ def test_schedule_commands_are_exactly_idempotent(in_memory_db) -> None:
         ).fetchone()[0]
         == 2
     )
+    events = EventStore(in_memory_db).read_stream("agent_tool_command", first.schedule_id)
+    assert [event.event_type for event in events] == [
+        "agent.command.completed",
+        "agent.command.completed",
+    ]
+    assert {event.attributes["command"] for event in events} == {
+        "CreateAgentSchedule",
+        "CancelAgentSchedule",
+    }
+    assert in_memory_db.execute("SELECT COUNT(*) FROM outbox_events").fetchone()[0] == 0
 
 
 def test_skill_create_is_idempotent_and_version_bound(in_memory_db, tmp_path) -> None:

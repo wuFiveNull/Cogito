@@ -6,8 +6,8 @@
 - handle 只允许：更新自身 Projection、创建 Command/Task、记指标；
   禁止在消费事务里直接发送网络/创建 Delivery（由 Decision Engine 建 Task）
 
-Seam 接入：application.process_background_once 在 OutboxWorker.publish() 前
-派发到对应 consumer；成功才 publish，失败则 retry。
+Seam 接入：``CanonicalEventConsumerWorker`` 从 ``event_log`` 重放 Catalog
+输入事件；成功结果必须由消费者以新的因果 Event 记录。
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from cogito.service.outbox_worker import OutboxLease
+from cogito.service.event_subscription import ConsumerEvent
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,10 +35,10 @@ class EventConsumer:
 
     name: str = ""
 
-    def can_handle(self, lease: OutboxLease) -> bool:
+    def can_handle(self, lease: ConsumerEvent) -> bool:
         raise NotImplementedError
 
-    def handle(self, conn: sqlite3.Connection, lease: OutboxLease) -> bool:
+    def handle(self, conn: sqlite3.Connection, lease: ConsumerEvent) -> bool:
         raise NotImplementedError
 
 
@@ -54,7 +54,7 @@ class EventConsumerRegistry:
     def register(self, consumer: EventConsumer) -> None:
         self._consumers.append(consumer)
 
-    def find(self, lease: OutboxLease) -> EventConsumer | None:
+    def find(self, lease: ConsumerEvent) -> EventConsumer | None:
         for c in self._consumers:
             if c.can_handle(lease):
                 return c
@@ -82,10 +82,10 @@ class SourceEventIngestedConsumer(EventConsumer):
     def __init__(self, *, default_principal_id: str = "owner") -> None:
         self._default_principal_id = default_principal_id
 
-    def can_handle(self, lease: OutboxLease) -> bool:
+    def can_handle(self, lease: ConsumerEvent) -> bool:
         return lease.event_type == "SourceEventIngested"
 
-    def handle(self, conn: sqlite3.Connection, lease: OutboxLease) -> bool:
+    def handle(self, conn: sqlite3.Connection, lease: ConsumerEvent) -> bool:
         """投影一个 SourceEvent 成 Candidate。返回 True 表成功。"""
         conn.row_factory = sqlite3.Row
         # 1. 幂等：Inbox 唯一键 (consumer_name, event_id)
@@ -98,7 +98,7 @@ class SourceEventIngestedConsumer(EventConsumer):
 
         # 2. 读取 connector_items
         item = conn.execute(
-            "SELECT item_id, title, summary, source_item_id, relevance, status, "
+            "SELECT item_id, connector_id, title, summary, source_item_id, relevance, status, "
             "       topic_json, published_at, content_hash "
             "FROM connector_items WHERE item_id=?",
             (lease.payload_ref or "",),
@@ -122,7 +122,11 @@ class SourceEventIngestedConsumer(EventConsumer):
         topic = item_row["topic"] if item_row and item_row["topic"] else "general"
 
         candidate_id = uuid.uuid4().hex
-        stream_type = "content"  # 默认；未来 enhancement 会看 source type
+        is_delivery_test = item["connector_id"] == "connector-proactive-mock"
+        # Mock source deliberately exercises the alert fast path.  This keeps
+        # the manual delivery test deterministic despite current energy and
+        # relevance policy values, while regular sources remain content.
+        stream_type = "alert" if is_delivery_test else "content"
         title = item["title"]
         summary = item["summary"]
         policy_version = int(lease.schema_version or "1")
@@ -151,7 +155,7 @@ class SourceEventIngestedConsumer(EventConsumer):
         # MCP 摄取已用 source_id + content_hash 做精确去重；进入此处即为 exact-new。
         # 语义 novelty 后续可再降分，但不能用低于默认阈值的占位值阻断全量候选。
         novelty = 1.0
-        urgency = relevance  # 无 energy 基准
+        urgency = 1.0 if is_delivery_test else relevance  # 无 energy 基准
         confidence = 0.7  # MCP 有稳定 id + schema 校验
 
         now = datetime.now(UTC)
@@ -222,10 +226,10 @@ class TurnCompletedMemoryExtractionConsumer(EventConsumer):
 
     name = "memory-extraction-scheduler"
 
-    def can_handle(self, lease: OutboxLease) -> bool:
+    def can_handle(self, lease: ConsumerEvent) -> bool:
         return lease.event_type == "TurnCompleted"
 
-    def handle(self, conn: sqlite3.Connection, lease: OutboxLease) -> bool:
+    def handle(self, conn: sqlite3.Connection, lease: ConsumerEvent) -> bool:
         consumed = conn.execute(
             "SELECT 1 FROM event_consumptions WHERE consumer_name=? AND event_id=?",
             (self.name, lease.event_id),
@@ -237,7 +241,7 @@ class TurnCompletedMemoryExtractionConsumer(EventConsumer):
             payload = json.loads(lease.payload_ref or "{}")
         except json.JSONDecodeError:
             payload = {}
-        turn_id = str(payload.get("turn_id") or lease.aggregate_id)
+        turn_id = str(payload.get("turn_id") or lease.context.turn_id or lease.aggregate_id)
         row = conn.execute(
             "SELECT t.session_id, m.conversation_id, m.sender_principal_id "
             "FROM turns t JOIN messages m ON m.message_id=t.input_message_id "
@@ -247,9 +251,13 @@ class TurnCompletedMemoryExtractionConsumer(EventConsumer):
         if row is None:
             return False
 
-        session_id = str(payload.get("session_id") or row["session_id"] or "")
-        conversation_id = str(payload.get("conversation_id") or row["conversation_id"] or "")
-        principal_id = str(payload.get("principal_id") or row["sender_principal_id"] or "")
+        session_id = str(payload.get("session_id") or lease.context.session_id or row["session_id"] or "")
+        conversation_id = str(
+            payload.get("conversation_id") or lease.context.conversation_id or row["conversation_id"] or ""
+        )
+        principal_id = str(
+            payload.get("principal_id") or lease.context.principal_id or row["sender_principal_id"] or ""
+        )
         if not session_id or not principal_id:
             with conn:
                 _mark_consumed(conn, self.name, lease.event_id)
@@ -279,10 +287,10 @@ class SessionCompletedMemoryExtractionConsumer(EventConsumer):
 
     name = "session-extraction-scheduler"
 
-    def can_handle(self, lease: OutboxLease) -> bool:
+    def can_handle(self, lease: ConsumerEvent) -> bool:
         return lease.event_type == "SessionCompleted"
 
-    def handle(self, conn: sqlite3.Connection, lease: OutboxLease) -> bool:
+    def handle(self, conn: sqlite3.Connection, lease: ConsumerEvent) -> bool:
         consumed = conn.execute(
             "SELECT 1 FROM event_consumptions WHERE consumer_name=? AND event_id=?",
             (self.name, lease.event_id),
@@ -326,10 +334,10 @@ class MemorySourceInvalidatedConsumer(EventConsumer):
 
     name = "memory-source-invalidation-handler"
 
-    def can_handle(self, lease: OutboxLease) -> bool:
+    def can_handle(self, lease: ConsumerEvent) -> bool:
         return lease.event_type == "MemorySourceInvalidated"
 
-    def handle(self, conn: sqlite3.Connection, lease: OutboxLease) -> bool:
+    def handle(self, conn: sqlite3.Connection, lease: ConsumerEvent) -> bool:
         """处理 Knowledge→Memory 失效传播（PLAN-16 完整 schema）。
 
         统一事件 schema：必要字段 resource_id + memory_id（由 KnowledgeService.erase
@@ -409,10 +417,10 @@ class InboundImmediateEvalConsumer(EventConsumer):
     def __init__(self, *, default_principal_id: str = "owner") -> None:
         self._default_principal_id = default_principal_id
 
-    def can_handle(self, lease: OutboxLease) -> bool:
+    def can_handle(self, lease: ConsumerEvent) -> bool:
         return lease.event_type == "InboundMessageAccepted"
 
-    def handle(self, conn: sqlite3.Connection, lease: OutboxLease) -> bool:
+    def handle(self, conn: sqlite3.Connection, lease: ConsumerEvent) -> bool:
         if (
             conn.execute(
                 "SELECT 1 FROM event_consumptions WHERE consumer_name=? AND event_id=?",
@@ -493,10 +501,10 @@ class DriftResultCommittedConsumer(EventConsumer):
         self._default_principal_id = default_principal_id
         self._drift_config = drift_config
 
-    def can_handle(self, lease: OutboxLease) -> bool:
+    def can_handle(self, lease: ConsumerEvent) -> bool:
         return lease.event_type == "DriftResultCommitted"
 
-    def handle(self, conn: sqlite3.Connection, lease: OutboxLease) -> bool:
+    def handle(self, conn: sqlite3.Connection, lease: ConsumerEvent) -> bool:
         # 幂等：event_consumptions 表 (consumer_name, event_id) 唯一键
         if (
             conn.execute(

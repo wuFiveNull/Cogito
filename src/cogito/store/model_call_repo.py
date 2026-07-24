@@ -13,6 +13,10 @@ import hashlib
 import sqlite3
 import uuid
 
+from cogito.domain.event import Event, EventClass, EventContext
+from cogito.store.event_replay import ModelCallProjection, replay_model_call
+from cogito.store.event_store import EventStore
+
 
 class ModelCallRecord:
     """model_calls 行记录的值对象。"""
@@ -38,6 +42,7 @@ class ModelCallRecord:
         started_at: int | None = None,
         completed_at: int | None = None,
         trace_id: str = "",
+        event_context: EventContext | None = None,
     ) -> None:
         self.model_call_id = model_call_id or uuid.uuid4().hex
         self.attempt_id = attempt_id
@@ -58,6 +63,10 @@ class ModelCallRecord:
         self.started_at = started_at
         self.completed_at = completed_at
         self.trace_id = trace_id
+        self.event_context = event_context or EventContext(
+            trace_id=trace_id,
+            attempt_id=attempt_id,
+        )
 
     def to_dict(self) -> dict:
         return {
@@ -81,92 +90,131 @@ class ModelCallRecord:
 
 
 class ModelCallRepository:
-    """ModelCall 持久化仓库。"""
+    """ModelCall Event read/write boundary; no model-call state row is persisted."""
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
     def insert(self, record: ModelCallRecord) -> None:
-        """插入 ModelCall 记录。插入不持有网络请求。"""
-        self._conn.execute(
-            "INSERT INTO model_calls "
-            "(model_call_id, attempt_id, request_id, provider_id, model_id, "
-            "status, request_hash, request_payload_ref, response_payload_ref, "
-            "finish_reason, input_tokens, output_tokens, cached_tokens, "
-            "latency_ms, error_category, retry_count, started_at, completed_at, trace_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                record.model_call_id,
-                record.attempt_id,
-                record.request_id,
-                record.provider_id,
-                record.model_id,
-                record.status,
-                record.request_hash,
-                record.request_payload_ref,
-                record.response_payload_ref,
-                record.finish_reason,
-                record.input_tokens,
-                record.output_tokens,
-                record.cached_tokens,
-                record.latency_ms,
-                record.error_category,
-                record.retry_count,
-                record.started_at,
-                record.completed_at,
-                record.trace_id,
-            ),
+        """Append a model-call lifecycle; the Event stream is the only fact source."""
+        context = self._event_context(record)
+        EventStore(self._conn).append(
+            Event(
+                event_type="model.call.started",
+                stream_type="model_call",
+                stream_id=record.model_call_id,
+                producer="model-call-repository",
+                event_class=EventClass.OPERATION,
+                context=context,
+                summary=f"Model call started: {record.provider_id}/{record.model_id}"[:2_000],
+                attributes={
+                    "request_id": record.request_id,
+                    "provider_id": record.provider_id,
+                    "model_id": record.model_id,
+                },
+                payload_ref=record.request_payload_ref,
+                payload_hash=record.request_hash,
+                outcome="started",
+                occurred_at=record.started_at or 0,
+                idempotency_key=f"model-call:{record.model_call_id}:started",
+            )
+        )
+        status_type = {
+            "cancelled": "model.call.cancelled",
+            "error": "model.call.failed",
+            "failed": "model.call.failed",
+        }.get(record.status, "model.call.completed")
+        if record.status in {"pending", "started", "running"}:
+            return
+        EventStore(self._conn).append(
+            Event(
+                event_type=status_type,
+                stream_type="model_call",
+                stream_id=record.model_call_id,
+                producer="model-call-repository",
+                event_class=EventClass.OPERATION,
+                context=context,
+                summary=f"{record.provider_id}/{record.model_id}: {record.status}"[:2_000],
+                attributes={
+                    "request_id": record.request_id,
+                    "provider_id": record.provider_id,
+                    "model_id": record.model_id,
+                    "input_tokens": record.input_tokens,
+                    "output_tokens": record.output_tokens,
+                    "cached_tokens": record.cached_tokens,
+                    "latency_ms": record.latency_ms,
+                    "retry_count": record.retry_count,
+                    "finish_reason": record.finish_reason or "",
+                },
+                payload_ref=record.response_payload_ref or record.request_payload_ref,
+                payload_hash=record.request_hash,
+                outcome=record.status,
+                error_category=record.error_category or "",
+                occurred_at=record.completed_at or record.started_at or 0,
+                idempotency_key=f"model-call:{record.model_call_id}:{record.status}",
+            )
+        )
+
+    @staticmethod
+    def _event_context(record: ModelCallRecord) -> EventContext:
+        context = record.event_context
+        return EventContext(
+            trace_id=context.trace_id or record.trace_id,
+            span_id=context.span_id,
+            parent_span_id=context.parent_span_id,
+            correlation_id=context.correlation_id,
+            causation_id=context.causation_id,
+            actor_id=context.actor_id,
+            principal_id=context.principal_id,
+            conversation_id=context.conversation_id,
+            session_id=context.session_id,
+            turn_id=context.turn_id,
+            attempt_id=context.attempt_id or record.attempt_id,
+            task_id=context.task_id,
         )
 
     def find_by_attempt(self, attempt_id: str) -> list[ModelCallRecord]:
-        rows = self._conn.execute(
-            "SELECT * FROM model_calls WHERE attempt_id=? ORDER BY started_at ASC",
-            (attempt_id,),
-        ).fetchall()
-        return [self._row_to_record(r) for r in rows]
+        return self._replayed_records(
+            event for event in self._events() if event.context.attempt_id == attempt_id
+        )
 
     def find_by_trace(self, trace_id: str) -> list[ModelCallRecord]:
-        rows = self._conn.execute(
-            "SELECT * FROM model_calls WHERE trace_id=? ORDER BY started_at ASC",
-            (trace_id,),
-        ).fetchall()
-        return [self._row_to_record(r) for r in rows]
+        return self._replayed_records(
+            event for event in self._events() if event.context.trace_id == trace_id
+        )
 
     def usage_summary(self, since_ms: int | None = None) -> dict:
         """返回模型调用汇总：次数、token、平均延迟。since_ms 为 None 则全量。"""
-        if since_ms is None:
-            row = self._conn.execute(
-                "SELECT COUNT(*) AS calls, "
-                "COALESCE(SUM(input_tokens),0) AS input_tokens, "
-                "COALESCE(SUM(output_tokens),0) AS output_tokens, "
-                "COALESCE(SUM(cached_tokens),0) AS cached_tokens, "
-                "COALESCE(AVG(latency_ms),0) AS avg_latency_ms "
-                "FROM model_calls WHERE status='success'"
-            ).fetchone()
-        else:
-            row = self._conn.execute(
-                "SELECT COUNT(*) AS calls, "
-                "COALESCE(SUM(input_tokens),0) AS input_tokens, "
-                "COALESCE(SUM(output_tokens),0) AS output_tokens, "
-                "COALESCE(SUM(cached_tokens),0) AS cached_tokens, "
-                "COALESCE(AVG(latency_ms),0) AS avg_latency_ms "
-                "FROM model_calls WHERE status='success' AND started_at >= ?",
-                (since_ms,),
-            ).fetchone()
+        records = [
+            record
+            for record in self._replayed_records(self._events())
+            if record.status == "success"
+            and (since_ms is None or (record.started_at or 0) >= since_ms)
+        ]
+        calls = len(records)
+        input_tokens = sum(record.input_tokens for record in records)
+        output_tokens = sum(record.output_tokens for record in records)
+        cached_tokens = sum(record.cached_tokens for record in records)
+        avg_latency_ms = round(sum(record.latency_ms for record in records) / calls) if calls else 0
         return {
-            "calls": int(row["calls"]),
-            "input_tokens": int(row["input_tokens"]),
-            "output_tokens": int(row["output_tokens"]),
-            "cached_tokens": int(row["cached_tokens"]),
-            "avg_latency_ms": round(float(row["avg_latency_ms"])),
+            "calls": calls,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cached_tokens": cached_tokens,
+            "avg_latency_ms": avg_latency_ms,
         }
 
     def list_recent(self, limit: int = 50) -> list[ModelCallRecord]:
-        rows = self._conn.execute(
-            "SELECT * FROM model_calls ORDER BY started_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [self._row_to_record(r) for r in rows]
+        records = self._replayed_records(self._events())
+        return sorted(records, key=lambda record: record.started_at or 0, reverse=True)[:limit]
+
+    def failure_count(self, since_ms: int) -> int:
+        """Count failed model-call projections in the requested Event time window."""
+        return sum(
+            1
+            for record in self._replayed_records(self._events())
+            if record.status in {"error", "failed"} and (record.started_at or 0) >= since_ms
+        )
 
     @staticmethod
     def compute_request_hash(request: object) -> str:
@@ -176,25 +224,42 @@ class ModelCallRepository:
             raw += request.request_id  # type: ignore[union-attr]
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
-    def _row_to_record(self, row: sqlite3.Row) -> ModelCallRecord:
+    def _events(self):
+        return EventStore(self._conn).read_stream_type("model_call")
+
+    @staticmethod
+    def _replayed_records(events) -> list[ModelCallRecord]:
+        grouped: dict[str, list[Event]] = {}
+        for event in events:
+            grouped.setdefault(event.stream_id, []).append(event)
+        records = [
+            ModelCallRepository._projection_to_record(projection)
+            for model_call_id, stream in grouped.items()
+            if (projection := replay_model_call(stream, model_call_id)) is not None
+        ]
+        return sorted(records, key=lambda record: record.started_at or 0)
+
+    @staticmethod
+    def _projection_to_record(projection: ModelCallProjection) -> ModelCallRecord:
         return ModelCallRecord(
-            model_call_id=row["model_call_id"],
-            attempt_id=row["attempt_id"],
-            request_id=row["request_id"],
-            provider_id=row["provider_id"],
-            model_id=row["model_id"],
-            status=row["status"],
-            request_hash=row["request_hash"],
-            request_payload_ref=row["request_payload_ref"],
-            response_payload_ref=row["response_payload_ref"],
-            finish_reason=row["finish_reason"],
-            input_tokens=row["input_tokens"],
-            output_tokens=row["output_tokens"],
-            cached_tokens=row["cached_tokens"],
-            latency_ms=row["latency_ms"],
-            error_category=row["error_category"],
-            retry_count=row["retry_count"],
-            started_at=row["started_at"],
-            completed_at=row["completed_at"],
-            trace_id=row["trace_id"],
+            model_call_id=projection.model_call_id,
+            attempt_id=projection.context.attempt_id,
+            request_id=projection.request_id,
+            provider_id=projection.provider_id,
+            model_id=projection.model_id,
+            status=projection.status,
+            request_hash=projection.request_hash,
+            request_payload_ref=projection.request_payload_ref,
+            response_payload_ref=projection.response_payload_ref,
+            finish_reason=projection.finish_reason,
+            input_tokens=projection.input_tokens,
+            output_tokens=projection.output_tokens,
+            cached_tokens=projection.cached_tokens,
+            latency_ms=projection.latency_ms,
+            error_category=projection.error_category,
+            retry_count=projection.retry_count,
+            started_at=projection.started_at,
+            completed_at=projection.completed_at,
+            trace_id=projection.context.trace_id,
+            event_context=projection.context,
         )

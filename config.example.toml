@@ -38,6 +38,9 @@ instance_id = ""
 bind_host = "127.0.0.1"
 allow_remote = false
 validate_origin = true
+# Required to download the protected bytes behind /api/events/{event_id}/payload.
+# Leave blank to disable payload download while retaining Event metadata queries.
+payload_access_token = ""
 
 [worker]
 # Lease/心跳/恢复参数（必满足：lease_duration > heartbeat_interval）
@@ -45,7 +48,6 @@ concurrency = 1
 poll_interval_seconds = 1.0
 lease_duration_seconds = 300
 heartbeat_interval_seconds = 60
-outbox_lease_ttl_seconds = 120
 delivery_lease_ttl_seconds = 120
 recovery_grace_period_seconds = 30
 
@@ -70,6 +72,21 @@ recovery_grace_period_seconds = 30
 # api_key = "sk-your-real-key"
 # base_url = "https://api.deepseek.com/v1"
 # timeout_seconds = 60
+#
+# 常用角色也可直接配置；未写 fast/vlm 时，它们会继续复用 main：
+# [model.fast]
+# model = "deepseek-v4-flash"
+# api_key = "${FAST_API_KEY}"
+# base_url = "https://opencode.ai/v1"
+# timeout_seconds = 60
+# modalities = ["text"]
+#
+# [model.vlm]
+# model = "your-vision-model"
+# api_key = "${VLM_API_KEY}"
+# base_url = "https://opencode.ai/v1"
+# timeout_seconds = 60
+# modalities = ["text", "image"]
 #
 # 也支持环境变量引用：api_key = "${MY_API_KEY}"
 #

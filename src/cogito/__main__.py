@@ -88,6 +88,27 @@ def _cmd_info(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_event_store_cutover(args: argparse.Namespace) -> int:
+    """Build a verified Event-only candidate and optionally install it."""
+    config = Config.load(_config_path(args))
+    from cogito.store.event_store_cutover import EventStoreCutover
+
+    report = EventStoreCutover(
+        config.resolve_db_path(),
+        home=Path(config.workspace_path),
+        payload_root=config.resolve_payload_dir(),
+    ).run(apply=bool(args.apply))
+    payload = {
+        "backup_id": report.backup.backup_id,
+        "imported": report.imported,
+        "validated": report.validated,
+        "candidate_path": str(report.candidate_path) if report.candidate_path else None,
+        "applied": report.applied,
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _cmd_mcp_serve(args: argparse.Namespace) -> int:
     """Run the local read-only MCP server over stdio."""
     config = Config.load(_config_path(args))
@@ -467,6 +488,12 @@ def main() -> None:
     config_init.add_argument("--force", action="store_true")
 
     sub.add_parser("info", help="显示系统信息", parents=[pre])
+    cutover_parser = sub.add_parser(
+        "event-store-cutover", help="验证并切换为 Event Store 唯一事实源", parents=[pre]
+    )
+    cutover_parser.add_argument(
+        "--apply", action="store_true", help="验证成功后原子替换数据库（默认仅生成候选库）"
+    )
     tools_parser = sub.add_parser("tools", help="Tool 注册与可用性诊断", parents=[pre])
     tools_sub = tools_parser.add_subparsers(dest="tools_command")
     tools_list = tools_sub.add_parser("list", help="列出当前模式已注册 Tool", parents=[pre])
@@ -540,6 +567,8 @@ def main() -> None:
             sys.exit(_cmd_config_init(args))
         elif args.command == "info":
             sys.exit(_cmd_info(args))
+        elif args.command == "event-store-cutover":
+            sys.exit(_cmd_event_store_cutover(args))
         elif args.command == "tools" and args.tools_command:
             sys.exit(_cmd_tools(args))
         elif args.command == "doctor":

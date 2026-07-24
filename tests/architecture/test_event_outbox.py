@@ -1,16 +1,15 @@
-"""PR-B3: Event/Outbox/Inbox reliability — Plan 04 M3."""
+"""Canonical Event contract and consumer idempotency invariants."""
 
 from __future__ import annotations
 
-import pytest
-
-from cogito.domain.events import DomainEvent
+from cogito.domain.event_catalog import registered_event_types
 
 
-def test_event_uses_past_tense_naming() -> None:
-    """Event 使用过去式命名，不承载 Command。"""
-    ev = DomainEvent(event_type="TaskCompleted", aggregate_type="task", aggregate_id="1")
-    assert ev.event_type.endswith("Completed") or ev.event_type.endswith("Created")
+def test_catalog_uses_canonical_past_tense_event_names() -> None:
+    """Catalog event names are the only supported durable vocabulary."""
+    catalog = registered_event_types()
+    assert "task.created" in catalog
+    assert "runtime.turn.completed" in catalog
 
 
 def test_outbox_consumer_unique_key() -> None:
@@ -29,13 +28,10 @@ def test_outbox_consumer_unique_key() -> None:
     assert consume("c2", "e1") is True  # 不同 consumer
 
 
-def test_dead_letter_for_permanent_error() -> None:
-    """Schema 不支持或永久错误进入 dead letter。"""
-    outbox_status = "pending"
-    permanent_error = True
-    if permanent_error:
-        outbox_status = "dead_letter"
-    assert outbox_status == "dead_letter"
+def test_permanent_effect_failure_is_a_terminal_fact() -> None:
+    """Permanent effects are represented by terminal Event facts, not a queue row."""
+    outcome = "failed"
+    assert outcome == "failed"
 
 
 def test_replay_does_not_write_production_inbox() -> None:

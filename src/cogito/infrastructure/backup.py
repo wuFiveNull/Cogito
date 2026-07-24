@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import sqlite3
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,7 +39,7 @@ class BackupService:
         self._staging = self._backups_dir / ".staging"
         self._staging.mkdir(exist_ok=True)
 
-    def create(self, *, note: str = "") -> BackupManifest:
+    def create(self, *, note: str = "", payload_root: str | Path | None = None) -> BackupManifest:
         """创建备份（SQLite online snapshot + Payload manifest）。"""
         import uuid
         from datetime import UTC, datetime
@@ -51,10 +52,20 @@ class BackupService:
         self._conn.backup(backup_conn)
         backup_conn.close()
         # staging → 完整校验后原子发布（简化：直接发布）
+        payload_manifest: tuple[str, ...] = ()
+        if payload_root is not None:
+            root = Path(payload_root)
+            if root.is_dir():
+                payload_manifest = tuple(
+                    f"{path.relative_to(root).as_posix()}:{hashlib.sha256(path.read_bytes()).hexdigest()}"
+                    for path in sorted(root.rglob("*"))
+                    if path.is_file()
+                )
         return BackupManifest(
             backup_id=bid,
             created_at=ts,
             sqlite_snapshot_uri=str(snapshot),
+            payload_manifest=payload_manifest,
         )
 
     def list_backups(self) -> list[Path]:

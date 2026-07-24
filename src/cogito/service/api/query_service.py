@@ -11,16 +11,25 @@ handler 绝不直接操作数据库；所有数据访问都经由此服务与现
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from typing import Any
 
 from cogito.config import Config
+from cogito.contracts.event_query import EventPayloadUnavailableError
 from cogito.contracts.clock import epoch_ms
+from cogito.infrastructure.payload_store import PayloadStore
+from cogito.service.delivery_effect_payload import load_delivery_effect_payload
 from cogito.service.retrieval_service import RetrievalService
 from cogito.store.capability_repo import CapabilityRepository
 from cogito.store.config_version_repo import ConfigVersionRepository
 from cogito.store.connector_repo import ConnectorRepository
 from cogito.store.digest_repo import DigestRepository
+from cogito.store.drift_repo import DriftRunRepository, DriftSkillStateRepository
+from cogito.store.event_projection_store import EventProjectionStore
+from cogito.store.event_message_reader import EventMessageReader
+from cogito.store.event_replay import replay_approval, replay_delivery
+from cogito.store.event_store import EventPage, EventStore
 from cogito.store.model_call_repo import ModelCallRepository
 from cogito.store.proactive_repo import (
     ProactiveCandidateRepository,
@@ -32,6 +41,7 @@ from cogito.store.repositories import TurnRepository
 from cogito.store.schedule_repo import ScheduleRepository
 from cogito.store.task_repo import TaskAttemptRepository, TaskRepository
 from cogito.store.tool_call_repo import ToolCallRepository
+from cogito.store.event_store_cutover import is_cutover_database
 
 
 class QueryService:
@@ -40,6 +50,7 @@ class QueryService:
     def __init__(self, conn: sqlite3.Connection, config: Config) -> None:
         self._conn = conn
         self._config = config
+        self._event_only = is_cutover_database(conn)
         self._task_repo = TaskRepository(conn)
         self._attempt_repo = TaskAttemptRepository(conn)
         self._turn_repo = TurnRepository(conn)
@@ -56,17 +67,50 @@ class QueryService:
         self._config_version_repo = ConfigVersionRepository(conn)
         self._digest_repo = DigestRepository(conn)
         self._schedule_repo = ScheduleRepository(conn)
+        self._event_store = EventStore(conn)
+        self._event_projections = EventProjectionStore(self._event_store)
+        self._event_messages = EventMessageReader(
+            conn,
+            PayloadStore(config.resolve_payload_dir(), conn),
+        )
+
+    def _identity_count(
+        self, stream_type: str, legacy_sql: str, *, active_only: bool = False
+    ) -> int:
+        projection_lookup = {
+            "conversation": self._event_projections.conversations,
+            "session": self._event_projections.sessions,
+            "endpoint": self._event_projections.endpoints,
+        }
+        projections = projection_lookup[stream_type](**({"active_only": True} if active_only else {}))
+        if projections:
+            return len(projections)
+        return int(self._conn.execute(legacy_sql).fetchone()[0])
+
+    @staticmethod
+    def _message_text(message: dict[str, Any] | None) -> str:
+        if not message:
+            return ""
+        return "\n".join(
+            str(part.get("inline_data", ""))
+            for part in message.get("content_parts", [])
+            if isinstance(part, dict)
+            and part.get("content_type") in {"text", "markdown"}
+            and part.get("inline_data")
+        )
 
     # ── status / usage ─────────────────────────────────────────
 
     def status(self, recovery_counts: dict[str, int] | None = None) -> dict[str, Any]:
         """系统运行状态快照。"""
         cfg = self._config
-        turn_total = self._turn_repo.count()
-        task_total = self._task_repo.count()
-        memory_total = self._conn.execute(
-            "SELECT COUNT(*) FROM memory_items WHERE deleted_at IS NULL"
-        ).fetchone()[0]
+        turn_total = len(self._event_projections.turns()) if self._event_only else self._turn_repo.count()
+        task_total = len(self._event_projections.tasks())
+        memory_total = (
+            len(self._event_projections.memories())
+            if self._event_only
+            else self._conn.execute("SELECT COUNT(*) FROM memory_items WHERE deleted_at IS NULL").fetchone()[0]
+        )
         return {
             "profile": cfg.runtime.profile,
             "model_configured": cfg.model.main.is_configured(),
@@ -75,15 +119,20 @@ class QueryService:
             "counts": {
                 "turns": turn_total,
                 "tasks": task_total,
-                "conversations": self._conn.execute(
-                    "SELECT COUNT(*) FROM conversations"
-                ).fetchone()[0],
-                "sessions": self._conn.execute(
-                    "SELECT COUNT(*) FROM sessions WHERE deleted_at IS NULL"
-                ).fetchone()[0],
-                "endpoints": self._conn.execute("SELECT COUNT(*) FROM endpoints").fetchone()[0],
+                "conversations": self._identity_count(
+                    "conversation", "SELECT COUNT(*) FROM conversations"
+                ),
+                "sessions": self._identity_count(
+                    "session", "SELECT COUNT(*) FROM sessions WHERE deleted_at IS NULL",
+                    active_only=True,
+                ),
+                "endpoints": self._identity_count("endpoint", "SELECT COUNT(*) FROM endpoints"),
                 "memory_items": memory_total,
-                "connectors": self._conn.execute("SELECT COUNT(*) FROM connectors").fetchone()[0],
+                "connectors": (
+                    len(self._event_projections.connector_sources())
+                    if self._event_only
+                    else self._conn.execute("SELECT COUNT(*) FROM connectors").fetchone()[0]
+                ),
             },
             "recovery": recovery_counts or {},
             "worker": {
@@ -100,16 +149,11 @@ class QueryService:
 
         since = epoch_ms(datetime.now(UTC) - timedelta(hours=hours))
         windowed = self._model_call_repo.usage_summary(since_ms=since)
-        # 最近失败数
-        failed_row = self._conn.execute(
-            "SELECT COUNT(*) FROM model_calls WHERE status='error' AND started_at >= ?",
-            (since,),
-        ).fetchone()
         return {
             "window_hours": hours,
             "windowed": windowed,
             "total": summary,
-            "recent_errors": int(failed_row[0]) if failed_row else 0,
+            "recent_errors": self._model_call_repo.failure_count(since),
         }
 
     # ── turns ──────────────────────────────────────────────────
@@ -117,41 +161,56 @@ class QueryService:
     def list_turns(
         self, status: str | None = None, limit: int = 100, offset: int = 0
     ) -> dict[str, Any]:
+        replayed = self._event_projections.turns(status=status)
+        if self._event_only:
+            return {
+                "items": replayed[offset : offset + limit],
+                "total": len(replayed),
+                "limit": limit,
+                "offset": offset,
+            }
         rows = self._turn_repo.list_(status=status, limit=limit, offset=offset)
-        total = self._turn_repo.count(status=status)
         return {
-            "items": [t.to_dict() for t in rows],
-            "total": total,
+            "items": [item.to_dict() for item in rows],
+            "total": self._turn_repo.count(status=status),
             "limit": limit,
             "offset": offset,
         }
 
     def get_turn(self, turn_id: str) -> dict[str, Any] | None:
-        turn = self._turn_repo.get(turn_id)
+        if not self._event_only:
+            turn = self._turn_repo.get(turn_id)
+            if turn is None:
+                return None
+            return {"turn": turn.to_dict(), "attempts": [item.to_dict() for item in self._turn_repo.list_attempts(turn_id)]}
+        turn = next(
+            (item for item in self._event_projections.turns() if item["turn_id"] == turn_id),
+            None,
+        )
         if turn is None:
             return None
-        attempts = self._turn_repo.list_attempts(turn_id)
-        return {"turn": turn.to_dict(), "attempts": [a.to_dict() for a in attempts]}
+        attempts = self._event_projections.attempts(turn_id=turn_id)
+        return {"turn": turn, "attempts": attempts}
 
     # ── tasks ──────────────────────────────────────────────────
 
     def list_tasks(
         self, status: str | None = None, limit: int = 100, offset: int = 0
     ) -> dict[str, Any]:
-        rows = self._task_repo.list_filtered(status=status, limit=limit, offset=offset)
-        total = self._task_repo.count(status=status)
+        replayed = self._event_projections.tasks(status=status)
         return {
-            "items": [t.to_dict() for t in rows],
-            "total": total,
+            "items": replayed[offset : offset + limit],
+            "total": len(replayed),
             "limit": limit,
             "offset": offset,
         }
 
     def get_task(self, task_id: str) -> dict[str, Any] | None:
         task = self._task_repo.get(task_id)
+        attempt_repo = self._attempt_repo
         if task is None:
             return None
-        attempts = self._attempt_repo.list_for_task(task_id)
+        attempts = attempt_repo.list_for_task(task_id)
         return {"task": task.to_dict(), "attempts": [a.to_dict() for a in attempts]}
 
     def list_tasks_for_principal(
@@ -167,43 +226,29 @@ class QueryService:
         Legacy/system tasks without a structured ``principal_id`` are deliberately
         invisible to the read-only MCP facade.
         """
-        predicate = "json_valid(payload_ref)=1 AND json_extract(payload_ref, '$.principal_id')=?"
-        params: list[Any] = [principal_id]
-        if status is not None:
-            predicate += " AND status=?"
-            params.append(status)
-        total_row = self._conn.execute(
-            f"SELECT COUNT(*) FROM tasks WHERE {predicate}",
-            params,
-        ).fetchone()
-        rows = self._conn.execute(
-            f"SELECT task_id FROM tasks WHERE {predicate} "
-            "ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            (*params, max(1, min(limit, 100)), max(0, offset)),
-        ).fetchall()
-        items = []
-        for row in rows:
-            task = self._task_repo.get(str(row["task_id"]))
-            if task is not None:
-                items.append(_public_task(task.to_dict()))
-        return {"items": items, "total": int(total_row[0]) if total_row else 0}
+        matched = [
+            task
+            for task in self._task_repo.list_filtered(status=status, limit=10_000)
+            if self._task_principal_id(task.payload_ref) == principal_id
+        ]
+        return {
+            "items": [
+                _public_task(task.to_dict())
+                for task in matched[offset : offset + max(1, min(limit, 100))]
+            ],
+            "total": len(matched),
+        }
 
     def get_task_for_principal(
         self,
         task_id: str,
         principal_id: str,
     ) -> dict[str, Any] | None:
-        row = self._conn.execute(
-            "SELECT 1 FROM tasks WHERE task_id=? AND json_valid(payload_ref)=1 "
-            "AND json_extract(payload_ref, '$.principal_id')=?",
-            (task_id, principal_id),
-        ).fetchone()
-        if row is None:
-            return None
         task = self._task_repo.get(task_id)
-        if task is None:
+        attempt_repo = self._attempt_repo
+        if task is None or self._task_principal_id(task.payload_ref) != principal_id:
             return None
-        attempts = self._attempt_repo.list_for_task(task_id)
+        attempts = attempt_repo.list_for_task(task_id)
         return {
             "task": _public_task(task.to_dict()),
             "attempts": [_public_task_attempt(item.to_dict()) for item in attempts],
@@ -294,6 +339,21 @@ class QueryService:
 
     def list_channels(self) -> dict[str, Any]:
         """端点按渠道类型聚合。"""
+        endpoints = self._event_projections.endpoints()
+        if endpoints:
+            counts: dict[str, int] = {}
+            for endpoint in endpoints:
+                if endpoint["status"] == "active":
+                    channel_type = endpoint["channel_type"]
+                    counts[channel_type] = counts.get(channel_type, 0) + 1
+            return {
+                "items": [
+                    {"channel_type": channel_type, "count": count}
+                    for channel_type, count in sorted(
+                        counts.items(), key=lambda item: (-item[1], item[0])
+                    )
+                ]
+            }
         rows = self._conn.execute(
             "SELECT channel_type, COUNT(*) AS n FROM endpoints "
             "WHERE status='active' GROUP BY channel_type ORDER BY n DESC"
@@ -306,6 +366,19 @@ class QueryService:
         规则：若 conversation 下存在至少一个未删除的 session，则保留；
         若 conversation 下无任何活跃 session（全部已删除或原本无 session），则排除。
         """
+        conversations = self._event_projections.conversations()
+        if conversations:
+            active_conversation_ids = {
+                session["conversation_id"]
+                for session in self._event_projections.sessions(active_only=True)
+            }
+            return {
+                "items": [
+                    conversation
+                    for conversation in reversed(conversations)
+                    if conversation["conversation_id"] in active_conversation_ids
+                ][:limit]
+            }
         rows = self._conn.execute(
             "SELECT c.* FROM conversations c "
             "WHERE EXISTS ("
@@ -331,7 +404,36 @@ class QueryService:
         若直接按 messages.conversation_id 匹配会查不到（那是内部 UUID），
         导致刷新后历史消息为空。
         """
-        # 先尝试作为内部 UUID 直接匹配；若无效则回退到 platform_conversation_id 查找
+        # 新运行时优先由 Conversation/Message Event 回放。
+        conversations = self._event_projections.conversations()
+        if conversations:
+            conversation = next(
+                (
+                    item
+                    for item in conversations
+                    if item["conversation_id"] == conversation_id
+                    or item["platform_conversation_id"] == conversation_id
+                ),
+                None,
+            )
+            if conversation is None:
+                return {"conversation_id": conversation_id, "items": []}
+            items = []
+            for message in self._event_messages.list_for_conversation(
+                conversation["conversation_id"]
+            )[:limit]:
+                items.append(
+                    {
+                        "message_id": message["message_id"],
+                        "role": message.get("role", ""),
+                        "created_at": message.get("created_at", ""),
+                        "receive_sequence": message.get("receive_sequence", 0),
+                        "text": self._message_text(message),
+                    }
+                )
+            return {"conversation_id": conversation_id, "items": items}
+
+        # Compatibility path for pre-backfill tables.
         internal_id = self._conn.execute(
             "SELECT conversation_id FROM conversations WHERE conversation_id=?",
             (conversation_id,),
@@ -371,70 +473,109 @@ class QueryService:
         limit: int = 100,
         offset: int = 0,
     ) -> dict[str, Any]:
-        if status:
-            rows = self._conn.execute(
-                "SELECT * FROM deliveries WHERE status=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                (status, limit, offset),
-            ).fetchall()
-            total = self._conn.execute(
-                "SELECT COUNT(*) FROM deliveries WHERE status=?",
-                (status,),
-            ).fetchone()[0]
-        else:
-            rows = self._conn.execute(
-                "SELECT * FROM deliveries ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                (limit, offset),
-            ).fetchall()
-            total = self._conn.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0]
-        return {"items": [dict(r) for r in rows], "total": total, "limit": limit, "offset": offset}
+        replayed = self._event_projections.deliveries(status=status)
+        return {
+            "items": replayed[offset : offset + limit],
+            "total": len(replayed),
+            "limit": limit,
+            "offset": offset,
+        }
+
+    @staticmethod
+    def _task_principal_id(payload_ref: str | None) -> str:
+        if not payload_ref:
+            return ""
+        try:
+            value = json.loads(payload_ref)
+        except (TypeError, json.JSONDecodeError):
+            return ""
+        return str(value.get("principal_id", "")) if isinstance(value, dict) else ""
 
     # ── traces ─────────────────────────────────────────────────
 
     def get_trace(self, trace_id: str) -> dict[str, Any] | None:
-        rows = self._model_call_repo.find_by_trace(trace_id)
-        # 也尝试按 trace_id 在 events 表中查找
-        events = self._conn.execute(
-            "SELECT * FROM events WHERE correlation_id=? OR causation_id=? OR event_id=? "
-            "ORDER BY occurred_at ASC LIMIT 200",
-            (trace_id, trace_id, trace_id),
-        ).fetchall()
-        if not rows and not events:
+        trace = self._event_store.trace(trace_id)
+        if trace is None:
             return None
-        # 关联的 run_attempts
-        attempts = [
-            dict(r)
-            for r in self._conn.execute(
-                "SELECT * FROM run_attempts WHERE attempt_id IN "
-                "(SELECT attempt_id FROM model_calls WHERE trace_id=?) "
-                "ORDER BY started_at ASC",
-                (trace_id,),
-            ).fetchall()
-        ]
-        # 关联的 tool_calls
-        tool_calls = self._conn.execute(
-            "SELECT * FROM tool_calls WHERE attempt_id IN "
-            "(SELECT attempt_id FROM run_attempts WHERE attempt_id IN "
-            "(SELECT attempt_id FROM model_calls WHERE trace_id=?)) "
-            "ORDER BY started_at ASC LIMIT 200",
-            (trace_id,),
-        ).fetchall()
-        # 关联的 delivery attempts
-        deliveries = self._conn.execute(
-            "SELECT d.delivery_id, d.status, da.attempt_id, da.status AS attempt_status "
-            "FROM delivery_attempts da "
-            "JOIN deliveries d ON d.delivery_id = da.delivery_id "
-            "WHERE da.attempt_id IN (SELECT attempt_id FROM model_calls WHERE trace_id=?) "
-            "LIMIT 50",
-            (trace_id,),
-        ).fetchall()
+        trace["events"] = [_public_event(event) for event in trace["events"]]
+        return trace
+
+    def event_timeline(self, session_id: str, limit: int = 500) -> dict[str, Any]:
+        """Return a session's canonical Event timeline in causal order."""
+        events = self._event_store.list_events(session_id=session_id, limit=limit)
         return {
-            "trace_id": trace_id,
-            "model_calls": [r.to_dict() for r in rows],
-            "attempts": attempts,
-            "events": [dict(r) for r in events],
-            "tool_calls": [dict(r) for r in tool_calls],
-            "deliveries": [dict(r) for r in deliveries],
+            "session_id": session_id,
+            "events": [_public_event(event.to_dict()) for event in reversed(events)],
         }
+
+    def list_canonical_events(
+        self,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+        before: int | None = None,
+        event_type: str | None = None,
+        stream_type: str | None = None,
+        stream_id: str | None = None,
+        trace_id: str | None = None,
+        session_id: str | None = None,
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
+        conversation_id: str | None = None,
+        turn_id: str | None = None,
+        attempt_id: str | None = None,
+        task_id: str | None = None,
+    ) -> dict[str, Any]:
+        page: EventPage = self._event_store.list_events_page(
+            limit=limit,
+            cursor=cursor,
+            before=before,
+            event_type=event_type,
+            stream_type=stream_type,
+            stream_id=stream_id,
+            trace_id=trace_id,
+            session_id=session_id,
+            correlation_id=correlation_id,
+            causation_id=causation_id,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            attempt_id=attempt_id,
+            task_id=task_id,
+        )
+        return {
+            "items": [_public_event(event.to_dict()) for event in page.events],
+            "next_cursor": page.next_cursor,
+        }
+
+    def event_payload_metadata(self, event_id: str) -> dict[str, Any] | None:
+        """Return only a guarded payload reference, never raw payload bytes."""
+        event = self._event_store.get(event_id)
+        if event is None:
+            return None
+        return {
+            "event_id": event_id,
+            "payload_ref": event.payload_ref,
+            "payload_hash": event.payload_hash,
+        }
+
+    def read_event_payload(self, event_id: str) -> bytes | None:
+        """Resolve guarded Event payload bytes without exposing them in the Event log.
+
+        The HTTP adapter is responsible for authenticating the caller before it
+        calls this method.  Missing and expired payloads remain observable from
+        the immutable Event but are not silently treated as an empty payload.
+        """
+        event = self._event_store.get(event_id)
+        if event is None:
+            return None
+        if not event.payload_ref:
+            raise EventPayloadUnavailableError("event has no payload reference")
+        data = PayloadStore(self._config.resolve_payload_dir(), self._conn).get(event.payload_ref)
+        if data is None:
+            raise EventPayloadUnavailableError("event payload is unavailable or expired")
+        if event.payload_hash and hashlib.sha256(data).hexdigest() != event.payload_hash:
+            raise EventPayloadUnavailableError("event payload hash does not match")
+        return data
 
     # ── sessions ───────────────────────────────────────────────
 
@@ -445,6 +586,39 @@ class QueryService:
         每个 session 用其下最新一条用户提问（user role 消息文本）作为 name，
         便于在列表中直接识别会话内容。
         """
+        sessions = self._event_projections.sessions(active_only=True)
+        if sessions:
+            turns = self._event_projections.turns()
+            turns_by_session: dict[str, list[dict[str, Any]]] = {}
+            for turn in turns:
+                turns_by_session.setdefault(turn["session_id"], []).append(turn)
+            items: list[dict[str, Any]] = []
+            for session in sessions:
+                session_turns = turns_by_session.get(session["session_id"], [])
+                messages = self._event_messages.list_for_session(session["session_id"])
+                user_messages = [message for message in messages if message.get("role") == "user"]
+                latest_user = user_messages[-1] if user_messages else None
+                text = self._message_text(latest_user) if latest_user is not None else ""
+                first_line = text.split("\n")[0].strip() if text else ""
+                last_turn_at = max(
+                    (turn.get("created_at") or 0 for turn in session_turns), default=0
+                )
+                items.append(
+                    {
+                        **session,
+                        "turn_count": len(session_turns),
+                        "last_turn_at": last_turn_at or None,
+                        "name": first_line[:42] if first_line else session["session_id"][:12],
+                        "latest_user_at": latest_user.get("created_at") if latest_user else None,
+                    }
+                )
+            items.sort(
+                key=lambda item: (item.get("last_turn_at") or item.get("created_at") or 0),
+                reverse=True,
+            )
+            return {"items": items[:limit], "total": len(items)}
+
+        # Compatibility path for pre-backfill tables.
         rows = self._conn.execute(
             "SELECT s.session_id, s.conversation_id, s.status, s.created_at, "
             "       COUNT(t.turn_id) AS turn_count, "
@@ -500,6 +674,20 @@ class QueryService:
 
         已软删除的会话返回 None（页面不可访问）。
         """
+        event_session = next(
+            (
+                session
+                for session in self._event_projections.sessions()
+                if session["session_id"] == session_id
+            ),
+            None,
+        )
+        if event_session is not None:
+            if event_session["status"] != "active":
+                return None
+            return self._event_session_trace(event_session)
+
+        # Compatibility path for pre-backfill tables.
         session = self._conn.execute(
             "SELECT * FROM sessions WHERE session_id=? AND deleted_at IS NULL", (session_id,)
         ).fetchone()
@@ -591,6 +779,128 @@ class QueryService:
             },
         }
 
+    def _event_session_trace(self, session: dict[str, Any]) -> dict[str, Any]:
+        messages: list[dict[str, Any]] = []
+        previous_at: int | None = None
+        for message in self._event_messages.list_for_session(session["session_id"]):
+            text = self._message_text(message)
+            created_at = message.get("created_at", "")
+            current_at = self._parse_ts_ms(created_at)
+            messages.append(
+                {
+                    "message_id": message["message_id"],
+                    "role": message.get("role", ""),
+                    "created_at": created_at,
+                    "receive_sequence": message.get("receive_sequence", 0),
+                    "text": text,
+                    "preview": text.split("\n")[0].strip()[:80] if text else "",
+                    "since_prev_ms": (
+                        current_at - previous_at
+                        if current_at is not None and previous_at is not None
+                        else (0 if current_at is not None else None)
+                    ),
+                }
+            )
+            if current_at is not None:
+                previous_at = current_at
+
+        turns_out: list[dict[str, Any]] = []
+        total_model_calls = total_input_tokens = total_output_tokens = 0
+        for turn in self._event_projections.turns():
+            if turn["session_id"] != session["session_id"]:
+                continue
+            turn_data = dict(turn)
+            attempts_out: list[dict[str, Any]] = []
+            for attempt in self._event_projections.attempts(turn_id=turn["turn_id"]):
+                attempt_data = dict(attempt)
+                started_at = attempt_data.get("started_at")
+                finished_at = attempt_data.get("finished_at")
+                attempt_data["duration_ms"] = (
+                    finished_at - started_at
+                    if isinstance(started_at, int) and isinstance(finished_at, int)
+                    else None
+                )
+                model_calls = [
+                    model_call.to_dict()
+                    for model_call in self._model_call_repo.find_by_attempt(attempt["attempt_id"])
+                ]
+                attempt_data["model_calls"] = model_calls
+                total_model_calls += len(model_calls)
+                total_input_tokens += sum(call.get("input_tokens", 0) or 0 for call in model_calls)
+                total_output_tokens += sum(call.get("output_tokens", 0) or 0 for call in model_calls)
+                attempts_out.append(attempt_data)
+            turn_data["attempts"] = attempts_out
+            turns_out.append(turn_data)
+        return {
+            "session": session,
+            "messages": messages,
+            "turns": turns_out,
+            "summary": {
+                "turn_count": len(turns_out),
+                "model_call_count": total_model_calls,
+                "total_input_tokens": total_input_tokens,
+                "total_output_tokens": total_output_tokens,
+                "message_count": len(messages),
+            },
+        }
+
+    def _event_conversation_trace(self, conversation: dict[str, Any]) -> dict[str, Any]:
+        sessions = [
+            session
+            for session in self._event_projections.sessions(
+                conversation_id=conversation["conversation_id"], active_only=True
+            )
+        ]
+        active_session_ids = {session["session_id"] for session in sessions}
+        messages = []
+        for message in self._event_messages.list_for_conversation(conversation["conversation_id"]):
+            text = self._message_text(message)
+            messages.append(
+                {
+                    "message_id": message["message_id"],
+                    "role": message.get("role", ""),
+                    "direction": message.get("direction", ""),
+                    "created_at": message.get("created_at", ""),
+                    "receive_sequence": message.get("receive_sequence", 0),
+                    "reply_to_message_id": message.get("reply_to_message_id", ""),
+                    "platform_message_id": message.get("platform_message_id", ""),
+                    "session_id": message.get("session_id", ""),
+                    "text_len": len(text),
+                    "text_preview": text[:120],
+                }
+            )
+        turns_out = []
+        for turn in self._event_projections.turns():
+            if turn["session_id"] not in active_session_ids:
+                continue
+            turn_data = dict(turn)
+            attempts = self._event_projections.attempts(turn_id=turn["turn_id"])
+            for attempt in attempts:
+                attempt["model_calls"] = [
+                    model_call.to_dict()
+                    for model_call in self._model_call_repo.find_by_attempt(attempt["attempt_id"])
+                ]
+                attempt["model_call_count"] = len(attempt["model_calls"])
+                attempt["error_calls"] = sum(
+                    call.get("status") == "error" for call in attempt["model_calls"]
+                )
+            turn_data["attempts"] = attempts
+            turn_data["attempt_count"] = len(attempts)
+            turn_data["deliveries"] = [
+                delivery
+                for delivery in self._event_projections.deliveries()
+                if delivery["turn_id"] == turn["turn_id"]
+            ]
+            turn_data["delivery_count"] = len(turn_data["deliveries"])
+            turns_out.append(turn_data)
+        return {
+            "conversation": conversation,
+            "sessions": sessions,
+            "messages": messages,
+            "turns": turns_out,
+            "diagnosis": self._diagnose_chain(messages, turns_out),
+        }
+
     @staticmethod
     def _parse_ts_ms(value: object) -> int | None:
         """把 ISO 字符串或整数毫秒时间解析为毫秒 epoch；解析失败返回 None。"""
@@ -621,6 +931,19 @@ class QueryService:
         用于定位"用户发消息后无响应"类问题。每条记录含时间戳与耗时，
         哪一环卡住/失败一目了然。
         """
+        event_conversation = next(
+            (
+                conversation
+                for conversation in self._event_projections.conversations()
+                if conversation["conversation_id"] == conversation_id
+                or conversation["platform_conversation_id"] == conversation_id
+            ),
+            None,
+        )
+        if event_conversation is not None:
+            return self._event_conversation_trace(event_conversation)
+
+        # Compatibility path for pre-backfill tables.
         conv = self._conn.execute(
             "SELECT * FROM conversations WHERE conversation_id=?", (conversation_id,)
         ).fetchone()
@@ -694,18 +1017,11 @@ class QueryService:
             td["attempts"] = attempts_out
             td["attempt_count"] = len(attempts_out)
             # deliveries for this turn
-            deliveries = self._conn.execute(
-                "SELECT * FROM deliveries WHERE "
-                "json_extract(target_snapshot, '$.conversation_id')=? "
-                "AND created_at >= ? "
-                "ORDER BY created_at ASC",
-                (real_id, t["created_at"]),
-            ).fetchall()
-            del_out: list[dict[str, Any]] = []
-            for d in deliveries:
-                dd = dict(d)
-                dd["last_error"] = dd.get("last_error")
-                del_out.append(dd)
+            del_out = [
+                delivery
+                for delivery in self._event_projections.deliveries()
+                if delivery["turn_id"] == t["turn_id"]
+            ]
             td["deliveries"] = del_out
             td["delivery_count"] = len(del_out)
             turns_out.append(td)
@@ -869,6 +1185,18 @@ class QueryService:
 
         return int(datetime.now(UTC).timestamp() * 1000)
 
+    def _pending_approval_count(self) -> int:
+        """Count visible pending approvals by replaying canonical approval streams."""
+        streams: dict[str, list[Any]] = {}
+        for event in self._event_store.read_stream_type("approval"):
+            streams.setdefault(event.stream_id, []).append(event)
+        return sum(
+            1
+            for approval_id, events in streams.items()
+            if (state := replay_approval(events, approval_id)) is not None
+            and state.status == "pending"
+        )
+
     # ── dashboard summary / attention / health ──────────────────
 
     def dashboard_summary(self) -> dict[str, Any]:
@@ -881,15 +1209,11 @@ class QueryService:
         now = datetime.now(UTC).isoformat()
 
         # backlog 计数
-        pending_approvals = self._conn.execute(
-            "SELECT COUNT(*) FROM approvals WHERE status='pending'"
-        ).fetchone()[0]
+        pending_approvals = self._pending_approval_count()
         failed_tasks = self._conn.execute(
             "SELECT COUNT(*) FROM tasks WHERE status='failed'"
         ).fetchone()[0]
-        unknown_deliveries = self._conn.execute(
-            "SELECT COUNT(*) FROM deliveries WHERE status='unknown'"
-        ).fetchone()[0]
+        unknown_deliveries = len(self._event_projections.deliveries(status="unknown"))
         paused_connectors = self._conn.execute(
             "SELECT COUNT(*) FROM connectors WHERE status='paused'"
         ).fetchone()[0]
@@ -953,9 +1277,7 @@ class QueryService:
     def attention_items(self) -> list[dict[str, Any]]:
         """生成待处理事项列表。"""
         items: list[dict[str, Any]] = []
-        rows = self._conn.execute(
-            "SELECT COUNT(*) FROM approvals WHERE status='pending'"
-        ).fetchone()[0]
+        rows = self._pending_approval_count()
         if rows:
             items.append(
                 {
@@ -977,9 +1299,7 @@ class QueryService:
                     "target_route": "/tasks",
                 }
             )
-        rows = self._conn.execute(
-            "SELECT COUNT(*) FROM deliveries WHERE status='unknown'"
-        ).fetchone()[0]
+        rows = len(self._event_projections.deliveries(status="unknown"))
         if rows:
             items.append(
                 {
@@ -1029,20 +1349,6 @@ class QueryService:
                     "label": "dry-run 待复核",
                     "count": rows,
                     "target_route": "/proactive",
-                }
-            )
-        # Dead letter 事件
-        rows = self._conn.execute(
-            "SELECT COUNT(*) FROM outbox_events WHERE status='dead_letter'"
-        ).fetchone()[0]
-        if rows:
-            items.append(
-                {
-                    "kind": "dead_letter",
-                    "severity": "danger",
-                    "label": "Dead Letter 事件",
-                    "count": rows,
-                    "target_route": "/connectors",
                 }
             )
         return items
@@ -1121,23 +1427,14 @@ class QueryService:
         )
 
         # ── Delivery Backlog ──
-        pending_del = self._conn.execute(
-            "SELECT COUNT(*) FROM deliveries WHERE status IN ('pending','sending','scheduled')"
-        ).fetchone()[0]
+        pending_del = sum(
+            1
+            for delivery in self._event_projections.deliveries()
+            if delivery["status"] in {"pending", "sending", "scheduled"}
+        )
         del_status = "ok" if pending_del < 10 else ("warn" if pending_del < 50 else "danger")
         components.append(
             {"name": "Delivery", "status": del_status, "detail": f"{pending_del} 个待处理投递"}
-        )
-
-        # ── Outbox Backlog ──
-        outbox_pending = self._conn.execute(
-            "SELECT COUNT(*) FROM outbox_events WHERE status='pending'"
-        ).fetchone()[0]
-        outbox_status = (
-            "ok" if outbox_pending < 20 else ("warn" if outbox_pending < 100 else "danger")
-        )
-        components.append(
-            {"name": "Outbox", "status": outbox_status, "detail": f"{outbox_pending} 个待处理事件"}
         )
 
         # Overall readiness 判定
@@ -1240,21 +1537,21 @@ class QueryService:
         if batch_id:
             candidate_count = self._conn.execute(
                 "SELECT COUNT(*) FROM proactive_candidates c WHERE c.source_payload_ref IN "
-                "(SELECT payload_ref FROM outbox_events WHERE correlation_id=? "
-                "AND event_type='SourceEventIngested')",
+                "(SELECT payload_ref FROM event_log WHERE correlation_id=? "
+                "AND event_type='connector.source.ingested')",
                 (batch_id,),
             ).fetchone()[0]
             decision_count = self._conn.execute(
                 "SELECT COUNT(*) FROM proactive_decisions_v2 d JOIN proactive_candidates c "
                 "ON c.candidate_id=d.candidate_id WHERE c.source_payload_ref IN "
-                "(SELECT payload_ref FROM outbox_events WHERE correlation_id=? "
-                "AND event_type='SourceEventIngested')",
+                "(SELECT payload_ref FROM event_log WHERE correlation_id=? "
+                "AND event_type='connector.source.ingested')",
                 (batch_id,),
             ).fetchone()[0]
             evaluating_count = self._conn.execute(
                 "SELECT COUNT(*) FROM proactive_candidates c WHERE c.status='evaluating' "
-                "AND c.source_payload_ref IN (SELECT payload_ref FROM outbox_events "
-                "WHERE correlation_id=? AND event_type='SourceEventIngested')",
+                "AND c.source_payload_ref IN (SELECT payload_ref FROM event_log "
+                "WHERE correlation_id=? AND event_type='connector.source.ingested')",
                 (batch_id,),
             ).fetchone()[0]
         poll_status = task["status"]
@@ -1350,16 +1647,18 @@ class QueryService:
                 actions[row["action"]] = row["n"]
         except Exception:
             pass
-        # receipt_kind 分布 (delivery_receipts)
+        # Delivery 结果分布由 Event 生命周期重放，不读旧 receipt projection。
         receipt_kinds: dict[str, int] = {}
-        try:
-            for row in self._conn.execute(
-                "SELECT receipt_kind, COUNT(*) AS n FROM delivery_receipts "
-                "WHERE receipt_kind IS NOT NULL GROUP BY receipt_kind"
-            ).fetchall():
-                receipt_kinds[row["receipt_kind"]] = row["n"]
-        except Exception:
-            pass
+        receipt_kind_by_event = {
+            "delivery.completed": "confirmed",
+            "delivery.failed": "failed",
+            "delivery.unknown": "unknown",
+            "delivery.cancelled": "cancelled",
+        }
+        for event in self._event_store.read_stream_type("delivery"):
+            kind = receipt_kind_by_event.get(event.event_type)
+            if kind:
+                receipt_kinds[kind] = receipt_kinds.get(kind, 0) + 1
         # proactive_feedback signals 聚合
         fb: dict[str, int] = {}
         try:
@@ -1390,6 +1689,38 @@ class QueryService:
 
     def drift_status(self, principal_id: str = "owner") -> dict[str, Any]:
         """Drift 模块当前状态（替代占位值，返回真实数据）。"""
+        event_runs = self._event_drift_runs(principal_id)
+        if event_runs:
+            latest = max(event_runs, key=lambda run: int(run.get("created_at") or 0))
+            active = sum(
+                run.get("status") in {"admitted", "running", "waiting", "paused"}
+                for run in event_runs
+            )
+            latest_reason = next(
+                (
+                    run.get("preemption_reason")
+                    for run in sorted(
+                        event_runs,
+                        key=lambda run: int(run.get("finished_at") or run.get("created_at") or 0),
+                        reverse=True,
+                    )
+                    if run.get("preemption_reason")
+                ),
+                None,
+            )
+            return {
+                "enabled": True,
+                "total_runs": len(event_runs),
+                "active_runs": active,
+                "latest_preemption_reason": latest_reason,
+                "latest_skill": latest.get("skill_name"),
+                "latest_skill_version": latest.get("skill_version"),
+                "signals_pending": self._conn.execute(
+                    "SELECT COUNT(*) FROM drift_preemption_signals "
+                    "WHERE principal_id=? AND preempt_requested=1",
+                    (principal_id,),
+                ).fetchone()[0],
+            }
         row = self._conn.execute(
             "SELECT COUNT(*) AS total, "
             "SUM(CASE WHEN status IN ('admitted','running','waiting','paused') "
@@ -1430,6 +1761,21 @@ class QueryService:
         }
 
     def list_drift_runs(self, principal_id: str = "owner", limit: int = 50) -> list[dict[str, Any]]:
+        event_runs = self._event_drift_runs(principal_id)
+        if event_runs:
+            return [
+                {
+                    key: run.get(key)
+                    for key in (
+                        "drift_run_id", "skill_name", "skill_version", "status",
+                        "preemption_reason", "steps_taken", "budget_used_json",
+                        "started_at", "finished_at", "created_at",
+                    )
+                }
+                for run in sorted(
+                    event_runs, key=lambda run: int(run.get("created_at") or 0), reverse=True
+                )[:limit]
+            ]
         rows = self._conn.execute(
             "SELECT drift_run_id, skill_name, skill_version, status, "
             "preemption_reason, steps_taken, budget_used_json, "
@@ -1444,6 +1790,10 @@ class QueryService:
         self,
         principal_id: str = "owner",
     ) -> list[dict[str, Any]]:
+        if self._event_store.read_stream_type("drift_skill_state", limit=1):
+            return DriftSkillStateRepository(self._conn, event_sourced=True).all_states(
+                principal_id
+            )
         rows = self._conn.execute(
             "SELECT skill_name, skill_version, last_status, last_run_at, "
             "run_count, checkpoint_ref "
@@ -1457,6 +1807,35 @@ class QueryService:
 
     def drift_metrics(self, principal_id: str = "owner") -> dict[str, Any]:
         """Drift 核心指标 (M7)。"""
+        event_runs = self._event_drift_runs(principal_id)
+        if event_runs:
+            total = len(event_runs)
+            completed = sum(run.get("status") == "completed" for run in event_runs)
+            no_value = sum(
+                str(run.get("finish_summary") or "").startswith("no_value")
+                for run in event_runs
+            )
+            paused_total = sum(run.get("status") == "paused" for run in event_runs)
+            resumed = sum(
+                "resumed" in str(run.get("finish_summary") or "") for run in event_runs
+            )
+            return {
+                "admission_rate": None,
+                "total_runs": total,
+                "completion_rate": (completed / total) if total else 0.0,
+                "no_value_rate": (no_value / total) if total else 0.0,
+                "paused_total": paused_total,
+                "paused_recovery_rate": (resumed / paused_total) if paused_total else 1.0,
+                "duplicate_side_effect_count": self._conn.execute(
+                    "SELECT COUNT(*) FROM drift_results "
+                    "WHERE result_kind IN ('duplicate_side_effect_suspect',)"
+                ).fetchone()[0],
+                "unauthorized_tool_execution_count": self._conn.execute(
+                    "SELECT COUNT(*) FROM proactive_decisions_v2 "
+                    "WHERE action='unauthorized_tool_rejected'"
+                ).fetchone()[0],
+                "model_cost_per_useful_result": None,
+            }
         total = self._conn.execute(
             "SELECT COUNT(*) FROM drift_runs WHERE principal_id=?",
             (principal_id,),
@@ -1504,79 +1883,75 @@ class QueryService:
             "model_cost_per_useful_result": None,
         }
 
-    # ── outbox / events / dead letter ───────────────────────────
+    def _event_drift_runs(self, principal_id: str) -> list[dict[str, Any]]:
+        if not self._event_store.read_stream_type("drift_run", limit=1):
+            return []
+        return DriftRunRepository(self._conn, event_sourced=True).list_runs(principal_id)
 
-    def list_outbox(self, limit: int = 50) -> list[dict[str, Any]]:
-        rows = self._conn.execute(
-            "SELECT * FROM outbox_events ORDER BY created_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [dict(r) for r in rows]
+    # ── canonical Event Explorer ────────────────────────────────
 
     def list_events(self, limit: int = 50) -> list[dict[str, Any]]:
-        rows = self._conn.execute(
-            "SELECT * FROM events ORDER BY occurred_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-    def list_dead_letter(self) -> list[dict[str, Any]]:
-        rows = self._conn.execute(
-            "SELECT * FROM outbox_events WHERE status='dead_letter' "
-            "ORDER BY created_at DESC LIMIT 100"
-        ).fetchall()
-        return [dict(r) for r in rows]
+        return self.list_canonical_events(limit=limit)
 
     # ── delivery detail (attempts + receipts) ────────────────────
 
     def get_delivery_detail(self, delivery_id: str) -> dict[str, Any] | None:
         """投递详情：delivery + attempts timeline + receipts。"""
-        delivery = self._conn.execute(
-            "SELECT * FROM deliveries WHERE delivery_id=?", (delivery_id,)
-        ).fetchone()
-        if delivery is None:
-            return None
-        delivery_dict = dict(delivery)
-        # attempts timeline
-        attempts = self._conn.execute(
-            "SELECT * FROM delivery_attempts WHERE delivery_id=? ORDER BY attempt_no ASC",
-            (delivery_id,),
-        ).fetchall()
-        attempts_out: list[dict[str, Any]] = []
-        for a in attempts:
-            a_dict = dict(a)
-            # receipts for this attempt
-            receipts = self._conn.execute(
-                "SELECT * FROM delivery_receipts WHERE delivery_attempt_id=? "
-                "ORDER BY operation_seq ASC",
-                (a["attempt_id"],),
-            ).fetchall()
-            a_dict["receipts"] = [dict(r) for r in receipts]
-            # 失败归因
-            if a["error"]:
-                a_dict["failure_reason"] = a["error"]
-            elif a_dict["status"] == "failed":
-                # 从关联 model_calls 找 error_category
-                err = self._conn.execute(
-                    "SELECT error_category FROM model_calls "
-                    "WHERE attempt_id=? AND status='error' LIMIT 1",
-                    (a["attempt_id"],),
-                ).fetchone()
-                a_dict["failure_reason"] = err["error_category"] if err else "unknown"
-            else:
-                a_dict["failure_reason"] = None
-            attempts_out.append(a_dict)
-        delivery_dict["attempts"] = attempts_out
-        # streaming operation sequence（按 operation_seq 聚合所有 receipts）
-        all_receipts = self._conn.execute(
-            "SELECT * FROM delivery_receipts WHERE delivery_id=? ORDER BY operation_seq ASC",
-            (delivery_id,),
-        ).fetchall()
-        delivery_dict["operation_sequence"] = [dict(r) for r in all_receipts]
-        # 关联对象
-        delivery_dict["related_turn"] = delivery_dict.get("turn_id")
-        delivery_dict["related_message"] = delivery_dict.get("final_message_id")
-        return delivery_dict
+        events = self._event_store.read_stream("delivery", delivery_id)
+        projection = replay_delivery(events, delivery_id)
+        if projection is not None:
+            request = next(event for event in events if event.event_type == "delivery.requested")
+            target_snapshot: dict[str, Any] = {}
+            content_ref: str | None = None
+            idempotency_key = ""
+            if request.payload_ref:
+                try:
+                    payload = load_delivery_effect_payload(
+                        PayloadStore(self._config.resolve_payload_dir(), self._conn),
+                        request.payload_ref,
+                    )
+                    target_snapshot = payload.target_snapshot
+                    content_ref = payload.content_ref
+                    idempotency_key = payload.idempotency_key
+                except (LookupError, ValueError):
+                    pass
+            attempts = [
+                {
+                    "attempt_id": event.context.attempt_id or event.event_id,
+                    "status": "sending",
+                    "started_at": event.occurred_at,
+                    "receipts": [],
+                    "failure_reason": None,
+                }
+                for event in events
+                if event.event_type == "delivery.started"
+            ]
+            operation_sequence = [
+                {
+                    "event_id": event.event_id,
+                    "event_type": event.event_type,
+                    "outcome": event.outcome,
+                    "error_category": event.error_category,
+                    "platform_message_id": event.attributes.get("platform_message_id"),
+                    "observed_at": event.occurred_at,
+                }
+                for event in events
+            ]
+            return {
+                "delivery_id": delivery_id,
+                "status": projection.status,
+                "target_snapshot": target_snapshot,
+                "content_ref": content_ref,
+                "idempotency_key": idempotency_key,
+                "attempt_count": len(attempts),
+                "platform_message_id": projection.platform_message_id,
+                "stream_version": projection.stream_version,
+                "attempts": attempts,
+                "operation_sequence": operation_sequence,
+                "related_turn": request.context.turn_id or None,
+                "related_message": None,
+            }
+        return None
 
     # ── proactive context (PROACTIVE_CONTEXT.md) ────────────────
 
@@ -1677,12 +2052,18 @@ class QueryService:
             (connector_id,),
         ).fetchall()
         result["items"] = [dict(r) for r in items]
-        # outbox events
-        events = self._conn.execute(
-            "SELECT * FROM outbox_events WHERE aggregate_id=? ORDER BY created_at DESC LIMIT 50",
-            (connector_id,),
+        # Canonical Event facts linked by stream or safe connector metadata.
+        event_ids = self._conn.execute(
+            "SELECT event_id FROM event_log WHERE stream_id=? OR "
+            "(json_valid(attributes_json)=1 AND json_extract(attributes_json, '$.connector_id')=?) "
+            "ORDER BY occurred_at DESC, event_id DESC LIMIT 50",
+            (connector_id, connector_id),
         ).fetchall()
-        result["events"] = [dict(r) for r in events]
+        result["events"] = [
+            _public_event(event.to_dict())
+            for row in event_ids
+            if (event := self._event_store.get(row["event_id"])) is not None
+        ]
         return result
 
     # ── audit ────────────────────────────────────────────────────
@@ -1827,21 +2208,13 @@ class QueryService:
         }
 
     def list_tool_calls(self, limit: int = 50) -> list[dict[str, Any]]:
-        rows = self._conn.execute(
-            "SELECT * FROM tool_calls ORDER BY started_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        return [record.__dict__.copy() for record in self._tool_call_repo.list_recent(limit)]
 
     def list_receipts(self, limit: int = 50) -> list[dict[str, Any]]:
-        rows = self._conn.execute(
-            "SELECT * FROM side_effect_receipts ORDER BY created_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        return [record.__dict__.copy() for record in self._receipt_repo.list_recent(limit)]
 
     def list_reconcile_pending(self) -> list[dict[str, Any]]:
-        return [dict(r) for r in self._receipt_repo.find_pending_reconcile()]
+        return [record.__dict__.copy() for record in self._receipt_repo.find_pending_reconcile()]
 
     # ── storage / config ─────────────────────────────────────────
 
@@ -1866,7 +2239,7 @@ class QueryService:
         objects = self._conn.execute("SELECT COUNT(*) FROM payload_objects").fetchone()[0]
         orphans = self._conn.execute(
             "SELECT COUNT(*) FROM payload_objects p WHERE p.payload_ref NOT IN "
-            "(SELECT content_ref FROM deliveries WHERE content_ref IS NOT NULL)"
+            "(SELECT payload_ref FROM event_log WHERE payload_ref IS NOT NULL)"
         ).fetchone()[0]
         return {
             "db_path": db_path,
@@ -2091,3 +2464,10 @@ def _public_schedule(value: dict[str, Any]) -> dict[str, Any]:
 # ── PLAN-09 M4b 兼容别名：保留 QueryService 类名，同时暴露
 #    SqliteQueryService 以便 interaction_web.query.py 引用 ──
 SqliteQueryService = QueryService
+
+
+def _public_event(value: dict[str, Any]) -> dict[str, Any]:
+    """Remove write-only idempotency metadata from Event read APIs."""
+    result = dict(value)
+    result.pop("idempotency_key", None)
+    return result

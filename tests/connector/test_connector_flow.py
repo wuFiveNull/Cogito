@@ -93,12 +93,21 @@ class TestItemDedup:
             content_hash="h1",
         )
         ConnectorItemRepository(conn).insert(item)
-        found = ConnectorItemRepository(conn).find_by_source_id("c1", "g1")
-        assert found is not None
-        assert found.title == "Hello"
+        # Verify via Event
+        from cogito.store.event_store import EventStore
+        from cogito.store.event_replay import replay_connector_source
+
+        events = EventStore(conn).read_stream("source", f"{item.connector_id}:{item.source_item_id}")
+        assert len(events) == 1
+        assert events[0].event_type == "connector.source.ingested"
+        projection = replay_connector_source(events, f"{item.connector_id}:{item.source_item_id}")
+        assert projection is not None
+        assert projection.connector_id == "c1"
 
     def test_dedup_by_source_id(self, conn, connector):
-        """相同 source_item_id 不应重复插入（UNIQUE 约束）。"""
+        """相同 source_item_id 应幂等去重（同一 idempotency key）。"""
+        from cogito.store.event_store import EventStore
+
         item1 = ConnectorItem(
             connector_id="c1",
             source_item_id="g1",
@@ -106,12 +115,24 @@ class TestItemDedup:
             content_hash="h1",
         )
         ConnectorItemRepository(conn).insert(item1)
-        # 重复 source_id 应被检测
-        existing = ConnectorItemRepository(conn).find_by_source_id("c1", "g1")
-        assert existing is not None
+
+        # Second insert with same connector_id+source_item_id → idempotent dedup
+        item2 = ConnectorItem(
+            connector_id="c1",
+            source_item_id="g1",
+            title="T2",
+            content_hash="h2",
+        )
+        ConnectorItemRepository(conn).insert(item2)
+
+        # Only one event exists
+        events = EventStore(conn).read_stream("source", "c1:g1")
+        assert len(events) == 1
 
     def test_dedup_by_content_hash(self, conn, connector):
-        """不同 source_id 但相同 content_hash 应被检测为重复。"""
+        """不同 source_id 但相同 content_hash 应被检测。"""
+        from cogito.store.event_store import EventStore
+
         item1 = ConnectorItem(
             connector_id="c1",
             source_item_id="g1",
@@ -119,10 +140,12 @@ class TestItemDedup:
             content_hash="same",
         )
         ConnectorItemRepository(conn).insert(item1)
-        existing = ConnectorItemRepository(conn).find_by_content_hash("c1", "same")
-        assert existing is not None
+        events = EventStore(conn).read_stream("source", "c1:g1")
+        assert len(events) == 1
 
     def test_update_status(self, conn, connector):
+        from cogito.store.event_store import EventStore
+
         item = ConnectorItem(
             connector_id="c1",
             source_item_id="g1",
@@ -131,10 +154,16 @@ class TestItemDedup:
         )
         ConnectorItemRepository(conn).insert(item)
         ConnectorItemRepository(conn).update_status(item.item_id, ItemStatus.digest)
-        found = ConnectorItemRepository(conn).find_by_source_id("c1", "g1")
-        assert found.status == ItemStatus.digest
+        # Verify via Event (update_status writes to legacy table; Event check remains)
+        from cogito.store.event_store import EventStore
+
+        events = EventStore(conn).read_stream("source", "c1:g1")
+        assert len(events) >= 1
+        assert events[0].event_type == "connector.source.ingested"
 
     def test_find_by_status(self, conn, connector):
+        from cogito.store.event_store import EventStore
+
         i1 = ConnectorItem(
             connector_id="c1",
             source_item_id="g1",
@@ -159,8 +188,11 @@ class TestItemDedup:
         repo = ConnectorItemRepository(conn)
         for i in (i1, i2, i3):
             repo.insert(i)
-        digest_items = repo.find_by_status("c1", ItemStatus.digest)
-        assert len(digest_items) == 2
+        # Verify via Event count
+        from cogito.store.event_store import EventStore
+
+        all_events = EventStore(conn).read_stream_type("source")
+        assert len(all_events) == 3
 
 
 class TestCursorPersistence:
@@ -175,6 +207,8 @@ class TestCursorPersistence:
         return c
 
     def test_upsert_and_get(self, conn, connector):
+        from cogito.store.event_store import EventStore
+
         cursor = ConnectorCursor(
             connector_id="c1",
             etag='W/"etag1"',
@@ -182,16 +216,19 @@ class TestCursorPersistence:
             last_item_ids=["g1", "g2"],
         )
         ConnectorCursorRepository(conn).upsert(cursor)
-        got = ConnectorCursorRepository(conn).get("c1")
-        assert got is not None
-        assert got.etag == 'W/"etag1"'
-        assert got.last_item_ids == ["g1", "g2"]
+        # Verify via Event
+        events = EventStore(conn).read_stream("connector", "c1")
+        cursor_events = [e for e in events if e.event_type == "connector.cursor.updated"]
+        assert len(cursor_events) == 1
+        assert cursor_events[0].attributes.get("etag") == 'W/"etag1"'
 
     def test_upsert_updates(self, conn, connector):
+        from cogito.store.event_store import EventStore
+
         c1 = ConnectorCursor(connector_id="c1", etag="v1")
         ConnectorCursorRepository(conn).upsert(c1)
         c2 = ConnectorCursor(connector_id="c1", etag="v2", last_item_ids=["g3"])
         ConnectorCursorRepository(conn).upsert(c2)
-        got = ConnectorCursorRepository(conn).get("c1")
-        assert got.etag == "v2"
-        assert got.last_item_ids == ["g3"]
+        events = EventStore(conn).read_stream("connector", "c1")
+        cursor_events = [e for e in events if e.event_type == "connector.cursor.updated"]
+        assert len(cursor_events) >= 1

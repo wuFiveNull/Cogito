@@ -22,6 +22,7 @@ from cogito.domain.memory import MemoryStatus
 from cogito.service.memory_extractor import (
     ExtractMessage,
     MemoryExtractor,
+    MemoryExtractionWriteError,
 )
 from cogito.service.memory_service import SqliteMemoryService
 from cogito.store.migration import migrate
@@ -56,6 +57,86 @@ def _msgs(contents: list[str]) -> list[ExtractMessage]:
 
 
 class TestMemoryExtractor:
+    def test_locked_candidate_write_emits_safe_diagnostics(self, db, service, caplog, monkeypatch):
+        from cogito.model.router import ModelRouter
+        from cogito.model.stub_provider import StubModelProvider, StubScenario
+
+        provider = StubModelProvider(
+            scenarios=[
+                StubScenario(
+                    response_text=(
+                        '{"candidates": [{"kind": "fact", "subject": "user", '
+                        '"predicate": "secret", "value": "do-not-log", '
+                        '"evidence_message_ids": ["msg_0"]}]}'
+                    )
+                )
+            ]
+        )
+        extractor = MemoryExtractor(
+            db,
+            service,
+            router=ModelRouter(
+                providers={"extractor": provider},
+                role_map={"memory_extractor": "extractor"},
+            ),
+            strict=True,
+        )
+
+        def _locked_write(*_args, **_kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(extractor, "_write_candidate", _locked_write)
+
+        with pytest.raises(MemoryExtractionWriteError):
+            asyncio.run(
+                extractor.extract_from_messages(
+                    _msgs(["message"] * 5),
+                    "p1",
+                    session_id="s1",
+                )
+            )
+
+        assert "Memory candidate write locked" in caplog.text
+        assert "candidate_index=1" in caplog.text
+        assert "do-not-log" not in caplog.text
+
+    def test_invalid_json_schema_retries_with_json_object(self, db, service):
+        from cogito.model.contracts import ErrorCategory, ErrorEnvelope
+        from cogito.model.router import ModelRouter
+        from cogito.model.stub_provider import StubModelProvider, StubScenario
+
+        provider = StubModelProvider(
+            scenarios=[
+                StubScenario(
+                    error=ErrorEnvelope(
+                        category=ErrorCategory.invalid_request,
+                        message="JSON Schema unsupported",
+                        retryable=False,
+                    )
+                ),
+                StubScenario(response_text='{"candidates": []}'),
+            ]
+        )
+        router = ModelRouter(
+            providers={"extractor": provider},
+            role_map={"memory_extractor": "extractor"},
+        )
+        extractor = MemoryExtractor(db, service, router=router)
+
+        items = asyncio.run(
+            extractor.extract_from_messages(
+                _msgs(["Remember this"] * 5),
+                "p1",
+                session_id="s1",
+            )
+        )
+
+        assert items == []
+        assert len(provider.received_requests) == 2
+        assert provider.received_requests[0].response_schema is not None
+        assert provider.received_requests[1].response_schema is None
+        assert provider.received_requests[1].response_format == "json"
+
     def test_no_router_skips_extraction(self, db, service):
         extractor = MemoryExtractor(db, service, router=None)
         items = asyncio.run(

@@ -1,14 +1,22 @@
 """CommandService —— 命令可写转写的薄服务层。
 
-涵盖现有领域服务未覆盖的状态转写：审批 (approvals)、投递重放 (deliveries)。
+涵盖现有领域服务未覆盖的状态转写：审批 Event、投递重放 (deliveries)。
 handler 调用此处方法，不直接执行 SQL —— 遵守"增删改查一律走服务"。
 """
 
 from __future__ import annotations
 
-import json
 import sqlite3
-from datetime import UTC, datetime
+
+from cogito.domain.event import Event, EventClass, EventContext
+from cogito.domain.turn import TurnStatus
+from cogito.service.approval_service import (
+    ApprovalNotFoundError,
+    ApprovalStateError,
+    SqliteApprovalService,
+)
+from cogito.store.event_store import EventStore
+from cogito.store.repositories import TurnRepository
 
 
 def set_approval_decision(
@@ -22,53 +30,21 @@ def set_approval_decision(
     response_reason: str = "",
 ) -> bool:
     """写入审批决定。返回 False 表示审批不存在或非 pending。"""
-    row = conn.execute(
-        "SELECT status,expires_at,version,action_hash,allowed_responder_principal_ids "
-        "FROM approvals WHERE approval_id=?",
-        (approval_id,),
-    ).fetchone()
-    if row is None or row["status"] != "pending":
+    # response_reason is audit-only; raw response text is deliberately absent
+    # from immutable Events.  The aggregate validates replayed state/version.
+    service = SqliteApprovalService(conn)
+    try:
+        if decision == "approved":
+            service.approve(
+                approval_id, responder_id,
+                expected_version=expected_version, action_hash=action_hash,
+            )
+        elif decision == "rejected":
+            service.reject(approval_id, responder_id, expected_version=expected_version)
+        else:
+            return False
+    except (ApprovalNotFoundError, ApprovalStateError):
         return False
-    now = datetime.now(UTC)
-    if row["expires_at"] and datetime.fromisoformat(row["expires_at"]) <= now:
-        return False
-    if expected_version is not None and int(row["version"]) != expected_version:
-        return False
-    if action_hash and row["action_hash"] != action_hash:
-        return False
-    allowed = set(json.loads(row["allowed_responder_principal_ids"] or "[]"))
-    if allowed and responder_id not in allowed:
-        return False
-    cur = conn.execute(
-        "UPDATE approvals SET status=?, responder_id=?, decided_at=?, responded_at=?, "
-        "response_reason=?, version=version+1 WHERE approval_id=? "
-        "AND status='pending' AND version=? AND expires_at>?",
-        (
-            decision,
-            responder_id,
-            now.isoformat(),
-            now.isoformat(),
-            response_reason,
-            approval_id,
-            row["version"],
-            now.isoformat(),
-        ),
-    )
-    return cur.rowcount > 0
-
-
-def replay_delivery(conn: sqlite3.Connection, *, delivery_id: str) -> bool:
-    """把 failed/cancelled 的投递重新置为 pending。False 表示不存在或状态不可重放。"""
-    row = conn.execute(
-        "SELECT status FROM deliveries WHERE delivery_id=?", (delivery_id,)
-    ).fetchone()
-    if row is None or row["status"] not in ("failed", "cancelled"):
-        return False
-    conn.execute(
-        "UPDATE deliveries SET status='pending', last_error=NULL WHERE delivery_id=?",
-        (delivery_id,),
-    )
-    conn.commit()
     return True
 
 
@@ -82,28 +58,73 @@ def resume_turn_after_approval(
     返回 turn_id 表示成功；None 表示 approval 不存在/非 pending/无关联 Turn。
     幂等：重复消费同一 approved approval 不产生第二个 queued 状态。
     """
-    row = conn.execute(
-        "SELECT turn_id, status FROM approvals WHERE approval_id=?",
-        (approval_id,),
-    ).fetchone()
-    if row is None or row["status"] != "approved":
+    approval = SqliteApprovalService(conn).get(approval_id)
+    if approval is None or approval["status"] != "approved":
         return None
-    turn_id = row["turn_id"]
+    turn_id = str(approval["turn_id"] or "")
     if not turn_id:
         return None
-    # 仅 waiting_user/waiting_external 可恢复；已 queued 说明已被消费过（幂等）
-    cur = conn.execute(
-        "UPDATE turns SET status='queued', version=version+1 "
-        "WHERE turn_id=? AND status IN ('waiting_user','waiting_external')",
-        (turn_id,),
-    )
-    if cur.rowcount == 0:
+
+    # Read turn state from Event stream
+    from cogito.store.event_replay import replay_turn
+
+    turn_stream = EventStore(conn).read_stream("turn", turn_id)
+    turn_state = replay_turn(turn_stream, turn_id)
+    if turn_state is None or turn_state.status not in {"waiting_user", "waiting_external"}:
         return None  # 已消费或状态不对
+    approval_stream = EventStore(conn).read_stream("approval", approval_id)
+    approval_event = approval_stream[-1] if approval_stream else None
+    approval_context = approval_event.context if approval_event else EventContext()
+    resumed = TurnRepository(conn).update_status(
+        turn_id,
+        TurnStatus.queued,
+        expected_version=turn_state.stream_version,
+        event_context=EventContext(
+            trace_id=approval_context.trace_id or turn_id,
+            correlation_id=approval_context.correlation_id or turn_id,
+            causation_id=approval_event.event_id if approval_event else approval_context.causation_id,
+            principal_id=approval_context.principal_id,
+            session_id=turn_state.session_id or "",
+            turn_id=turn_id,
+        ),
+        event_producer="approval-command",
+    )
+    if not resumed:
+        return None
     # Child-Agent approvals resume their durable Task as well as the child Turn.
+    task_rows = conn.execute(
+        "SELECT t.task_id FROM tasks t WHERE t.task_id IN "
+        "(SELECT task_id FROM child_task_links WHERE turn_id=?) AND t.status='waiting_user'",
+        (turn_id,),
+    ).fetchall()
     conn.execute(
         "UPDATE tasks SET status='queued',checkpoint_ref=NULL "
         "WHERE task_id IN (SELECT task_id FROM child_task_links WHERE turn_id=?) "
         "AND status='waiting_user'",
         (turn_id,),
     )
+    store = EventStore(conn)
+    for task_row in task_rows:
+        task_id = str(task_row["task_id"])
+        store.append(
+            Event(
+                event_type="task.scheduled",
+                stream_type="task",
+                stream_id=task_id,
+                producer="approval-command",
+                event_class=EventClass.DOMAIN,
+                context=EventContext(
+                    trace_id=approval_context.trace_id or turn_id,
+                    correlation_id=approval_context.correlation_id or turn_id,
+                    causation_id=approval_event.event_id if approval_event else "",
+                    principal_id=approval_context.principal_id,
+                    turn_id=turn_id,
+                    task_id=task_id,
+                ),
+                summary="Task resumed after approval",
+                attributes={"reason": "approval_approved", "approval_id": approval_id},
+                outcome="queued",
+                idempotency_key=f"task:{task_id}:approval-resume:{approval_id}",
+            )
+        )
     return turn_id

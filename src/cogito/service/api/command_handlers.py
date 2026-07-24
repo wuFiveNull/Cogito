@@ -9,6 +9,7 @@ ACCESS-DELIVERY §2.3。所有命令：
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -48,30 +49,26 @@ from cogito.contracts.models import (
     RebuildProactiveContextPayload,
     ReconcileDeliveryPayload,
     ReconcileReceiptPayload,
-    ReplayDeliveryPayload,
-    ReplayEventPayload,
     RestoreBackupPayload,
     RestoreSkillPayload,
     RetryTaskPayload,
     ReviewProactiveCandidatePayload,
     RollbackConfigPayload,
+    TriggerProactiveMockPayload,
     UpdateProactivePolicyPayload,
     VerifyBackupPayload,
 )
 from cogito.domain.errors import ConcurrencyConflictError
-from cogito.domain.events import DomainEvent
+from cogito.domain.event import Event, EventClass, EventContext
 from cogito.service.api.audit import write_audit
-from cogito.service.api.command_service import (
-    replay_delivery,
-    resume_turn_after_approval,
-    set_approval_decision,
-)
+from cogito.service.api.command_service import resume_turn_after_approval, set_approval_decision
 from cogito.service.api.deps import CommandDeps, get_command_deps
+from cogito.service.approval_service import SqliteApprovalService
 from cogito.service.dispatcher import Dispatcher
 from cogito.service.memory_service import SqliteMemoryService
 from cogito.service.task_service import SqliteTaskService
 from cogito.store.connector_repo import ConnectorRepository
-from cogito.store.repositories import OutboxRepository
+from cogito.store.event_store import EventStore
 from cogito.store.task_repo import TaskRepository
 
 _LOGGER = logging.getLogger("cogito.interaction_web.commands")
@@ -206,16 +203,18 @@ def cancel_turn(
 ) -> CommandResponse:
     # 读取当前 version (经过 Dispatcher -> repo)
     dispatcher = Dispatcher(deps.conn)
-    turn_row = deps.conn.execute(
-        "SELECT version, status FROM turns WHERE turn_id=?", (payload.turn_id,)
-    ).fetchone()
-    if turn_row is None:
+    from cogito.store.event_replay import replay_turn
+    from cogito.store.event_store import EventStore
+
+    turn_stream = EventStore(deps.conn).read_stream("turn", payload.turn_id)
+    turn_state = replay_turn(turn_stream, payload.turn_id)
+    if turn_state is None:
         raise HTTPException(status_code=404, detail=f"turn {payload.turn_id} not found")
-    if turn_row["status"] not in {"queued", "waiting_user", "waiting_external"}:
+    if turn_state.status not in {"queued", "waiting_user", "waiting_external"}:
         return _fail(
-            "cancel-turn", payload.turn_id, f"status is {turn_row['status']}, not cancellable"
+            "cancel-turn", payload.turn_id, f"status is {turn_state.status}, not cancellable"
         )
-    ok = dispatcher.cancel(payload.turn_id, turn_row["version"])
+    ok = dispatcher.cancel(payload.turn_id, turn_state.stream_version)
     if not ok:
         return _fail("cancel-turn", payload.turn_id, "concurrent modification")
     from cogito.service.delegation_lifecycle import DelegationLifecycleService
@@ -273,33 +272,11 @@ def approve(
         response_reason=payload.response_reason,
     )
     if not ok:
-        exists = deps.conn.execute(
-            "SELECT 1 FROM approvals WHERE approval_id=?", (payload.approval_id,)
-        ).fetchone()
-        if not exists:
+        if SqliteApprovalService(deps.conn).get(payload.approval_id) is None:
             raise HTTPException(status_code=404, detail=f"approval {payload.approval_id} not found")
         return _fail("approve", payload.approval_id, "not in pending status")
     # 审批通过后：仅创建一个恢复（Turn waiting_user → queued，幂等）
     resumed_turn_id = resume_turn_after_approval(deps.conn, approval_id=payload.approval_id)
-    event_payload = {
-        "approval_id": payload.approval_id,
-        "decision": "approved",
-        "responder_id": ACTOR,
-        "resumed_turn_id": resumed_turn_id,
-    }
-    outbox = OutboxRepository(deps.conn)
-    outbox.insert(
-        DomainEvent(
-            event_type="ApprovalResponded",
-            aggregate_type="approval",
-            aggregate_id=payload.approval_id,
-            aggregate_version=outbox.next_aggregate_version("approval", payload.approval_id),
-            payload=event_payload,
-            payload_ref=json.dumps(event_payload, ensure_ascii=False, sort_keys=True),
-            origin="command",
-            trust_label="verified",
-        )
-    )
     write_audit(
         deps.conn,
         actor_id=ACTOR,
@@ -326,30 +303,9 @@ def reject(
         response_reason=payload.response_reason,
     )
     if not ok:
-        exists = deps.conn.execute(
-            "SELECT 1 FROM approvals WHERE approval_id=?", (payload.approval_id,)
-        ).fetchone()
-        if not exists:
+        if SqliteApprovalService(deps.conn).get(payload.approval_id) is None:
             raise HTTPException(status_code=404, detail=f"approval {payload.approval_id} not found")
         return _fail("reject", payload.approval_id, "not in pending status")
-    event_payload = {
-        "approval_id": payload.approval_id,
-        "decision": "rejected",
-        "responder_id": ACTOR,
-    }
-    outbox = OutboxRepository(deps.conn)
-    outbox.insert(
-        DomainEvent(
-            event_type="ApprovalResponded",
-            aggregate_type="approval",
-            aggregate_id=payload.approval_id,
-            aggregate_version=outbox.next_aggregate_version("approval", payload.approval_id),
-            payload=event_payload,
-            payload_ref=json.dumps(event_payload, ensure_ascii=False, sort_keys=True),
-            origin="command",
-            trust_label="verified",
-        )
-    )
     write_audit(
         deps.conn,
         actor_id=ACTOR,
@@ -396,7 +352,7 @@ def confirm_memory(
     from cogito.service.task_service import SqliteTaskService
 
     try:
-        SqliteTaskService(deps.conn).create(
+        SqliteTaskService(deps.conn, event_sourced=True).create(
             "memory.recompute_weight",
             "{}",
             idempotency_key=f"memory.recompute_weight:confirm:{payload.memory_id}:{item.version}",
@@ -447,7 +403,7 @@ def reject_memory(
         algorithm_version="2",
     )
     try:
-        SqliteTaskService(deps.conn).create(
+        SqliteTaskService(deps.conn, event_sourced=True).create(
             "memory.recompute_weight",
             "{}",
             idempotency_key=f"memory.recompute_weight:reject:{payload.memory_id}",
@@ -502,7 +458,7 @@ def correct_memory(
     except ConcurrencyConflictError:
         return _conflict("correct-memory", payload.memory_id, existing.version)
     try:
-        SqliteTaskService(deps.conn).create(
+        SqliteTaskService(deps.conn, event_sourced=True).create(
             "memory.recompute_weight",
             "{}",
             idempotency_key=f"memory.recompute_weight:correct:{payload.memory_id}",
@@ -633,20 +589,21 @@ def _emit_session_completed(
 
     关闭会话时提交最后一次上下文提取任务，确保关闭前内容不丢失（PLAN-16 M1 P0-06）。
     """
-    payload = {
-        "session_id": session_id,
-        "conversation_id": conversation_id,
-        "principal_id": principal_id,
-    }
-    OutboxRepository(conn).insert(
-        DomainEvent(
-            event_type="SessionCompleted",
-            aggregate_type="session",
-            aggregate_id=session_id,
-            aggregate_version=1,
-            payload=payload,
-            payload_ref=json.dumps(payload, ensure_ascii=False),
-            origin="delete-session",
+    EventStore(conn).append(
+        Event(
+            event_type="runtime.session.completed",
+            stream_type="session",
+            stream_id=session_id,
+            producer="delete-session-command",
+            event_class=EventClass.DOMAIN,
+            context=EventContext(
+                principal_id=principal_id,
+                conversation_id=conversation_id,
+                session_id=session_id,
+            ),
+            summary="Session completed",
+            outcome="completed",
+            idempotency_key=f"session:{session_id}:completed",
         )
     )
 
@@ -655,7 +612,38 @@ def _emit_session_completed(
 def delete_session(
     payload: DeleteSessionPayload, deps: CommandDeps = Depends(get_command_deps)
 ) -> CommandResponse:
-    """软删除会话：设置 deleted_at 时间戳，数据保留但页面不再显示。"""
+    """关闭 Session：存在 Event 流时只追加终结事实。"""
+    from cogito.store.repositories import ConversationRepository, SessionRepository
+
+    session = SessionRepository(deps.conn).find(payload.session_id)
+    if session is not None:
+        if session.status.value != "active":
+            return _fail("delete-session", payload.session_id, "not found or already deleted")
+        conversation = ConversationRepository(deps.conn).find(
+            session.conversation_id
+        )
+        principal_id = conversation.principal_scope if conversation is not None else "owner"
+        from datetime import UTC, datetime
+
+        deleted_at = datetime.now(UTC).isoformat()
+        with deps.conn:
+            _emit_session_completed(
+                deps.conn,
+                session_id=session.session_id,
+                conversation_id=session.conversation_id,
+                principal_id=principal_id or "owner",
+            )
+        write_audit(
+            deps.conn,
+            actor_id=ACTOR,
+            action="delete-session",
+            target_type="session",
+            target_id=payload.session_id,
+            changes={"deleted_at": deleted_at},
+        )
+        return _ok("delete-session", payload.session_id, deleted_at=deleted_at)
+
+    # Compatibility path for historical, pre-backfill rows.
     row = deps.conn.execute(
         "SELECT s.session_id, s.conversation_id, "
         "COALESCE(c.principal_scope, 'owner') AS principal_id "
@@ -701,9 +689,45 @@ def delete_sessions_by_conversation(
     payload: DeleteSessionsByConvPayload,
     deps: CommandDeps = Depends(get_command_deps),
 ) -> CommandResponse:
-    """按 conversation_id 软删除其下所有活跃 session。"""
+    """关闭某 Conversation 下的 Session；新数据不更新投影行。"""
+    from cogito.store.repositories import ConversationRepository, SessionRepository
     from datetime import UTC, datetime
 
+    event_sessions = SessionRepository(deps.conn).list_by_conversation(
+        payload.conversation_id,
+        active_only=True,
+    )
+    if event_sessions:
+        conversation = ConversationRepository(deps.conn).find(
+            payload.conversation_id
+        )
+        principal_id = conversation.principal_scope if conversation is not None else "owner"
+        deleted_at = datetime.now(UTC).isoformat()
+        with deps.conn:
+            for session in event_sessions:
+                _emit_session_completed(
+                    deps.conn,
+                    session_id=session.session_id,
+                    conversation_id=session.conversation_id,
+                    principal_id=principal_id or "owner",
+                )
+        ids = [session.session_id for session in event_sessions]
+        write_audit(
+            deps.conn,
+            actor_id=ACTOR,
+            action="delete-sessions-by-conversation",
+            target_type="conversation",
+            target_id=payload.conversation_id,
+            changes={"deleted_at": deleted_at, "session_count": len(ids), "session_ids": ids},
+        )
+        return _ok(
+            "delete-sessions-by-conversation",
+            payload.conversation_id,
+            deleted_count=len(ids),
+            deleted_at=deleted_at,
+        )
+
+    # Compatibility path for historical, pre-backfill rows.
     rows = deps.conn.execute(
         "SELECT s.session_id, COALESCE(c.principal_scope, 'owner') AS principal_id "
         "FROM sessions s LEFT JOIN conversations c ON c.conversation_id=s.conversation_id "
@@ -794,31 +818,6 @@ def disable_plugin(
         target_id=payload.name,
     )
     return _ok("disable-plugin", payload.name, status=state.status)
-
-
-# ── replay-delivery ───────────────────────────────────────────
-
-
-@router.post("/replay-delivery", response_model=CommandResponse)
-def replay_delivery_route(
-    payload: ReplayDeliveryPayload, deps: CommandDeps = Depends(get_command_deps)
-) -> CommandResponse:
-    ok = replay_delivery(deps.conn, delivery_id=payload.delivery_id)
-    if not ok:
-        exists = deps.conn.execute(
-            "SELECT 1 FROM deliveries WHERE delivery_id=?", (payload.delivery_id,)
-        ).fetchone()
-        if not exists:
-            raise HTTPException(status_code=404, detail=f"delivery {payload.delivery_id} not found")
-        return _fail("replay-delivery", payload.delivery_id, "status not replayable")
-    write_audit(
-        deps.conn,
-        actor_id=ACTOR,
-        action="replay-delivery",
-        target_type="delivery",
-        target_id=payload.delivery_id,
-    )
-    return _ok("replay-delivery", payload.delivery_id)
 
 
 # ── Plan 08 Dashboard: 新增命令 ──────────────────────────────
@@ -912,39 +911,6 @@ def update_proactive_policy(
     )
     deps.conn.commit()
     return _ok("update-proactive-policy", new_policy.policy_id, version=new_policy.version)
-
-
-@router.post("/replay-event", response_model=CommandResponse)
-def replay_event(
-    payload: ReplayEventPayload, deps: CommandDeps = Depends(get_command_deps)
-) -> CommandResponse:
-    """重放 Outbox 事件：重置为 pending 让 OutboxWorker 重新投递。"""
-    row = deps.conn.execute(
-        "SELECT * FROM outbox_events WHERE event_id=?", (payload.event_id,)
-    ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail=f"event {payload.event_id} not found")
-    # 仅允许重放 failed / dead_letter 状态的事件
-    if row["status"] not in ("failed", "dead_letter"):
-        return _fail(
-            "replay-event",
-            payload.event_id,
-            f"status is {row['status']}, only failed/dead_letter can be replayed",
-        )
-    deps.conn.execute(
-        "UPDATE outbox_events SET status='pending', attempt_count=0 WHERE event_id=?",
-        (payload.event_id,),
-    )
-    deps.conn.commit()
-    write_audit(
-        deps.conn,
-        actor_id=ACTOR,
-        action="replay-event",
-        target_type="event",
-        target_id=payload.event_id,
-        changes={"from_status": row["status"], "to_status": "pending"},
-    )
-    return _ok("replay-event", payload.event_id, from_status=row["status"])
 
 
 @router.post("/reconcile-receipt", response_model=CommandResponse)
@@ -1051,7 +1017,7 @@ def fetch_proactive_data(
             AIHOT_CONNECTOR_ID,
             poll_task_id=task_id,
             connector_id=AIHOT_CONNECTOR_ID,
-            dry_run=True,
+            dry_run=deps.config.capability.proactive.dry_run,
             idempotent=True,
         )
 
@@ -1072,7 +1038,7 @@ def fetch_proactive_data(
         action="fetch-proactive-data",
         target_type="connector",
         target_id=AIHOT_CONNECTOR_ID,
-        changes={"poll_task_id": task.task_id, "dry_run": True},
+        changes={"poll_task_id": task.task_id, "dry_run": deps.config.capability.proactive.dry_run},
     )
     deps.conn.commit()
     return _ok(
@@ -1080,7 +1046,78 @@ def fetch_proactive_data(
         AIHOT_CONNECTOR_ID,
         poll_task_id=task.task_id,
         connector_id=AIHOT_CONNECTOR_ID,
-        dry_run=True,
+        dry_run=deps.config.capability.proactive.dry_run,
+        idempotent=False,
+    )
+
+
+@router.post("/trigger-proactive-mock", response_model=CommandResponse)
+def trigger_proactive_mock(
+    payload: TriggerProactiveMockPayload,
+    deps: CommandDeps = Depends(get_command_deps),
+) -> CommandResponse:
+    """Queue one manual-only mock source poll for end-to-end delivery checks."""
+    from cogito.domain.task import Task, TaskStatus
+    from cogito.service.proactive_mock_connector import (
+        PROACTIVE_MOCK_CONNECTOR_ID,
+        PROACTIVE_MOCK_SERVER_NAME,
+    )
+
+    if not deps.config.capability.proactive.enabled:
+        raise HTTPException(status_code=409, detail="proactive is disabled")
+    connector = deps.conn.execute(
+        "SELECT status FROM connectors WHERE connector_id=?",
+        (PROACTIVE_MOCK_CONNECTOR_ID,),
+    ).fetchone()
+    if connector is None or connector["status"] != "active":
+        raise HTTPException(status_code=409, detail="proactive mock connector is not active")
+    manager = getattr(deps.runtime, "mcp_manager", None)
+    client = manager.get_client(PROACTIVE_MOCK_SERVER_NAME) if manager is not None else None
+    if client is None or not client.connected:
+        raise HTTPException(status_code=503, detail="proactive mock MCP server is not connected")
+
+    request_key = payload.idempotency_key or uuid.uuid4().hex
+    task_key = f"manual-proactive-mock:{request_key}"
+    existing = deps.conn.execute(
+        "SELECT task_id FROM tasks WHERE idempotency_key=?",
+        (task_key,),
+    ).fetchone()
+    if existing is not None:
+        return _ok(
+            "trigger-proactive-mock",
+            PROACTIVE_MOCK_CONNECTOR_ID,
+            poll_task_id=existing["task_id"],
+            connector_id=PROACTIVE_MOCK_CONNECTOR_ID,
+            dry_run=deps.config.capability.proactive.dry_run,
+            idempotent=True,
+        )
+
+    task = Task(
+        task_id=f"task-proactive-mock-{uuid.uuid4().hex[:16]}",
+        task_type="mcp_connector.poll",
+        payload_ref=PROACTIVE_MOCK_CONNECTOR_ID,
+        status=TaskStatus.queued,
+        priority=10,
+        idempotency_key=task_key,
+        origin="dashboard-proactive-mock",
+        retry_policy={"max_attempts": 1},
+    )
+    TaskRepository(deps.conn).insert(task)
+    write_audit(
+        deps.conn,
+        actor_id=ACTOR,
+        action="trigger-proactive-mock",
+        target_type="connector",
+        target_id=PROACTIVE_MOCK_CONNECTOR_ID,
+        changes={"poll_task_id": task.task_id, "dry_run": deps.config.capability.proactive.dry_run},
+    )
+    deps.conn.commit()
+    return _ok(
+        "trigger-proactive-mock",
+        PROACTIVE_MOCK_CONNECTOR_ID,
+        poll_task_id=task.task_id,
+        connector_id=PROACTIVE_MOCK_CONNECTOR_ID,
+        dry_run=deps.config.capability.proactive.dry_run,
         idempotent=False,
     )
 
@@ -1408,66 +1445,47 @@ def reconcile_delivery(
     payload: ReconcileDeliveryPayload,
     deps: CommandDeps = Depends(get_command_deps),
 ) -> CommandResponse:
-    """对账投递：unknown → confirmed（写 receipt_kind=confirmed）。"""
-    from pydantic import BaseModel
+    """管理员确认 unknown Delivery，追加 canonical completed Event。"""
+    from cogito.infrastructure.payload_store import PayloadStore
+    from cogito.service.sqlite_delivery_service import SqliteDeliveryService
 
-    # 动态引用避免循环（payload 是由 ReconcileDeliveryPayload 传入的）
-    class _Inline(BaseModel):
-        delivery_id: str
-
-    # 读取当前 delivery
-    delivery = deps.conn.execute(
-        "SELECT * FROM deliveries WHERE delivery_id=?", (payload.delivery_id,)
-    ).fetchone()
+    gateway = getattr(deps.runtime, "gateway_client", None) if deps.runtime else None
+    service = SqliteDeliveryService(
+        deps.conn,
+        gateway=gateway,
+        effect_payload_store=PayloadStore(deps.config.resolve_payload_dir(), deps.conn),
+    )
+    delivery = service.get(payload.delivery_id)
     if delivery is None:
         raise HTTPException(status_code=404, detail=f"delivery {payload.delivery_id} not found")
-    if delivery["status"] != "unknown":
+    if delivery.status != "unknown":
         return _fail(
             "reconcile-delivery",
             payload.delivery_id,
-            f"status is {delivery['status']}, only unknown can be reconciled",
+            f"status is {delivery.status}, only unknown can be reconciled",
         )
-    # 写一条 confirmed receipt
-    import uuid
-
-    receipt_id = uuid.uuid4().hex
-    # 找到最新的 attempt
-    latest_attempt = deps.conn.execute(
-        "SELECT attempt_id FROM delivery_attempts WHERE delivery_id=? "
-        "ORDER BY attempt_no DESC LIMIT 1",
-        (payload.delivery_id,),
-    ).fetchone()
-    deps.conn.execute(
-        "INSERT INTO delivery_receipts "
-        "(receipt_id, delivery_id, delivery_attempt_id, operation_seq, "
-        " request_hash, receipt_kind, platform_message_id, observed_at) "
-        "VALUES (?,?,?,?,?,?,?,?)",
-        (
-            receipt_id,
+    result = asyncio.run(
+        service.reconcile(
             payload.delivery_id,
-            latest_attempt["attempt_id"] if latest_attempt else "",
-            0,
-            "",
-            "confirmed",
-            delivery["platform_message_id"],
-            int(__import__("datetime").datetime.now(__import__("datetime").UTC).timestamp() * 1000),
-        ),
+            delivery.platform_message_id,
+            confirmed=True,
+        )
     )
-    # 更新 delivery 状态
-    deps.conn.execute(
-        "UPDATE deliveries SET status='sent' WHERE delivery_id=?",
-        (payload.delivery_id,),
-    )
-    deps.conn.commit()
+    if result.status != "sent":
+        return _fail("reconcile-delivery", payload.delivery_id, result.status)
     write_audit(
         deps.conn,
         actor_id=ACTOR,
         action="reconcile-delivery",
         target_type="delivery",
         target_id=payload.delivery_id,
-        changes={"before": "unknown", "after": "sent", "receipt_id": receipt_id},
+        changes={"before": "unknown", "after": "sent", "event_sourced": True},
     )
-    return _ok("reconcile-delivery", payload.delivery_id, receipt_id=receipt_id)
+    return _ok(
+        "reconcile-delivery",
+        payload.delivery_id,
+        platform_message_id=result.platform_message_id,
+    )
 
 
 @router.post("/archive-skill", response_model=CommandResponse)
@@ -1865,7 +1883,7 @@ def payload_gc_dry_run(
         "SELECT payload_ref, size FROM payload_objects WHERE payload_ref NOT IN "
         "(SELECT content_ref FROM deliveries WHERE content_ref IS NOT NULL) "
         "AND payload_ref NOT IN "
-        "(SELECT raw_ref FROM side_effect_receipts WHERE raw_ref IS NOT NULL) "
+        "(SELECT payload_ref FROM event_log WHERE payload_ref IS NOT NULL) "
         "LIMIT 200"
     ).fetchall()
     orphan_refs = [r["payload_ref"] for r in orphans]

@@ -5,12 +5,12 @@
 - 入站：浏览器消息由 interaction_web/chat.py 在 WebSocket 收到后，构造
   ``ChannelEnvelope(channel_type="web")`` 调 ``InboundService.accept`` 进入主链路
   （与 QQ / Terminal 走同一条 Core 入口）。
-- 出站：Agent 回复经 ``ChannelGateway → DeliveryWorker → send_request_sync`` 推入本
+- 出站：Agent 回复经 ``CanonicalEffectWorker → ChannelGateway → send_request_sync`` 推入本
   adapter 的内存队列，再由 WebSocket 实时推回浏览器。
 
 设计要点
 --------
-- ``send_request_sync`` 在 ``DeliveryWorker`` 的 worker 线程被**同步**调用，必须线程安全。
+- ``send_request_sync`` 可由 canonical effect worker 同步调用，必须线程安全。
 - 主事件循环内的 WebSocket 任务 ``await`` 每个 conversation 的 ``asyncio.Queue`` 收消息。
 - 通过 ``loop.call_soon_threadsafe`` 把线程外的消息搬到主循环的 asyncio 队列。
 - 连接断开期间的消息进入信箱（mailbox），重连后回灌，避免丢消息。
@@ -52,7 +52,7 @@ class WebChannelAdapter:
         # 只读连接：用于订阅时清理崩溃遗留的流式占位气泡（见 subscribe）
         self._conn = conn
 
-        # 跨线程缓冲：DeliveryWorker 线程 → 主事件循环（线程安全）
+        # 跨线程缓冲：effect worker 线程 → 主事件循环（线程安全）
         self._cross: collections.deque[dict[str, Any]] = collections.deque()
         self._cross_lock = threading.Lock()
 
@@ -120,7 +120,7 @@ class WebChannelAdapter:
         return self._enqueue(request)
 
     def send_request_sync(self, request: ChannelSendRequest) -> ChannelSendResult:
-        """被 DeliveryWorker 线程同步调用：推入跨线程缓冲并唤醒主循环。"""
+        """被 effect worker 同步调用：推入跨线程缓冲并唤醒主循环。"""
         platform_message_id = f"web_{request.delivery_id or 'x'}"
         item = {
             "kind": "send",
@@ -214,38 +214,46 @@ class WebChannelAdapter:
         for item in buffered:
             q.put_nowait(item)
 
-        # 崩溃恢复：清理本会话遗留的已撤回流式占位气泡（"…"）。
-        # 进程重启后内存队列/信箱丢失，但 Delivery 表中 status='interrupted'
-        # 的流式 Delivery 仍指向一个平台占位消息；在此回灌 delete 指令，
-        # 浏览器重连后删除该气泡（幂等：重复 delete 无害）。
+        # 崩溃恢复：回放已取消的流式 Delivery Event，并清理占位气泡。
+        # 尚未迁移的历史记录才从 compatibility projection 查询。
         self._reconcile_interrupted(conversation_id, q)
         return q
 
     def _reconcile_interrupted(
         self, conversation_id: str, q: asyncio.Queue[dict[str, Any]]
     ) -> None:
-        """把本会话已 interrupted 的流式占位消息以 delete 事件回灌到订阅队列。"""
+        """Replay cancelled streaming Events into idempotent delete commands."""
         if self._conn is None:
             return
         try:
-            rows = self._conn.execute(
-                "SELECT platform_message_id FROM deliveries "
-                "WHERE status='interrupted' AND platform_message_id IS NOT NULL "
-                "AND json_extract(target_snapshot, '$.conversation_id')=?",
-                (conversation_id,),
-            ).fetchall()
+            from cogito.store.event_replay import replay_delivery
+            from cogito.store.event_store import EventStore
+
+            grouped: dict[str, list[Any]] = {}
+            for event in EventStore(self._conn).read_stream_type("delivery"):
+                grouped.setdefault(event.stream_id, []).append(event)
+            for delivery_id, stream in grouped.items():
+                state = replay_delivery(stream, delivery_id)
+                if (
+                    state is None
+                    or state.delivery_mode != "streaming"
+                    or state.platform_conversation_id != conversation_id
+                    or state.status not in {"cancelled", "failed"}
+                    or not state.platform_message_id
+                ):
+                    continue
+                q.put_nowait(
+                    {
+                        "kind": "delete",
+                        "conversation_id": conversation_id,
+                        "platform_message_id": state.platform_message_id,
+                        "reason": "recovered",
+                        "delivery_id": delivery_id,
+                    }
+                )
+
         except Exception:
             return
-        for row in rows:
-            q.put_nowait(
-                {
-                    "kind": "delete",
-                    "conversation_id": conversation_id,
-                    "platform_message_id": row["platform_message_id"],
-                    "reason": "recovered",
-                    "delivery_id": "",
-                }
-            )
 
     def unsubscribe(self, conversation_id: str) -> None:
         """取消订阅（WebSocket 断开时调用）。"""

@@ -1,29 +1,29 @@
-"""SqliteDeliveryService 状态机 + 幂等键 + cancel/retry/reconcile 测试 (PLAN-10 M4)。
+"""Event-first DeliveryService contract tests.
 
-覆盖 BR-03 / BR-04 / BR-05 / BR-06 / BR-08 / BR-12 对应的本地状态机语义。
-Gateway 调用经 FakeGatewayClient 模拟。
+Delivery state is asserted through the canonical Event stream.  The legacy
+``deliveries`` table must remain untouched by every public operation here.
 """
 
 from __future__ import annotations
 
 import sqlite3
-from pathlib import Path
 
 import pytest
 
-from cogito.contracts.clock import FakeClock, epoch_ms
+from cogito.contracts.clock import FakeClock
+from cogito.domain.event import Event, EventClass
+from cogito.infrastructure.payload_store import PayloadStore
+from cogito.service.canonical_delivery_effect_executor import CanonicalDeliveryEffectExecutor
 from cogito.service.delivery_service import DeliveryRequest
-from cogito.service.sqlite_delivery_service import (
-    GatewayClient,
-    GatewayResult,
-    SqliteDeliveryService,
-    _uow,
-)
+from cogito.service.event_effect_worker import CanonicalEffectWorker
+from cogito.service.gateway_client import GatewayResult
+from cogito.service.sqlite_delivery_service import SqliteDeliveryService
+from cogito.store.event_store import EventStore
 from cogito.store.migration import migrate
 
 
 class FakeGatewayClient:
-    """测试用 GatewayClient：可配置 success / fail / unknown。"""
+    """Gateway fake with deterministic canonical-effect outcomes."""
 
     def __init__(
         self,
@@ -31,34 +31,32 @@ class FakeGatewayClient:
         status: str = "success",
         platform_message_id: str | None = None,
         error_code: str | None = None,
-        retry_after_seconds: float | None = None,
-        raises: bool = False,
     ) -> None:
         self._status = status
-        self._pmid = platform_message_id
-        self._err = error_code
-        self._retry = retry_after_seconds
-        self._raises = raises
+        self._platform_message_id = platform_message_id
+        self._error_code = error_code
         self.send_calls: list[tuple[str, str, str]] = []
 
-    def send(self, target_snapshot: str, content_ref: str, idempotency_key: str) -> GatewayResult:
-        self.send_calls.append((target_snapshot, content_ref, idempotency_key))
-        if self._raises:
-            raise RuntimeError("boom")
+    def send(self, target_snapshot: str, content: str, idempotency_key: str) -> GatewayResult:
+        self.send_calls.append((target_snapshot, content, idempotency_key))
         return GatewayResult(
             status=self._status,
-            platform_message_id=self._pmid,
-            error_code=self._err,
-            retry_after_seconds=self._retry,
+            platform_message_id=self._platform_message_id,
+            error_code=self._error_code,
         )
 
 
 @pytest.fixture
 def conn() -> sqlite3.Connection:
-    c = sqlite3.connect(":memory:", check_same_thread=False)
-    c.row_factory = sqlite3.Row
-    migrate(c)
-    return c
+    connection = sqlite3.connect(":memory:", check_same_thread=False)
+    connection.row_factory = sqlite3.Row
+    migrate(connection)
+    return connection
+
+
+@pytest.fixture
+def payload_store(conn: sqlite3.Connection, tmp_path) -> PayloadStore:
+    return PayloadStore(tmp_path / "payloads", conn)
 
 
 @pytest.fixture
@@ -66,161 +64,161 @@ def clock() -> FakeClock:
     return FakeClock()
 
 
-class TestEnqueue:
-    async def test_enqueue_creates_pending(self, conn, clock) -> None:
-        svc = SqliteDeliveryService(conn, FakeGatewayClient(), clock=clock)
-        ref = await svc.enqueue(
+def _service(
+    conn: sqlite3.Connection,
+    payload_store: PayloadStore,
+    clock: FakeClock,
+    gateway: FakeGatewayClient | None = None,
+) -> SqliteDeliveryService:
+    return SqliteDeliveryService(
+        conn,
+        gateway or FakeGatewayClient(),
+        effect_payload_store=payload_store,
+        clock=clock,
+    )
+
+
+def _append_delivery_state(
+    conn: sqlite3.Connection,
+    delivery_id: str,
+    event_type: str,
+    *,
+    outcome: str,
+    attributes: dict[str, str] | None = None,
+) -> None:
+    store = EventStore(conn)
+    stream = store.read_stream("delivery", delivery_id)
+    store.append(
+        Event(
+            event_type=event_type,
+            stream_type="delivery",
+            stream_id=delivery_id,
+            producer="test",
+            event_class=EventClass.DOMAIN,
+            outcome=outcome,
+            attributes=attributes or {},
+        ),
+        expected_version=len(stream),
+    )
+    conn.commit()
+
+
+def _delivery_rows(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0])
+
+
+class TestEventFirstDeliveryService:
+    async def test_enqueue_creates_event_projection_and_protected_payload(
+        self, conn, payload_store, clock
+    ) -> None:
+        service = _service(conn, payload_store, clock)
+        delivery = await service.enqueue(
             DeliveryRequest(
                 target={"channel": "qq", "to": "owner"},
-                content_ref="mem://msg/1",
+                content_ref="message body",
             )
         )
-        assert ref.delivery_id.startswith("del-")
-        view = svc.get(ref.delivery_id)
+
+        view = service.get(delivery.delivery_id)
+        event = EventStore(conn).read_stream("delivery", delivery.delivery_id)[0]
+        assert view is not None and view.status == "pending"
+        assert view.target_snapshot["delivery_id"] == delivery.delivery_id
+        assert event.attributes["effect_payload_kind"] == "delivery-effect.v2"
+        assert event.payload_ref and event.payload_hash
+        assert _delivery_rows(conn) == 0
+
+    async def test_enqueue_idempotency_reuses_request_event(
+        self, conn, payload_store, clock
+    ) -> None:
+        service = _service(conn, payload_store, clock)
+        first = await service.enqueue(DeliveryRequest(target={}, content_ref="x", idempotency_key="idem"))
+        second = await service.enqueue(DeliveryRequest(target={}, content_ref="y", idempotency_key="idem"))
+
+        assert second.delivery_id == first.delivery_id
+        assert len(EventStore(conn).read_stream("delivery", first.delivery_id)) == 1
+        assert _delivery_rows(conn) == 0
+
+    async def test_cancel_and_retry_append_lifecycle_events(self, conn, payload_store, clock) -> None:
+        service = _service(conn, payload_store, clock)
+        cancelled = await service.enqueue(DeliveryRequest(target={}, content_ref="x"))
+        view = service.get(cancelled.delivery_id)
         assert view is not None
-        assert view.status == "pending"
+        await service.cancel(cancelled.delivery_id, view.stream_version)
+        assert service.get(cancelled.delivery_id).status == "cancelled"  # type: ignore[union-attr]
 
-    async def test_enqueue_with_idempotency_returns_existing(self, conn, clock) -> None:
-        gw = FakeGatewayClient()
-        svc = SqliteDeliveryService(conn, gw, clock=clock)
-        r1 = await svc.enqueue(
-            DeliveryRequest(
-                target={},
-                content_ref="x",
-                idempotency_key="idem-1",
-            )
+        retried = await service.enqueue(DeliveryRequest(target={}, content_ref="y"))
+        _append_delivery_state(
+            conn,
+            retried.delivery_id,
+            "delivery.retry_scheduled",
+            outcome="retry_scheduled",
         )
-        r2 = await svc.enqueue(
-            DeliveryRequest(
-                target={},
-                content_ref="y",
-                idempotency_key="idem-1",
-            )
+        view = service.get(retried.delivery_id)
+        assert view is not None
+        await service.retry(retried.delivery_id, view.stream_version)
+        assert service.get(retried.delivery_id).status == "pending"  # type: ignore[union-attr]
+        assert _delivery_rows(conn) == 0
+
+    async def test_reconcile_unknown_and_completed_are_event_only(
+        self, conn, payload_store, clock
+    ) -> None:
+        service = _service(conn, payload_store, clock)
+        delivery = await service.enqueue(DeliveryRequest(target={}, content_ref="x"))
+        _append_delivery_state(
+            conn,
+            delivery.delivery_id,
+            "delivery.unknown",
+            outcome="unknown",
+            attributes={"platform_message_id": "pmid-1"},
         )
-        assert r1.delivery_id == r2.delivery_id
-        # 仅一条 delivery
-        rows = conn.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0]
-        assert rows == 1
 
-    async def test_enqueue_scheduled_status(self, conn, clock) -> None:
-        svc = SqliteDeliveryService(conn, FakeGatewayClient(), clock=clock)
-        ref = await svc.enqueue(
-            DeliveryRequest(
-                target={},
-                content_ref="x",
-                scheduled_at="2026-01-01T00:00:00+00:00",
-            )
+        result = await service.reconcile(
+            delivery.delivery_id,
+            platform_message_id="pmid-1",
+            confirmed=True,
         )
-        view = svc.get(ref.delivery_id)
-        assert view is not None and view.status == "scheduled"
-
-
-class TestCancel:
-    async def test_cancel_pending(self, conn, clock) -> None:
-        svc = SqliteDeliveryService(conn, FakeGatewayClient(), clock=clock)
-        ref = await svc.enqueue(DeliveryRequest(target={}, content_ref="x"))
-        view = svc.get(ref.delivery_id)
-        assert view and view.status == "pending"
-        await svc.cancel(ref.delivery_id, 0)
-        view2 = svc.get(ref.delivery_id)
-        assert view2 and view2.status == "cancelled"
-
-    async def test_cancel_noop_when_sent(self, conn, clock) -> None:
-        svc = SqliteDeliveryService(conn, FakeGatewayClient(status="success"), clock=clock)
-        ref = await svc.enqueue(DeliveryRequest(target={}, content_ref="x"))
-        conn.execute("UPDATE deliveries SET status='sent' WHERE delivery_id=?", (ref.delivery_id,))
-        conn.commit()
-        await svc.cancel(ref.delivery_id, 0)
-        view = svc.get(ref.delivery_id)
-        assert view and view.status == "sent"
-
-
-class TestRetry:
-    async def test_retry_pending_back_to_pending(self, conn, clock) -> None:
-        svc = SqliteDeliveryService(conn, FakeGatewayClient(), clock=clock)
-        ref = await svc.enqueue(DeliveryRequest(target={}, content_ref="x"))
-        # 模拟当前已在 retry_scheduled
-        conn.execute(
-            "UPDATE deliveries SET status='retry_scheduled' WHERE delivery_id=?",
-            (ref.delivery_id,),
-        )
-        conn.commit()
-        await svc.retry(ref.delivery_id, 0)
-        view = svc.get(ref.delivery_id)
-        assert view and view.status == "pending"
-
-    async def test_retry_noop_when_sent(self, conn, clock) -> None:
-        svc = SqliteDeliveryService(conn, FakeGatewayClient(), clock=clock)
-        ref = await svc.enqueue(DeliveryRequest(target={}, content_ref="x"))
-        conn.execute("UPDATE deliveries SET status='sent' WHERE delivery_id=?", (ref.delivery_id,))
-        conn.commit()
-        await svc.retry(ref.delivery_id, 0)
-        view = svc.get(ref.delivery_id)
-        assert view and view.status == "sent"
-
-
-class TestReconcile:
-    async def test_reconcile_unknown_to_sent(self, conn, clock) -> None:
-        svc = SqliteDeliveryService(conn, FakeGatewayClient(), clock=clock)
-        ref = await svc.enqueue(DeliveryRequest(target={}, content_ref="x"))
-        conn.execute(
-            "UPDATE deliveries SET status='unknown' WHERE delivery_id=?",
-            (ref.delivery_id,),
-        )
-        conn.commit()
-        result = await svc.reconcile(ref.delivery_id, platform_message_id="pmid-1")
+        view = service.get(delivery.delivery_id)
         assert result.status == "sent"
-        view = svc.get(ref.delivery_id)
-        assert view and view.status == "sent"
-        assert view and view.platform_message_id == "pmid-1"
+        assert view is not None and view.status == "completed"
+        assert view.platform_message_id == "pmid-1"
+        assert _delivery_rows(conn) == 0
 
-    async def test_reconcile_already_sent_is_idempotent(self, conn, clock) -> None:
-        svc = SqliteDeliveryService(conn, FakeGatewayClient(), clock=clock)
-        ref = await svc.enqueue(DeliveryRequest(target={}, content_ref="x"))
-        conn.execute(
-            "UPDATE deliveries SET status='sent' WHERE delivery_id=?",
-            (ref.delivery_id,),
+    async def test_canonical_effect_worker_completes_without_row_state(
+        self, conn, payload_store, clock
+    ) -> None:
+        gateway = FakeGatewayClient(status="success", platform_message_id="pmid-ok")
+        service = _service(conn, payload_store, clock, gateway)
+        delivery = await service.enqueue(
+            DeliveryRequest(target={"channel": "qq"}, content_ref="hello")
         )
-        conn.commit()
-        result = await svc.reconcile(ref.delivery_id, "pmid-2")
-        assert result.status == "sent"
 
-
-class TestDeliverFlow:
-    async def test_deliver_success_creates_confirmed_receipt(self, conn, clock) -> None:
-        gw = FakeGatewayClient(status="success", platform_message_id="pmid-ok")
-        svc = SqliteDeliveryService(conn, gw, clock=clock)
-        ref = await svc.enqueue(
-            DeliveryRequest(
-                target={"channel": "qq"},
-                content_ref="hello",
-            )
+        worker = CanonicalEffectWorker(
+            EventStore(conn),
+            CanonicalDeliveryEffectExecutor(payload_store, gateway),
+            effect_types=frozenset({"delivery"}),
         )
-        lease = svc.lease_next("w1")
-        assert lease is not None
-        result = svc.deliver(lease, "w1")
-        assert result == "sent"
-        view = svc.get(ref.delivery_id)
-        assert view and view.status == "sent"
-        # 经 _LegacyGateway 适配后走 worker 的 legacy bool|None 路径，
-        # platform_message_id 由 worker 生成 fake_ 前缀；关键是 confirmed receipt 写入
-        assert view and view.platform_message_id is not None
-        assert len(view.receipts) >= 1
-        assert any(r["receipt_kind"] == "confirmed" for r in view.receipts)
+        assert worker.run_pending() == 1
+        view = service.get(delivery.delivery_id)
+        assert view is not None and view.status == "completed"
+        assert view.platform_message_id == "pmid-ok"
+        assert len(view.receipts) == 1
+        assert gateway.send_calls[0][1] == "hello"
+        assert _delivery_rows(conn) == 0
 
-    async def test_deliver_fail_creates_uncertain_receipt_when_unknown(self, conn, clock) -> None:
-        gw = FakeGatewayClient(status="unknown")
-        svc = SqliteDeliveryService(conn, gw, clock=clock)
-        ref = await svc.enqueue(
-            DeliveryRequest(
-                target={"channel": "qq"},
-                content_ref="hello",
-            )
+    async def test_canonical_effect_worker_marks_unknown_without_row_state(
+        self, conn, payload_store, clock
+    ) -> None:
+        gateway = FakeGatewayClient(status="unknown", error_code="gateway_timeout")
+        service = _service(conn, payload_store, clock, gateway)
+        delivery = await service.enqueue(DeliveryRequest(target={"channel": "qq"}, content_ref="hello"))
+
+        worker = CanonicalEffectWorker(
+            EventStore(conn),
+            CanonicalDeliveryEffectExecutor(payload_store, gateway),
+            effect_types=frozenset({"delivery"}),
         )
-        lease = svc.lease_next("w1")
-        assert lease is not None
-        result = svc.deliver(lease, "w1")
-        assert result == "unknown"
-        view = svc.get(ref.delivery_id)
-        assert view and view.status == "unknown"
-        assert any(r["receipt_kind"] == "uncertain" for r in view.receipts)
+        assert worker.run_pending() == 1
+        view = service.get(delivery.delivery_id)
+        assert view is not None and view.status == "unknown"
+        assert view.receipts[0]["receipt_kind"] == "unknown"
+        assert _delivery_rows(conn) == 0

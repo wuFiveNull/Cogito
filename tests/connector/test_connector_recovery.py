@@ -8,9 +8,12 @@ import pytest
 
 from cogito.domain.task import Task, TaskAttempt, TaskAttemptStatus, TaskStatus
 from cogito.domain.schedule import Schedule, ScheduleType
+from cogito.domain.event import Event, EventClass, EventContext
 from cogito.runtime.clock import FakeClock
 from cogito.service.recovery_service import RecoveryService
 from cogito.service.scheduler import Scheduler
+from cogito.store.event_replay import replay_delivery, replay_turn
+from cogito.store.event_store import EventStore
 from cogito.store.schedule_repo import ScheduleRepository
 from cogito.store.task_repo import TaskAttemptRepository, TaskRepository
 
@@ -29,29 +32,24 @@ class TestRecoverStaleTasks:
 
     def _make_running_task(self, conn, task_id="t1", lease_expires=None, clock=None):
         now = clock.now() if clock else datetime.now(UTC)
-        expires = lease_expires if lease_expires is not None else (now + timedelta(minutes=5))
-        task = Task(
-            task_id=task_id,
-            task_type="connector.poll",
-            payload_ref="c1",
-            status=TaskStatus.running,
-            lease_owner="worker-1",
-            lease_expires_at=expires,
-            idempotency_key=f"t-{task_id}",
+        # Create queued task first
+        TaskRepository(conn).insert(
+            Task(
+                task_id=task_id,
+                task_type="connector.poll",
+                payload_ref="c1",
+                status=TaskStatus.queued,
+                idempotency_key=f"t-{task_id}",
+                created_at=now,
+            )
         )
-        TaskRepository(conn).insert(task)
-        attempt = TaskAttempt(
-            task_id=task_id,
-            attempt_no=1,
-            status=TaskAttemptStatus.running,
-            lease_owner="worker-1",
-            lease_version=1,
-            lease_expires_at=expires,
-            started_at=now,
-        )
-        TaskAttemptRepository(conn).insert(attempt)
         conn.commit()
-        return task, attempt
+        # Claim via Dispatcher to create proper Event-based lease
+        from cogito.service.task_dispatcher import TaskDispatcher
+
+        claimed = TaskDispatcher(conn, clock=clock).claim_next("worker-1", clock=now)
+        assert claimed is not None, f"Could not claim task {task_id}"
+        return claimed.task, claimed.attempt
 
     def test_recover_expired_task(self, conn, clock):
         now = clock.now()
@@ -134,18 +132,67 @@ class TestRecoverStreamingDeliveries:
 
         now = epoch_ms(clock.now())
         expires = lease_expires if lease_expires is not None else (now + 5 * 60 * 1000)
-        conn.execute(
-            "INSERT INTO turns (turn_id, session_id, input_message_id, status, "
-            "priority, version, created_at, active_attempt_id) "
-            "VALUES (?, 's1', 'm1', ?, 80, 1, ?, ?)",
-            (turn_id, turn_status, now, f"{turn_id}_a"),
+        attempt_id = f"{turn_id}_a"
+        context = EventContext(session_id="s1", turn_id=turn_id, attempt_id=attempt_id)
+        events = EventStore(conn)
+        events.append_many(
+            (
+                Event(
+                    event_type="runtime.turn.accepted",
+                    stream_type="turn",
+                    stream_id=turn_id,
+                    event_class=EventClass.DOMAIN,
+                    producer="test-recovery",
+                    context=EventContext(session_id="s1", turn_id=turn_id),
+                    summary="Test Turn accepted",
+                    attributes={"input_message_id": "m1", "priority": 80},
+                    outcome="queued",
+                    occurred_at=now,
+                ),
+                Event(
+                    event_type="runtime.turn.started",
+                    stream_type="turn",
+                    stream_id=turn_id,
+                    event_class=EventClass.OPERATION,
+                    producer="test-recovery",
+                    context=context,
+                    summary="Test Turn started",
+                    attributes={"active_attempt_id": attempt_id},
+                    outcome=turn_status,
+                    occurred_at=now,
+                ),
+                Event(
+                    event_type="runtime.attempt.started",
+                    stream_type="run_attempt",
+                    stream_id=attempt_id,
+                    event_class=EventClass.OPERATION,
+                    producer="test-recovery",
+                    context=context,
+                    summary="Test run attempt started",
+                    attributes={
+                        "attempt_no": 1,
+                        "lease_version": 1,
+                        "lease_expires_at": expires,
+                    },
+                    outcome="running",
+                    occurred_at=now,
+                ),
+            )
         )
-        conn.execute(
-            "INSERT INTO run_attempts (attempt_id, turn_id, attempt_no, status, "
-            "lease_version, lease_expires_at, started_at) "
-            "VALUES (?, ?, 1, ?, 1, ?, ?)",
-            (f"{turn_id}_a", turn_id, attempt_status, expires, now),
-        )
+        if attempt_status == "abandoned":
+            events.append(
+                Event(
+                    event_type="runtime.attempt.abandoned",
+                    stream_type="run_attempt",
+                    stream_id=attempt_id,
+                    event_class=EventClass.OPERATION,
+                    producer="test-recovery",
+                    context=context,
+                    summary="Test run attempt abandoned",
+                    outcome="abandoned",
+                    occurred_at=now,
+                )
+            )
         conn.commit()
 
     def _make_streaming_delivery(
@@ -157,24 +204,31 @@ class TestRecoverStreamingDeliveries:
         platform_message_id="pm-1",
         conversation_id="web:dbg",
     ):
-        import json
-
         from cogito.store.time_utils import epoch_ms
 
         now = epoch_ms(clock.now())
-        target = {"delivery_id": delivery_id, "conversation_id": conversation_id}
-        conn.execute(
-            "INSERT INTO deliveries (delivery_id, target_snapshot, status, "
-            "idempotency_key, created_at, content_mode, turn_id, platform_message_id) "
-            "VALUES (?, ?, 'streaming', ?, ?, 'provisional', ?, ?)",
-            (
-                delivery_id,
-                json.dumps(target),
-                f"idk_{delivery_id}",
-                now,
-                turn_id,
-                platform_message_id,
-            ),
+        EventStore(conn).append(
+            Event(
+                event_type="delivery.requested",
+                stream_type="delivery",
+                stream_id=delivery_id,
+                event_class=EventClass.DOMAIN,
+                producer="test-recovery",
+                context=EventContext(
+                    conversation_id=conversation_id,
+                    session_id="s1",
+                    turn_id=turn_id,
+                    attempt_id=f"{turn_id}_a",
+                ),
+                summary="Test streaming delivery requested",
+                attributes={
+                    "delivery_mode": "streaming",
+                    "platform_message_id": platform_message_id,
+                },
+                outcome="streaming",
+                occurred_at=now,
+                idempotency_key=f"idk_{delivery_id}",
+            )
         )
         conn.commit()
 
@@ -191,10 +245,8 @@ class TestRecoverStreamingDeliveries:
         assert svc.recover_stale_turns() == 1
         assert svc.recover_streaming_deliveries() == 1
 
-        d = conn.execute("SELECT status FROM deliveries WHERE delivery_id='d1'").fetchone()
-        assert d["status"] == "interrupted"
-        t = conn.execute("SELECT status FROM turns WHERE turn_id='turn-1'").fetchone()
-        assert t["status"] == "queued"
+        assert replay_delivery(EventStore(conn).read_stream("delivery", "d1"), "d1").status == "cancelled"
+        assert replay_turn(EventStore(conn).read_stream("turn", "turn-1"), "turn-1").status == "queued"
 
     def test_keeps_live_streaming_delivery(self, conn, clock):
         """存活的 Turn（attempt 仍 running、租约有效）→ 不撤回。"""
@@ -207,8 +259,7 @@ class TestRecoverStreamingDeliveries:
         svc = RecoveryService(conn, clock=clock)
         assert svc.recover_streaming_deliveries() == 0
 
-        d = conn.execute("SELECT status FROM deliveries WHERE delivery_id='d1'").fetchone()
-        assert d["status"] == "streaming"
+        assert replay_delivery(EventStore(conn).read_stream("delivery", "d1"), "d1").status == "streaming"
 
     def test_withdraw_when_attempt_dead_but_turn_running(self, conn, clock):
         """Turn 名义 running 但 active attempt 已 abandoned → 撤回并复位 Turn。"""
@@ -228,10 +279,8 @@ class TestRecoverStreamingDeliveries:
         svc = RecoveryService(conn, clock=clock)
         assert svc.recover_streaming_deliveries() == 1
 
-        d = conn.execute("SELECT status FROM deliveries WHERE delivery_id='d1'").fetchone()
-        assert d["status"] == "interrupted"
-        t = conn.execute("SELECT status FROM turns WHERE turn_id='turn-1'").fetchone()
-        assert t["status"] == "queued"
+        assert replay_delivery(EventStore(conn).read_stream("delivery", "d1"), "d1").status == "cancelled"
+        assert replay_turn(EventStore(conn).read_stream("turn", "turn-1"), "turn-1").status == "queued"
 
     def test_recover_all_includes_streaming(self, conn, clock):
         from cogito.store.time_utils import epoch_ms

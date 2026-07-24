@@ -15,11 +15,31 @@ import sqlite3
 from typing import Any
 
 from cogito.contracts.clock import Clock, ProductionClock, epoch_ms
-from cogito.domain.events import DomainEvent
+from cogito.domain.event import Event, EventClass, EventContext
 from cogito.domain.message import ContentPart, Message, MessageDirection, MessageRole
 from cogito.domain.turn import RunAttempt, Turn
+from cogito.infrastructure.payload_store import PayloadStore
+from cogito.service.delivery_effect_payload import (
+    DeliveryEffectPayload,
+    store_delivery_effect_payload,
+)
 from cogito.service.dispatcher import Dispatcher
 from cogito.service.unit_of_work import UnitOfWork
+from cogito.store.event_message_reader import EventMessageReader
+from cogito.store.event_replay import replay_turn
+from cogito.store.event_store import EventStore
+
+
+def _parse_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 class TurnCompletionService:
@@ -27,10 +47,27 @@ class TurnCompletionService:
 
     STUB_REPLY_TEXT = "Hello! I'm Cogito, your personal agent. I'm currently in stub mode — this is an automated reply."
 
-    def __init__(self, conn: sqlite3.Connection, clock: Clock | None = None) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        clock: Clock | None = None,
+        *,
+        effect_payload_store: PayloadStore | None = None,
+        message_payload_store: PayloadStore | None = None,
+    ) -> None:
         self._conn = conn
         self._clock = clock or ProductionClock()
         self._dispatcher = Dispatcher(conn, clock=self._clock)
+        self._effect_payload_store = effect_payload_store
+        self._message_payload_store = message_payload_store or effect_payload_store
+        if self._message_payload_store is not None:
+            self._message_reader = EventMessageReader(conn, self._message_payload_store)
+        else:
+            from cogito.infrastructure.payload_store import PayloadStore
+            import tempfile
+
+            self._message_payload_store = PayloadStore(tempfile.mkdtemp(prefix="cogito-msg-"), conn)
+            self._message_reader = EventMessageReader(conn, self._message_payload_store)
 
     def complete_reply(
         self,
@@ -51,28 +88,17 @@ class TurnCompletionService:
         Returns: final_message_id 或 None（失败时回滚）。
         """
         # 读取输入消息的元数据
-        input_row = self._conn.execute(
-            "SELECT conversation_id, session_id, sender_principal_id, sender_endpoint_id, "
-            "reply_route_json, capability_snapshot_json "
-            "FROM messages WHERE message_id=?",
-            (turn.input_message_id,),
-        ).fetchone()
-
-        conversation_id = input_row["conversation_id"] if input_row else ""
-        session_id = input_row["session_id"] if input_row else (turn.session_id or "")
-        sender_principal_id = input_row["sender_principal_id"] if input_row else ""
-        sender_endpoint_id = input_row["sender_endpoint_id"] if input_row else ""
-        reply_route_json = input_row["reply_route_json"] if input_row else "{}"
-        capability_snapshot_json = input_row["capability_snapshot_json"] if input_row else "{}"
-
-        reply_route = (
-            json.loads(reply_route_json) if isinstance(reply_route_json, str) else reply_route_json
-        )
-        capability_snapshot = (
-            json.loads(capability_snapshot_json)
-            if isinstance(capability_snapshot_json, str)
-            else capability_snapshot_json
-        )
+        input_message = self._input_message(turn.input_message_id)
+        conversation_id = str(input_message.get("conversation_id", ""))
+        session_id = str(input_message.get("session_id", "") or turn.session_id or "")
+        sender_principal_id = str(input_message.get("sender_principal_id", ""))
+        sender_endpoint_id = str(input_message.get("sender_endpoint_id", ""))
+        reply_route = input_message.get("reply_route", {})
+        capability_snapshot = input_message.get("capability_snapshot", {})
+        if not isinstance(reply_route, dict):
+            reply_route = {}
+        if not isinstance(capability_snapshot, dict):
+            capability_snapshot = {}
 
         # 构建 Assistant Message
         parts = [
@@ -167,7 +193,7 @@ class TurnCompletionService:
         Args:
             reply_route: 来自输入消息的回复路由快照。创建 Delivery 时使用。
         """
-        with UnitOfWork(self._conn) as uow:
+        with UnitOfWork(self._conn, payload_store=self._message_payload_store) as uow:
             # 为 outbound 消息分配 receive_sequence
             if message.receive_sequence == 0:
                 message.receive_sequence = uow.message.next_receive_sequence(
@@ -179,8 +205,18 @@ class TurnCompletionService:
             for part in message.content_parts:
                 uow.message.insert_content_part(part, message.message_id)
 
-            # 2. 写入 Delivery（pending 状态，等待 DeliveryWorker 发送）
+            # 2. Append the canonical Delivery request. The active worker
+            # consumes this Event, never a mutable deliveries row.
             delivery_id = ""
+            delivery_requested_id = ""
+            turn_context = self._event_context_for_turn(
+                turn,
+                attempt,
+                conversation_id=message.conversation_id,
+                session_id=message.session_id,
+                principal_id=principal_id,
+                causation_id="",
+            )
             if delivery_target or reply_route:
                 import uuid
 
@@ -216,54 +252,72 @@ class TurnCompletionService:
                     or ""
                 )
                 target["target_endpoint_ref"] = target_endpoint_ref
-                self._conn.execute(
-                    "INSERT INTO deliveries (delivery_id, target_snapshot, content_ref, "
-                    "status, idempotency_key, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        delivery_id,
-                        json.dumps(target),
-                        message.message_id,
-                        "pending",
-                        f"delivery_{message.message_id}",
-                        now_int,
-                    ),
+                idempotency_key = f"delivery_{message.message_id}"
+                payload_ref = message.message_id
+                payload_hash = ""
+                payload_kind = "message-reference.v1"
+                if self._effect_payload_store is not None:
+                    payload_ref, payload_hash = store_delivery_effect_payload(
+                        self._effect_payload_store,
+                        DeliveryEffectPayload(
+                            delivery_id=delivery_id,
+                            target_snapshot=target,
+                            content=message.content_parts[0].inline_data,
+                            content_ref=message.message_id,
+                            idempotency_key=idempotency_key,
+                        ),
+                    )
+                    payload_kind = "delivery-effect.v2"
+                delivery_requested = EventStore(self._conn).append(
+                    Event(
+                        event_type="delivery.requested",
+                        stream_type="delivery",
+                        stream_id=delivery_id,
+                        producer="turn-completion",
+                        event_class=EventClass.DOMAIN,
+                        context=turn_context,
+                        summary="Assistant response delivery requested",
+                        attributes={"effect_payload_kind": payload_kind},
+                        payload_ref=payload_ref,
+                        payload_hash=payload_hash,
+                        outcome="pending",
+                        occurred_at=now_int,
+                        idempotency_key=f"delivery-request:{idempotency_key}",
+                    )
                 )
+                delivery_requested_id = delivery_requested.event_id
 
-            # 3. 写入 TurnCompleted Event Outbox
-            now = self._clock.now()
-            turn_completed_payload = {
-                "turn_id": turn.turn_id,
-                "message_id": message.message_id,
-                "delivery_id": delivery_id,
-                "conversation_id": message.conversation_id,
-                "session_id": message.session_id,
-                "principal_id": principal_id,
-                "input_message_id": turn.input_message_id,
-            }
-            uow.outbox.insert(
-                DomainEvent(
-                    event_type="TurnCompleted",
-                    aggregate_type="turn",
-                    aggregate_id=turn.turn_id,
-                    aggregate_version=turn.version + 1,
-                    payload_ref=json.dumps(turn_completed_payload, ensure_ascii=False),
-                    payload=turn_completed_payload,
-                    occurred_at=now,
-                    correlation_id=turn.turn_id,
-                    causation_id=turn.turn_id,
-                    origin="agent",
-                )
+            # 3. 完成 Turn + Attempt（在同一 UoW 中，不自成事务）
+            completion_context = self._event_context_for_turn(
+                turn,
+                attempt,
+                conversation_id=message.conversation_id,
+                session_id=message.session_id,
+                principal_id=principal_id,
+                causation_id=delivery_requested_id,
             )
-
-            # 4. 完成 Turn + Attempt（在同一 UoW 中，不自成事务）
+            # Context and model observations can be appended after the Turn is
+            # claimed.  Complete against the current aggregate stream version,
+            # not the stale in-memory claim projection.
+            turn_stream = EventStore(self._conn).read_stream("turn", turn.turn_id)
+            replayed_turn = replay_turn(turn_stream, turn.turn_id)
+            current_turn_version = (
+                replayed_turn.stream_version if replayed_turn is not None else turn.version
+            )
             ok = self._dispatcher.complete(
                 turn.turn_id,
                 attempt.attempt_id,
-                turn.version,
+                current_turn_version,
                 worker_id=attempt.worker_id,
                 lease_version=attempt.lease_version,
                 final_message_id=message.message_id,
+                event_context=completion_context,
+                event_producer="turn-completion",
+                event_summary="Turn completed with assistant response",
+                event_attributes={
+                    "final_message_id": message.message_id,
+                    "delivery_id": delivery_id,
+                },
                 _uow=uow,
             )
             if not ok:
@@ -273,6 +327,40 @@ class TurnCompletionService:
             uow.commit()
 
         return message.message_id
+
+    def _input_message(self, message_id: str) -> dict[str, Any]:
+        """Read reply metadata from the canonical message Event."""
+        if self._message_reader is not None:
+            event_message = self._message_reader.get(message_id)
+            if event_message is not None:
+                return event_message
+        return {}
+
+    def _event_context_for_turn(
+        self,
+        turn: Turn,
+        attempt: RunAttempt,
+        *,
+        conversation_id: str,
+        session_id: str,
+        principal_id: str,
+        causation_id: str,
+    ) -> EventContext:
+        """Continue the accepted Turn trace without reconstructing a projection."""
+        prior = EventStore(self._conn).read_stream("turn", turn.turn_id)
+        source_event = next((event for event in reversed(prior) if event.context.trace_id), None)
+        source = source_event.context if source_event is not None else EventContext()
+        return EventContext(
+            trace_id=source.trace_id,
+            correlation_id=source.correlation_id,
+            causation_id=causation_id or (source_event.event_id if source_event else source.causation_id),
+            actor_id=source.actor_id,
+            principal_id=principal_id or source.principal_id,
+            conversation_id=conversation_id or source.conversation_id,
+            session_id=session_id or source.session_id or turn.session_id,
+            turn_id=turn.turn_id,
+            attempt_id=attempt.attempt_id,
+        )
 
 
 class StubAgent:

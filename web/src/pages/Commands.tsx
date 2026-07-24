@@ -34,9 +34,6 @@ export default function CommandsPage() {
           <button className="btn-ghost" onClick={() => input.trim() && run("retry-task", { task_id: input.trim() })}>
             retry-task
           </button>
-          <button className="btn-ghost" onClick={() => input.trim() && run("replay-delivery", { delivery_id: input.trim() })}>
-            replay-delivery
-          </button>
           <button className="btn-ghost" onClick={() => input.trim() && run("confirm-memory", { memory_id: input.trim() })}>
             confirm-memory
           </button>

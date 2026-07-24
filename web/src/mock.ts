@@ -263,16 +263,57 @@ const MOCK_PROACTIVE_FEEDBACK = {
   drift_preemption_reason: null,
 };
 
-// ── Outbox / Events / Dead Letter Mock ────────────────────────
-const MOCK_OUTBOX = [
-  { event_id: "ev_001", event_type: "turn.completed", aggregate_type: "turn", aggregate_id: "t_8f3a2c11", aggregate_version: 2, status: "published", consumer: "proactive", attempt_count: 1, next_attempt_at: null, dead_letter_reason: null, created_at: "2026-07-08T09:12:10Z" },
-  { event_id: "ev_002", event_type: "task.failed", aggregate_type: "task", aggregate_id: "tk_aa04", aggregate_version: 3, status: "published", consumer: "outbox_worker", attempt_count: 1, next_attempt_at: null, dead_letter_reason: null, created_at: "2026-07-08T08:58:40Z" },
-  { event_id: "ev_003", event_type: "delivery.unknown", aggregate_type: "delivery", aggregate_id: "dl_aa13", aggregate_version: 1, status: "pending", consumer: "reconcile", attempt_count: 2, next_attempt_at: "2026-07-08T09:30:00Z", dead_letter_reason: null, created_at: "2026-07-08T08:31:10Z" },
-  { event_id: "ev_004", event_type: "connector.item_ingested", aggregate_type: "connector", aggregate_id: "cn_github", aggregate_version: 10, status: "pending", consumer: "proactive", attempt_count: 4, next_attempt_at: null, dead_letter_reason: "max_retries_exceeded", created_at: "2026-07-08T07:00:00Z" },
-];
-
-const MOCK_DEAD_LETTER = [
-  { event_id: "ev_004", event_type: "connector.item_ingested", aggregate_type: "connector", aggregate_id: "cn_github", aggregate_version: 10, status: "dead_letter", consumer: "proactive", attempt_count: 4, next_attempt_at: null, dead_letter_reason: "max_retries_exceeded", created_at: "2026-07-08T07:00:00Z" },
+const MOCK_EVENTS = [
+  {
+    event_id: "ev_turn_queued",
+    event_type: "runtime.turn.queued",
+    stream_type: "turn",
+    stream_id: "turn_demo",
+    stream_version: 1,
+    event_class: "domain",
+    producer: "web",
+    occurred_at: 1751965924000,
+    trace_id: "trace_demo",
+    span_id: "span_turn",
+    parent_span_id: null,
+    correlation_id: "request_demo",
+    causation_id: "",
+    session_id: "s_a1b2c3d4",
+    turn_id: "turn_demo",
+    attempt_id: "",
+    task_id: "",
+    summary: "Inbound message accepted and turn queued",
+    attributes: { priority: 80 },
+    payload_ref: null,
+    payload_hash: "",
+    outcome: "queued",
+    error_category: "",
+  },
+  {
+    event_id: "ev_model_complete",
+    event_type: "model.call.completed",
+    stream_type: "model_call",
+    stream_id: "call_demo",
+    stream_version: 2,
+    event_class: "operation",
+    producer: "model-adapter",
+    occurred_at: 1751965929200,
+    trace_id: "trace_demo",
+    span_id: "span_model",
+    parent_span_id: "span_turn",
+    correlation_id: "request_demo",
+    causation_id: "ev_turn_queued",
+    session_id: "s_a1b2c3d4",
+    turn_id: "turn_demo",
+    attempt_id: "attempt_demo",
+    task_id: "",
+    summary: "Model response generated",
+    attributes: { input_tokens: 1820, output_tokens: 430, latency_ms: 1180 },
+    payload_ref: null,
+    payload_hash: "",
+    outcome: "completed",
+    error_category: "",
+  },
 ];
 
 // ── Audit Mock ────────────────────────────────────────────────
@@ -280,7 +321,6 @@ const MOCK_AUDIT = [
   { audit_id: "aud_001", actor_id: "dashboard", action: "approve", target_type: "approval", target_id: "ap_001", changes: '{"decision":"approved"}', trace_id: "t_8f3a2c11", occurred_at: "2026-07-08T09:13:00Z" },
   { audit_id: "aud_002", actor_id: "dashboard", action: "delete-session", target_type: "session", target_id: "s_77aa11bb", changes: '{"deleted_at":"2026-07-08T08:35:00Z"}', trace_id: null, occurred_at: "2026-07-08T08:35:00Z" },
   { audit_id: "aud_003", actor_id: "system", action: "config.change", target_type: "config", target_id: "proactive_policy", changes: '{"dry_run":true}', trace_id: null, occurred_at: "2026-07-08T08:00:00Z" },
-  { audit_id: "aud_004", actor_id: "dashboard", action: "replay-delivery", target_type: "delivery", target_id: "dl_aa11", changes: "{}", trace_id: "dl_aa11", occurred_at: "2026-07-08T09:11:00Z" },
   { audit_id: "aud_005", actor_id: "owner", action: "confirm-memory", target_type: "memory", target_id: "mem_001", changes: '{"status":"confirmed"}', trace_id: null, occurred_at: "2026-07-08T07:30:00Z" },
 ];
 
@@ -406,13 +446,10 @@ export function resolveMock<T>(path: string, init?: RequestInit): T {
     } as unknown as T;
   }
   if (p.startsWith("/conversations")) return { items: CONVERSATIONS } as unknown as T;
-  if (p.startsWith("/sessions/")) {
-    const id = p.split("/")[2];
-    return buildSessionTrace(id) as unknown as T;
-  }
+  if (p.startsWith("/event-timelines")) return { session_id: "s_a1b2c3d4", events: MOCK_EVENTS } as unknown as T;
   if (p.startsWith("/sessions")) return { items: SESSIONS, total: SESSIONS.length } as unknown as T;
   if (p.startsWith("/deliveries")) return { items: DELIVERIES, total: DELIVERIES.length } as unknown as T;
-  if (p.startsWith("/traces/")) return { trace_id: p.split("/")[2], spans: [] } as unknown as T;
+  if (p.startsWith("/event-traces/")) return { trace_id: p.split("/")[2], events: MOCK_EVENTS, edges: [] } as unknown as T;
   if (p.startsWith("/plugins")) return { items: PLUGINS } as unknown as T;
 
   // ── Dashboard Summary / Attention / Health ───────────────────
@@ -428,10 +465,8 @@ export function resolveMock<T>(path: string, init?: RequestInit): T {
   if (p.startsWith("/proactive/digests")) return { items: MOCK_DIGESTS } as unknown as T;
   if (p.startsWith("/proactive/feedback")) return MOCK_PROACTIVE_FEEDBACK as unknown as T;
 
-  // ── Outbox / Events / Dead Letter ─────────────────────────────
-  if (p.startsWith("/outbox")) return { items: MOCK_OUTBOX, total: MOCK_OUTBOX.length } as unknown as T;
-  if (p.startsWith("/events")) return { items: MOCK_OUTBOX, total: MOCK_OUTBOX.length } as unknown as T;
-  if (p.startsWith("/dead-letter")) return { items: MOCK_DEAD_LETTER, total: MOCK_DEAD_LETTER.length } as unknown as T;
+  // ── Canonical Events ──────────────────────────────────────────
+  if (p.startsWith("/events")) return { items: MOCK_EVENTS, next_cursor: null } as unknown as T;
 
   // ── Audit ─────────────────────────────────────────────────────
   if (p.startsWith("/audit")) return { items: MOCK_AUDIT, total: MOCK_AUDIT.length } as unknown as T;

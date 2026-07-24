@@ -85,6 +85,11 @@ export interface PaginationResp<T = Record<string, unknown>> {
   offset: number;
 }
 
+export interface EventPage<T = EventRecord> {
+  items: T[];
+  next_cursor: string | null;
+}
+
 export interface TurnDetail {
   turn: Record<string, unknown>;
   attempts: Record<string, unknown>[];
@@ -118,50 +123,6 @@ export interface ModelCall {
   started_at?: number | null;
   completed_at?: number | null;
   trace_id: string;
-}
-
-export interface RunAttemptDetail {
-  attempt_id: string;
-  attempt_no: number;
-  status: string;
-  worker_id: string;
-  checkpoint_ref?: string | null;
-  started_at?: string | null;
-  finished_at?: string | null;
-  duration_ms?: number | null;
-  model_calls: ModelCall[];
-}
-
-export interface TraceMessage {
-  message_id: string;
-  role: "user" | "assistant" | "tool" | "system";
-  text: string;
-  preview?: string;
-  created_at: string;
-  receive_sequence: number;
-  since_prev_ms: number | null;
-}
-
-export interface TurnTrace {
-  turn_id: string;
-  session_id: string;
-  status: string;
-  created_at: string;
-  duration_ms?: number | null;
-  attempts: RunAttemptDetail[];
-}
-
-export interface SessionTrace {
-  session: Record<string, unknown>;
-  messages: TraceMessage[];
-  turns: TurnTrace[];
-  summary: {
-    turn_count: number;
-    model_call_count: number;
-    total_input_tokens: number;
-    total_output_tokens: number;
-    message_count: number;
-  };
 }
 
 // ── Dashboard Summary / Attention / Health ─────────────────────
@@ -237,6 +198,8 @@ export interface ProactiveStatus {
   global_dry_run: boolean;
   fetch_available: boolean;
   fetch_unavailable_reason: string;
+  mock_available: boolean;
+  mock_unavailable_reason: string;
 }
 
 export interface ProactiveFetchRun {
@@ -315,20 +278,38 @@ export interface ProactiveFeedback {
   drift_preemption_reason?: string | null;
 }
 
-// ── Outbox / Events / Dead Letter ──────────────────────────────
+// ── Canonical Events ───────────────────────────────────────────
 
-export interface OutboxEvent {
+export interface EventRecord {
   event_id: string;
   event_type: string;
-  aggregate_type: string;
-  aggregate_id: string;
-  aggregate_version: number;
-  status: string;
-  consumer: string;
-  attempt_count: number;
-  next_attempt_at?: string | null;
-  dead_letter_reason?: string | null;
-  created_at: string;
+  stream_type: string;
+  stream_id: string;
+  stream_version: number;
+  event_class: "domain" | "operation" | "telemetry";
+  producer: string;
+  occurred_at: number;
+  trace_id: string;
+  span_id: string;
+  parent_span_id?: string | null;
+  correlation_id: string;
+  causation_id: string;
+  session_id: string;
+  turn_id: string;
+  attempt_id: string;
+  task_id: string;
+  summary: string;
+  attributes: Record<string, unknown>;
+  payload_ref?: string | null;
+  payload_hash: string;
+  outcome: string;
+  error_category: string;
+}
+
+export interface EventTrace {
+  trace_id: string;
+  events: EventRecord[];
+  edges: Array<{ event_id: string; parent_event_id?: string | null; causation_id: string }>;
 }
 
 // ── Audit ──────────────────────────────────────────────────────
@@ -486,11 +467,14 @@ export const api = {
     ),
   deliveryDetail: (id: string) =>
     request<Record<string, unknown>>(`/deliveries/${id}`),
-  trace: (id: string) => request<Record<string, unknown>>(`/traces/${id}`),
+  eventTrace: (id: string) => request<EventTrace>(`/event-traces/${id}`),
+  eventTimeline: (sessionId: string, limit = 500) =>
+    request<{ session_id: string; events: EventRecord[] }>(
+      `/event-timelines?session_id=${encodeURIComponent(sessionId)}&limit=${limit}`,
+    ),
   plugins: () => request<{ items: Record<string, unknown>[]; count?: number }>("/plugins"),
   sessions: (limit = 100) =>
     request<{ items: Record<string, unknown>[]; total: number }>(`/sessions?limit=${limit}`),
-  sessionTrace: (id: string) => request<SessionTrace>(`/sessions/${id}/trace`),
 
   // ── Command API ─────────────────────────────────────────────
   command: (path: string, body: Record<string, unknown>) =>
@@ -529,6 +513,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ idempotency_key: idempotencyKey }),
     }),
+  triggerProactiveMock: (idempotencyKey: string) =>
+    request<CommandResponse>("/commands/trigger-proactive-mock", {
+      method: "POST",
+      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    }),
   proactiveFetchRun: (pollTaskId: string) =>
     request<ProactiveFetchRun>(`/proactive/fetch-runs/${encodeURIComponent(pollTaskId)}`),
   proactiveContext: () => request<{ content: string; policy_version: number; dry_run: boolean; file_exists: boolean }>("/proactive/context"),
@@ -558,19 +547,29 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  // ── Outbox / Events / Dead Letter (Phase D5) ────────────────
-  outbox: (limit = 50) =>
-    request<{ items: OutboxEvent[]; total: number }>(`/outbox?limit=${limit}`),
-  events: (limit = 50) =>
-    request<{ items: OutboxEvent[]; total: number }>(`/events?limit=${limit}`),
-  deadLetter: () =>
-    request<{ items: OutboxEvent[]; total: number }>("/dead-letter"),
-  replayEvent: (eventId: string) =>
-    request<CommandResponse>("/commands/replay-event", {
-      method: "POST",
-      body: JSON.stringify({ event_id: eventId }),
-    }),
-
+  // ── Canonical Events ────────────────────────────────────────
+  events: (params: {
+    limit?: number;
+    cursor?: string;
+    event_type?: string;
+    stream_type?: string;
+    stream_id?: string;
+    trace_id?: string;
+    session_id?: string;
+    correlation_id?: string;
+    causation_id?: string;
+    conversation_id?: string;
+    turn_id?: string;
+    attempt_id?: string;
+    task_id?: string;
+  } = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    if (!query.has("limit")) query.set("limit", "50");
+    return request<EventPage>(`/events?${query.toString()}`);
+  },
   // ── Audit (Phase D5) ────────────────────────────────────────
   audit: (params: { entity_id?: string; action?: string; limit?: number } = {}) => {
     const q = new URLSearchParams();

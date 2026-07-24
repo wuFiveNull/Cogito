@@ -4,12 +4,12 @@ Single source of truth for:
 - SQLite connection ownership
 - Migration and recovery-all at startup (RB-06)
 - Provider / Registry / Executor / AgentRunner / InboundService assembly
-- Outbox / Delivery / Channel 生命周期
+- Event subscription / Delivery / Channel 生命周期
 - In-process interactive terminal entrypoint and background worker entrypoints
 - Idempotent close() and graceful async shutdown()
 
 Plan 02 / `RUNNABLE-BASELINE-01` — 统一装配，避免 worker vs interactive 漂移 (RB-07)。
-QQ-ONEBOT-E2E-01 / PR 2 — Runtime 完整拥有 Outbox、Delivery、Channel 生命周期。
+QQ-ONEBOT-E2E-01 / PR 2 — Runtime 完整拥有 Event、Delivery、Channel 生命周期。
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ from cogito.store.migration import migrate
 # ── Plan 06 M2: 配置版本持久化辅助 ──
 
 
-def _persist_config_version(conn: sqlite3.Connection, config: Config) -> None:
+def _persist_config_version(conn: sqlite3.Connection, config: Config) -> str | None:
     """启动时记录配置版本（幂等：同一 content_hash 不重复插入）。"""
     try:
         from datetime import datetime
@@ -50,11 +50,13 @@ def _persist_config_version(conn: sqlite3.Connection, config: Config) -> None:
         )
 
         cfg_repo = ConfigVersionRepository(conn)
-        if cfg_repo.get_by_hash(config.content_hash) is not None:
-            return
+        existing = cfg_repo.get_by_hash(config.content_hash)
+        if existing is not None:
+            return existing.version_id
+        version_id = f"cfg-{uuid.uuid4().hex[:12]}"
         cfg_repo.insert(
             ConfigVersionRecord(
-                version_id=f"cfg-{uuid.uuid4().hex[:12]}",
+                version_id=version_id,
                 content_hash=config.content_hash,
                 schema_version=config.schema_version,
                 source_layers=["profile"],
@@ -63,8 +65,10 @@ def _persist_config_version(conn: sqlite3.Connection, config: Config) -> None:
             )
         )
         conn.commit()
+        return version_id
     except Exception as e:
         logger.warning("Config version persistence failed: %s", e)
+        return None
 
 
 logger = logging.getLogger("cogito.application")
@@ -75,7 +79,7 @@ class RuntimeCycleResult:
     """一轮公平轮询的处理结果 —— 便于测试、日志和以后健康检查。"""
 
     turn: int = 0
-    outbox: int = 0
+    events: int = 0
     delivery: int = 0
     task: int = 0
     scheduler: int = 0
@@ -110,13 +114,14 @@ class RuntimeApplication:
         self._closed = False
         self._ready = False
         self._recovery_counts: dict[str, int] = {}
+        self._config_version_id: str | None = None
 
         # MCP Manager —— run_worker() 填充；提前声明避免 close() 属性缺失
         self.mcp_manager: Any = None
 
         # PR 2: 后台组件（start_background() 创建）
-        self.outbox_worker: Any = None
-        self.delivery_worker: Any = None
+        self.event_subscription_worker: Any = None
+        self.canonical_delivery_worker: Any = None
         self.task_worker: Any = None
         self.channel_manager: Any = None
         self.channel_gateway: Any = None
@@ -158,6 +163,9 @@ class RuntimeApplication:
 
         try:
             migrate(conn)
+            from cogito.store.event_store_cutover import assert_event_store_runtime_ready
+
+            assert_event_store_runtime_ready(conn)
         except Exception:
             conn.close()
             raise
@@ -170,16 +178,22 @@ class RuntimeApplication:
         except Exception:
             logger.warning("AIHOT connector seed failed (non-fatal)", exc_info=True)
 
+        # 手动 Mock 源：无定时 Schedule，仅用于端到端验证主动投递。
+        try:
+            from cogito.service.proactive_mock_connector import seed_proactive_mock_connector
+
+            seed_proactive_mock_connector(conn)
+        except Exception:
+            logger.warning("Proactive mock connector seed failed (non-fatal)", exc_info=True)
+
         # Plan 06 M2: 持久化配置版本（启动时记录，供 Attempt/Task 追溯）
-        _persist_config_version(conn, config)
+        config_version_id = _persist_config_version(conn, config)
 
         try:
             recovery = RecoveryService(conn)
             recovery_counts = recovery.recover_all()
             logger.info(
-                "Startup recovery → outbox=%d delivery=%d stale_turns=%d streaming=%d",
-                recovery_counts.get("outbox_leases", 0),
-                recovery_counts.get("delivery_leases", 0),
+                "Startup recovery → stale_turns=%d streaming=%d",
                 recovery_counts.get("stale_turns", 0),
                 recovery_counts.get("streaming_deliveries", 0),
             )
@@ -272,7 +286,9 @@ class RuntimeApplication:
         def _make_task_service():
             from cogito.service.task_service import SqliteTaskService
 
-            return SqliteTaskService(get_connection(config.resolve_db_path()))
+            return SqliteTaskService(
+                get_connection(config.resolve_db_path()), event_sourced=True
+            )
 
         # PLAN-16 M3 MEM-02: recall_memory 工具召回命中后写 exposed 信号
         def _make_memory_service():
@@ -403,9 +419,12 @@ class RuntimeApplication:
         # 唤醒事件：入站新建 Turn 时置位，worker idle 睡眠改为等待该事件，
         # 消除最长 heartbeat_interval_seconds 的轮询延迟。
         wakeup_event = asyncio.Event()
+        from cogito.infrastructure.payload_store import PayloadStore
+
         inbound = InboundService(
             conn,
             notify=wakeup_event.set,
+            payload_store=PayloadStore(config.resolve_payload_dir(), conn),
             asset_service=asset_service,
             vision_service=shared_vision_service,
             max_assets_per_message=config.multimodal.max_assets_per_message,
@@ -432,6 +451,7 @@ class RuntimeApplication:
         # 不再使用全局 set_payload_store_factory（已移除，避免全局状态与并发污染）。
         app._wakeup_event = wakeup_event
         app._recovery_counts = recovery_counts
+        app._config_version_id = config_version_id
 
         app.build_plugin_runtime()
         # 构建 Channel 组件（Manager + Gateway），QQ 等渠道在 run_worker 中启动
@@ -522,20 +542,25 @@ class RuntimeApplication:
         logger.info("Web channel adapter started (conversation-bound WebSocket queue)")
 
     def build_workers(self) -> None:
-        """构建 OutboxWorker / DeliveryWorker / TaskWorker / EventConsumers。"""
-        from cogito.service.event_consumers import build_default_registry
-        from cogito.service.outbox_worker import OutboxWorker
-        from cogito.service.sqlite_delivery_service import SqliteDeliveryService
-
-        self.outbox_worker = OutboxWorker(
-            self.conn,
-            lease_ttl_s=self.config.worker.outbox_lease_ttl_seconds,
+        """构建 Event 订阅、Task 与 canonical Delivery Event workers。"""
+        from cogito.infrastructure.payload_store import PayloadStore
+        from cogito.service.canonical_delivery_effect_executor import (
+            CanonicalDeliveryEffectExecutor,
         )
+        from cogito.service.event_consumers import build_default_registry
+        from cogito.service.event_effect_worker import CanonicalEffectWorker
+        from cogito.service.event_subscription import CanonicalEventConsumerWorker
+        from cogito.service.sqlite_delivery_service import SqliteDeliveryService
+        from cogito.store.event_store import EventStore
+
         drift_cfg = getattr(self.config, "drift", None)
         default_principal = getattr(getattr(self.config, "capability", None), "proactive", None)
         default_principal_id = getattr(default_principal, "default_principal_id", None) or "owner"
         self.event_consumer_registry = build_default_registry(
             default_principal_id=default_principal_id, drift_config=drift_cfg
+        )
+        self.event_subscription_worker = CanonicalEventConsumerWorker(
+            EventStore(self.conn), self.event_consumer_registry
         )
         if self.channel_gateway is None:
             self.build_channel_components()
@@ -544,12 +569,17 @@ class RuntimeApplication:
 
             self.local_gateway_client = LoopbackGatewayClient(self.channel_gateway)
             self.gateway_client = self.local_gateway_client
+        effect_payload_store = PayloadStore(self.config.resolve_payload_dir(), self.conn)
         self.delivery_service = SqliteDeliveryService(
             conn=self.conn,
             gateway=self.gateway_client,
-            lease_ttl_s=self.config.worker.delivery_lease_ttl_seconds,
+            effect_payload_store=effect_payload_store,
         )
-        self.delivery_worker = self.delivery_service.worker()
+        self.canonical_delivery_worker = CanonicalEffectWorker(
+            EventStore(self.conn),
+            CanonicalDeliveryEffectExecutor(effect_payload_store, self.gateway_client),
+            effect_types=frozenset({"delivery"}),
+        )
 
     # ── read-only accessors ────────────────────────────────────────────────
 
@@ -613,7 +643,7 @@ class RuntimeApplication:
         self,
         worker_id: str,
         *,
-        outbox_batch: int = 10,
+        event_batch: int = 10,
         delivery_batch: int = 10,
         task_batch: int = 5,
     ) -> RuntimeCycleResult:
@@ -625,13 +655,8 @@ class RuntimeApplication:
         result = RuntimeCycleResult()
 
         # 1 Turn
-        if self.outbox_worker is None:
-            # 未创建 workers（兼容旧路径）
-            outcome = await self.runner.run_once(worker_id)
-            if outcome == RunOutcome.completed:
-                result.turn = 1
-                result.idle = False
-            return result
+        if self.event_subscription_worker is None:
+            raise RuntimeError("event subscription worker is not initialized")
 
         outcome = await self.runner.run_once(worker_id)
         if outcome == RunOutcome.completed:
@@ -644,46 +669,27 @@ class RuntimeApplication:
         elif outcome == RunOutcome.cancelled:
             logger.info("Turn was cancelled")
 
-        # N Outbox —— lease_next → consumer dispatch → publish/retry
-        for _ in range(outbox_batch):
-            lease = self.outbox_worker.lease_next(worker_id)
-            if lease is None:
-                break
-            consumer = self.event_consumer_registry.find(lease)
-            if consumer is not None:
-                # Consumer 内部负责幂等+事务；失败则 retry/dead_letter，不 publish
-                try:
-                    ok = await asyncio.to_thread(
-                        consumer.handle,
-                        self.conn,
-                        lease,
-                    )
-                    if ok:
-                        self.outbox_worker.publish(lease, worker_id)
-                        result.outbox += 1
-                        result.idle = False
-                    else:
-                        self.outbox_worker.retry(lease, worker_id)
-                except Exception:
-                    logger.exception(
-                        "outbox consumer failed: event=%s consumer=%s",
-                        lease.event_id,
-                        consumer.name,
-                    )
-                    self.outbox_worker.retry(lease, worker_id)
-            else:
-                self.outbox_worker.publish(lease, worker_id)
-                result.outbox += 1
-                result.idle = False
-
-        # N Delivery —— 通过 to_thread 调用同步 deliver()，避免阻塞主 loop
-        for _ in range(delivery_batch):
-            lease = self.delivery_worker.lease_next(worker_id)
-            if lease is None:
-                break
-            await asyncio.to_thread(self.delivery_worker.deliver, lease, worker_id)
-            result.delivery += 1
+        # N Event subscriptions —— immutable facts → consumer dispatch.
+        consumed = await asyncio.to_thread(
+            self.event_subscription_worker.run_pending,
+            self.conn,
+            limit=event_batch,
+        )
+        if consumed:
+            result.events += consumed
             result.idle = False
+
+        # N Delivery —— Event request → protected payload → Gateway.
+        # The legacy row-based DeliveryWorker is deliberately not constructed
+        # or invoked by the runtime.
+        if self.canonical_delivery_worker is not None:
+            delivered = await asyncio.to_thread(
+                self.canonical_delivery_worker.run_pending,
+                limit=delivery_batch,
+            )
+            if delivered:
+                result.delivery += delivered
+                result.idle = False
 
         # N Task
         for _ in range(task_batch):
@@ -806,7 +812,7 @@ class RuntimeApplication:
             proactive_config=self.config.capability.proactive,
             presence_reader=presence_reader,
             drift_config=self.config.drift,
-            config_version_id=self.config.config_version,
+            config_version_id=self._config_version_id,
             memory_config=self.config.memory.weight,
             workspace_path=self.config.workspace_path,
         )
@@ -825,9 +831,18 @@ class RuntimeApplication:
             workspace_path=self.config.workspace_path,
             mcp_manager=self.mcp_manager,
             delivery_service=self.delivery_service,
+            delivery_service_factory=lambda conn: __import__(
+                "cogito.service.sqlite_delivery_service", fromlist=["SqliteDeliveryService"]
+            ).SqliteDeliveryService(
+                conn=conn,
+                gateway=self.gateway_client,
+                effect_payload_store=__import__(
+                    "cogito.infrastructure.payload_store", fromlist=["PayloadStore"]
+                ).PayloadStore(self.config.resolve_payload_dir(), conn),
+            ),
             proactive_config=self.config.capability.proactive,
             presence_reader=presence_reader,
-            config_version_id=self.config.config_version,
+            config_version_id=self._config_version_id or "",
             # PLAN-16 M4 完整 payload 边界：resolver 化知识段落文本
             payload_store_factory=self._make_payload_store_factory(),
             capability_registry=self.runner._registry if self.runner else None,
@@ -838,7 +853,7 @@ class RuntimeApplication:
             ),
         )
         task_registry = _build_registry(task_handler_ctx)
-        task_dispatcher = TaskDispatcher(self.conn)
+        task_dispatcher = TaskDispatcher(self.conn, event_sourced=True)
         self.task_worker = TaskWorker(
             conn=self.conn,
             dispatcher=task_dispatcher,
@@ -902,9 +917,9 @@ class RuntimeApplication:
                         return  # woke up from signal
                 else:
                     logger.debug(
-                        "Cycle processed: turn=%d outbox=%d delivery=%d task=%d",
+                        "Cycle processed: turn=%d events=%d delivery=%d task=%d",
                         cycle.turn,
-                        cycle.outbox,
+                        cycle.events,
                         cycle.delivery,
                         cycle.task,
                     )

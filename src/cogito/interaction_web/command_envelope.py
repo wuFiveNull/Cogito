@@ -6,7 +6,7 @@
 - 唯一约束 (actor, command_type, idempotency_key)
 - 重复同 payload 返回首次结果；相同键不同 payload → idempotency_conflict
 - 聚合变更必须 expected_version；条件更新实现冲突优先级：终态 > 取消/过期 > 审批 > 重试
-- 所有 Command 写 Audit 和 Event Outbox
+- 所有 Command 写 Audit 和 canonical Event log
 - loopback 默认；远程 bind 显式拒绝；写请求校验 Origin
 """
 

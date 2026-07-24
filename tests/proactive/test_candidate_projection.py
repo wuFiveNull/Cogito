@@ -15,9 +15,8 @@ import json
 import pytest
 
 from cogito.domain.connector import ConnectorItem, ItemStatus
-from cogito.domain.events import DomainEvent
 from cogito.service.event_consumers import SourceEventIngestedConsumer
-from cogito.service.outbox_worker import OutboxLease
+from cogito.service.event_subscription import CanonicalConsumerEvent
 from cogito.store.connector_repo import ConnectorItemRepository
 from cogito.store.migration import migrate
 
@@ -96,7 +95,7 @@ def _insert_digest_item(
 
 
 def _make_source_event_ingested(item_id):
-    return OutboxLease(
+    return CanonicalConsumerEvent(
         event_id=f"evt-{item_id}",
         event_type="SourceEventIngested",
         aggregate_type="source",
@@ -109,9 +108,6 @@ def _make_source_event_ingested(item_id):
         causation_id="",
         origin="mcp:fake-data-server:list_items",
         trust_label="external_unverified",
-        created_at=0,
-        lease_version=1,
-        attempt_count=0,
     )
 
 
@@ -201,13 +197,30 @@ def test_status_digest_only_projected(memory_db):
     assert cnt == 0
 
 
+def test_manual_mock_source_projects_an_alert_candidate(memory_db):
+    _insert_digest_item(
+        memory_db,
+        item_id="mock-item",
+        connector_id="connector-proactive-mock",
+    )
+    consumer = SourceEventIngestedConsumer(default_principal_id="owner")
+
+    assert consumer.handle(memory_db, _make_source_event_ingested("mock-item")) is True
+
+    row = memory_db.execute(
+        "SELECT stream_type, urgency FROM proactive_candidates WHERE candidate_id!=''"
+    ).fetchone()
+    assert row["stream_type"] == "alert"
+    assert row["urgency"] == 1.0
+
+
 def test_can_handle_filter(memory_db):
     consumer = SourceEventIngestedConsumer(default_principal_id="owner")
 
     source_evt = _make_source_event_ingested("item-1")
     assert consumer.can_handle(source_evt) is True
 
-    other_evt = OutboxLease(
+    other_evt = CanonicalConsumerEvent(
         event_id="e2",
         event_type="InboundMessageAccepted",
         aggregate_type="message",
@@ -220,8 +233,5 @@ def test_can_handle_filter(memory_db):
         causation_id="",
         origin="channel",
         trust_label="internal",
-        created_at=0,
-        lease_version=1,
-        attempt_count=0,
     )
     assert consumer.can_handle(other_evt) is False

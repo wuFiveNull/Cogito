@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -290,9 +291,11 @@ def test_model_enrichment_runs_outside_write_transaction(
     ctx = ctx_factory(mcp_manager, isolated_memory_db)
     ctx.model_router = object()
     transaction_states: list[bool] = []
+    event_loops = []
 
     async def fake_summary(title, body, model_router):
         transaction_states.append(isolated_memory_db._r.in_transaction)
+        event_loops.append(asyncio.get_running_loop())
         return f"summary:{title}"
 
     monkeypatch.setattr(handler_module, "summarize_item", fake_summary)
@@ -300,6 +303,32 @@ def test_model_enrichment_runs_outside_write_transaction(
 
     assert transaction_states
     assert transaction_states == [False] * len(transaction_states)
+    assert len({id(loop) for loop in event_loops}) == 1
+
+
+def test_current_page_is_truncated_to_item_budget(
+    isolated_memory_db,
+    mcp_manager: _FakeManager,
+    ctx_factory,
+):
+    _seed_connector_and_mapping(isolated_memory_db)
+    repo = MCPConnectorConfigRepository(isolated_memory_db)
+    mapping = repo.get("conn-test-mcp")
+    assert mapping is not None
+    repo.save(replace(mapping, max_pages_per_poll=1, max_items_per_poll=3))
+    isolated_memory_db.commit()
+
+    result = handle_mcp_connector_poll(
+        _make_task("conn-test-mcp"),
+        ctx_factory(mcp_manager, isolated_memory_db),
+    )
+
+    assert "fetched=3" in result
+    count = isolated_memory_db.execute(
+        "SELECT COUNT(*) FROM connector_items WHERE connector_id=?",
+        ("conn-test-mcp",),
+    ).fetchone()[0]
+    assert count == 3
 
 
 def test_idempotent_repoll(
@@ -322,7 +351,7 @@ def test_idempotent_repoll(
     assert cnt == 8
 
 
-def test_outbox_events_emitted(
+def test_canonical_events_emitted(
     isolated_memory_db,
     mcp_manager: _FakeManager,
     ctx_factory,
@@ -332,11 +361,12 @@ def test_outbox_events_emitted(
     handle_mcp_connector_poll(_make_task("conn-test-mcp"), ctx)
 
     cnt = isolated_memory_db.execute(
-        "SELECT COUNT(*) FROM outbox_events "
-        "WHERE event_type='SourceEventIngested' "
-        "AND origin LIKE 'mcp:fake-data-server:list_items'",
+        "SELECT COUNT(*) FROM event_log "
+        "WHERE event_type='connector.source.ingested' "
+        "AND producer='mcp:fake-data-server:list_items'",
     ).fetchone()[0]
     assert cnt == 8
+    assert isolated_memory_db.execute("SELECT COUNT(*) FROM outbox_events").fetchone()[0] == 0
 
 
 def test_source_metadata_preserved(

@@ -15,7 +15,9 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import os
 import sqlite3
+import threading
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -24,9 +26,34 @@ from typing import Any
 
 from cogito.domain.task import Task
 from cogito.infrastructure.metrics_access import _metrics  # OPS-04: 任务级指标
+from cogito.service.memory_extractor import MemoryExtractionWriteError, _is_database_lock_error
 from cogito.service.memory_views import MemoryViewsGenerator
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _sqlite_lock_diagnostics(conn: sqlite3.Connection) -> dict[str, Any]:
+    """收集当前连接的无副作用锁诊断信息。
+
+    SQLite 不提供可移植的“持锁连接 ID”查询。此快照用于结合其他进程的
+    同类日志判断竞争源，且不执行 checkpoint 或任何写操作。
+    """
+    info: dict[str, Any] = {
+        "process": os.getpid(),
+        "thread": threading.get_ident(),
+        "connection": hex(id(conn)),
+        "in_transaction": conn.in_transaction,
+        "isolation_level": conn.isolation_level,
+    }
+    try:
+        info["database"] = [
+            row[2] for row in conn.execute("PRAGMA database_list").fetchall() if row[2]
+        ]
+        info["journal_mode"] = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        info["busy_timeout_ms"] = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    except sqlite3.Error as exc:
+        info["diagnostic_error"] = str(exc)
+    return info
 
 # ── B2: Task Payload 定义 ──
 
@@ -109,6 +136,9 @@ class TaskHandlerContext:
     mcp_manager: Any = None  # MCPServerManager
     # 主动 Delivery 闭环（send_later → Delivery）
     delivery_service: Any = None  # DeliveryService 实现
+    # 为后台任务的短生命周期 SQLite 连接创建对应的 DeliveryService。
+    # 不提供时保留 delivery_service，供测试和非 SQLite 实现兼容。
+    delivery_service_factory: Callable[[sqlite3.Connection], Any] | None = None
     # 主动推送配置（来自 config.capability.proactive）
     proactive_config: Any = None  # ProactiveConfig
     # 用户活动读取（PresenceReader Port）；fail-safe 时返回 None
@@ -211,8 +241,11 @@ async def _handle_agent_delegate(
         raise ValueError("invalid agent.delegate payload") from exc
     from cogito.contracts.clock import epoch_ms
     from cogito.contracts.context import ContextItem, ContextSnapshot
+    from cogito.domain.event import Event, EventClass, EventContext
     from cogito.runtime.loop import AgentLoop, LoopResultType, ResourceBudget
     from cogito.store.checkpoint_repo import CheckpointRepository
+    from cogito.store.event_replay import replay_run_attempt, replay_turn
+    from cogito.store.event_store import EventStore
 
     conn = ctx.connection_factory()
     try:
@@ -225,17 +258,29 @@ async def _handle_agent_delegate(
         turn_id = link["turn_id"] or uuid.uuid4().hex
         attempt_id = uuid.uuid4().hex
         now = epoch_ms(datetime.now(UTC))
+        events = EventStore(conn)
         if not link["turn_id"]:
-            conn.execute(
-                "INSERT INTO turns(turn_id,session_id,input_message_id,status,priority,version,"
-                "active_attempt_id,created_at) VALUES (?,?,?,'running',40,1,?,?)",
-                (
-                    turn_id,
-                    payload.get("session_id", ""),
-                    payload.get("input_message_id", ""),
-                    attempt_id,
-                    now,
+            events.append(
+                Event(
+                    event_type="runtime.turn.accepted",
+                    stream_type="turn",
+                    stream_id=turn_id,
+                    producer="agent-delegate-task",
+                    event_class=EventClass.DOMAIN,
+                    context=EventContext(
+                        trace_id=str(payload.get("trace_id", "")),
+                        principal_id=str(payload.get("principal_id", "")),
+                        conversation_id=str(payload.get("conversation_id", "")),
+                        session_id=str(payload.get("session_id", "")),
+                        turn_id=turn_id,
+                    ),
+                    summary="Delegated child Turn accepted",
+                    attributes={"input_message_id": str(payload.get("input_message_id", "")), "priority": 40},
+                    outcome="accepted",
+                    occurred_at=now,
+                    idempotency_key=f"delegation:{task.task_id}:turn-accepted",
                 ),
+                expected_version=0,
             )
             attempt_no = 1
             conn.execute(
@@ -244,31 +289,103 @@ async def _handle_agent_delegate(
                 (turn_id, task.task_id),
             )
         else:
-            attempt_no = int(
-                conn.execute(
-                    "SELECT COALESCE(MAX(attempt_no),0)+1 FROM run_attempts WHERE turn_id=?",
-                    (turn_id,),
-                ).fetchone()[0]
+            attempt_no = 1 + max(
+                (
+                    replay_run_attempt(events.read_stream("run_attempt", event.stream_id), event.stream_id).attempt_no
+                    for event in events.read_stream_type("run_attempt")
+                    if event.context.turn_id == turn_id
+                    and replay_run_attempt(events.read_stream("run_attempt", event.stream_id), event.stream_id)
+                    is not None
+                ),
+                default=0,
             )
-            conn.execute(
-                "UPDATE turns SET status='running',active_attempt_id=?,version=version+1 "
-                "WHERE turn_id=? AND status IN ('queued','waiting_user','failed')",
-                (attempt_id, turn_id),
+            turn = replay_turn(events.read_stream("turn", turn_id), turn_id)
+            if turn is None or turn.status not in {"queued", "waiting_user", "failed"}:
+                raise RuntimeError("delegated child Turn is not runnable")
+            events.append(
+                Event(
+                    event_type="runtime.turn.started",
+                    stream_type="turn",
+                    stream_id=turn_id,
+                    producer="agent-delegate-task",
+                    event_class=EventClass.OPERATION,
+                    context=EventContext(
+                        trace_id=str(payload.get("trace_id", "")),
+                        principal_id=str(payload.get("principal_id", "")),
+                        conversation_id=str(payload.get("conversation_id", "")),
+                        session_id=turn.session_id,
+                        turn_id=turn_id,
+                        attempt_id=attempt_id,
+                    ),
+                    summary="Delegated child Turn started",
+                    attributes={"active_attempt_id": attempt_id},
+                    outcome="running",
+                    occurred_at=now,
+                    idempotency_key=f"delegation:{task.task_id}:turn-started:{attempt_no}",
+                ),
+                expected_version=turn.stream_version,
             )
             conn.execute(
                 "UPDATE child_task_links SET status='running',version=version+1 WHERE task_id=?",
                 (task.task_id,),
             )
-        conn.execute(
-            "INSERT INTO run_attempts(attempt_id,turn_id,attempt_no,status,started_at,worker_id,"
-            "lease_version) VALUES (?,?,?,'running',?,'agent-delegate-task',1)",
-            (attempt_id, turn_id, attempt_no, now),
+        turn = replay_turn(events.read_stream("turn", turn_id), turn_id)
+        if turn is None:
+            raise RuntimeError("delegated child Turn was not created")
+        if turn.status != "running":
+            events.append(
+                Event(
+                    event_type="runtime.turn.started",
+                    stream_type="turn",
+                    stream_id=turn_id,
+                    producer="agent-delegate-task",
+                    event_class=EventClass.OPERATION,
+                    context=EventContext(session_id=turn.session_id, turn_id=turn_id, attempt_id=attempt_id),
+                    summary="Delegated child Turn started",
+                    attributes={"active_attempt_id": attempt_id},
+                    outcome="running",
+                    occurred_at=now,
+                    idempotency_key=f"delegation:{task.task_id}:turn-started:{attempt_no}",
+                ),
+                expected_version=turn.stream_version,
+            )
+        events.append(
+            Event(
+                event_type="runtime.attempt.started",
+                stream_type="run_attempt",
+                stream_id=attempt_id,
+                producer="agent-delegate-task",
+                event_class=EventClass.OPERATION,
+                context=EventContext(
+                    trace_id=str(payload.get("trace_id", "")),
+                    principal_id=str(payload.get("principal_id", "")),
+                    conversation_id=str(payload.get("conversation_id", "")),
+                    session_id=str(payload.get("session_id", "")),
+                    turn_id=turn_id,
+                    attempt_id=attempt_id,
+                    task_id=task.task_id,
+                ),
+                summary="Delegated child RunAttempt started",
+                attributes={"attempt_no": attempt_no, "worker_id": "agent-delegate-task", "lease_version": 1},
+                outcome="running",
+                occurred_at=now,
+                idempotency_key=f"delegation:{task.task_id}:attempt:{attempt_no}:started",
+            ),
+            expected_version=0,
         )
         conn.commit()
         budget = ResourceBudget(**dict(payload.get("budget") or {}))
 
+        payload_store = None
+        if ctx.payload_store_factory is not None:
+            try:
+                payload_store = ctx.payload_store_factory(conn)
+            except TypeError:
+                payload_store = ctx.payload_store_factory()
+        checkpoints = CheckpointRepository(conn, payload_store=payload_store)
+
         def save_checkpoint(data: dict[str, Any]) -> None:
-            CheckpointRepository(conn).save(turn_id, data)
+            checkpoints.save(turn_id, data)
             conn.commit()
 
         policy_allowed = None
@@ -285,7 +402,7 @@ async def _handle_agent_delegate(
             toolsets=set(payload.get("toolsets", [])),
             budget=budget,
             checkpoint_callback=save_checkpoint,
-            checkpoint_loader=CheckpointRepository(conn).load_latest,
+            checkpoint_loader=checkpoints.load_latest,
             agent_mode="reactive",
             policy_allowed_capabilities=policy_allowed,
         )
@@ -332,14 +449,29 @@ async def _handle_agent_delegate(
         result = await loop.run(snapshot, cancel_flag=child_cancelled)
         finished = epoch_ms(datetime.now(UTC))
         if result.result_type == LoopResultType.waiting_approval:
-            conn.execute(
-                "UPDATE run_attempts SET status='succeeded',finished_at=? WHERE attempt_id=?",
-                (finished, attempt_id),
+            attempt = replay_run_attempt(events.read_stream("run_attempt", attempt_id), attempt_id)
+            turn = replay_turn(events.read_stream("turn", turn_id), turn_id)
+            if attempt is None or turn is None:
+                raise RuntimeError("delegated child lifecycle disappeared")
+            events.append(
+                Event(
+                    event_type="runtime.attempt.completed",
+                    stream_type="run_attempt", stream_id=attempt_id,
+                    producer="agent-delegate-task", event_class=EventClass.OPERATION,
+                    context=EventContext(session_id=turn.session_id, turn_id=turn_id, attempt_id=attempt_id, task_id=task.task_id),
+                    summary="Delegated child RunAttempt reached approval wait",
+                    outcome="completed", occurred_at=finished,
+                    idempotency_key=f"delegation:{task.task_id}:attempt:{attempt_no}:waiting",
+                ), expected_version=attempt.stream_version,
             )
-            conn.execute(
-                "UPDATE turns SET status='waiting_user',active_attempt_id=NULL,version=version+1 "
-                "WHERE turn_id=?",
-                (turn_id,),
+            events.append(
+                Event(
+                    event_type="runtime.turn.waiting_user", stream_type="turn", stream_id=turn_id,
+                    producer="agent-delegate-task", event_class=EventClass.OPERATION,
+                    context=EventContext(session_id=turn.session_id, turn_id=turn_id, attempt_id=attempt_id, task_id=task.task_id),
+                    summary="Delegated child Turn waiting for approval", outcome="waiting_user", occurred_at=finished,
+                    idempotency_key=f"delegation:{task.task_id}:turn:waiting",
+                ), expected_version=turn.stream_version,
             )
             conn.execute(
                 "UPDATE child_task_links SET status='waiting_user',version=version+1 WHERE task_id=?",
@@ -352,13 +484,33 @@ async def _handle_agent_delegate(
             if result.is_success
             else ("cancelled" if result.result_type == LoopResultType.cancelled else "failed")
         )
-        conn.execute(
-            "UPDATE run_attempts SET status=?,finished_at=? WHERE attempt_id=?",
-            ("succeeded" if result.is_success else "failed", finished, attempt_id),
+        attempt = replay_run_attempt(events.read_stream("run_attempt", attempt_id), attempt_id)
+        turn = replay_turn(events.read_stream("turn", turn_id), turn_id)
+        if attempt is None or turn is None:
+            raise RuntimeError("delegated child lifecycle disappeared")
+        attempt_event = "runtime.attempt.completed" if result.is_success else (
+            "runtime.attempt.cancelled" if status == "cancelled" else "runtime.attempt.failed"
         )
-        conn.execute(
-            "UPDATE turns SET status=?,active_attempt_id=NULL,version=version+1 WHERE turn_id=?",
-            ("cancelled" if status == "cancelled" else status, turn_id),
+        turn_event = "runtime.turn.completed" if result.is_success else (
+            "runtime.turn.cancelled" if status == "cancelled" else "runtime.turn.failed"
+        )
+        events.append(
+            Event(
+                event_type=attempt_event, stream_type="run_attempt", stream_id=attempt_id,
+                producer="agent-delegate-task", event_class=EventClass.OPERATION,
+                context=EventContext(session_id=turn.session_id, turn_id=turn_id, attempt_id=attempt_id, task_id=task.task_id),
+                summary="Delegated child RunAttempt finished", outcome="completed" if result.is_success else status,
+                occurred_at=finished, idempotency_key=f"delegation:{task.task_id}:attempt:{attempt_no}:finished",
+            ), expected_version=attempt.stream_version,
+        )
+        events.append(
+            Event(
+                event_type=turn_event, stream_type="turn", stream_id=turn_id,
+                producer="agent-delegate-task", event_class=EventClass.DOMAIN,
+                context=EventContext(session_id=turn.session_id, turn_id=turn_id, attempt_id=attempt_id, task_id=task.task_id),
+                summary="Delegated child Turn finished", outcome=status,
+                occurred_at=finished, idempotency_key=f"delegation:{task.task_id}:turn:finished",
+            ), expected_version=turn.stream_version,
         )
         result_payload = {
             "client_id": payload.get("client_id", ""),
@@ -602,20 +754,24 @@ async def _handle_knowledge_embed(task: Task, ctx: TaskHandlerContext) -> str:
     conn = ctx.connection_factory()
     try:
         svc = _knowledge_service(ctx, conn)
-        # PLAN-16 M4 完整：传入 payload_store_factory resolver 化段落文本
-        # 在主 loop 上 await，复用 httpx 连接池
-        count = await svc.embed_pending(make_payload_store=ctx.payload_store_factory)
+        # PayloadStore factory 已在 _knowledge_service 构造 KnowledgeService 时注入，
+        # embed_pending 会通过该实例字段解析段落正文。
+        # 在主 loop 上 await，复用 httpx 连接池。
+        count = await svc.embed_pending()
         # OPS-04 完整：记录 knowledge embedding 指标
         _metrics().record_knowledge_embedding(status="ok" if count else "empty")
-        # PLAN-16 完整：处理达到上限仍有 pending 排水循环（embed_pending 幂等安全）
+        # 仅在本轮确实写入了向量时继续排水。没有 Embedder（或 Provider
+        # 返回空向量）时 count=0 而 remaining>0；若仍入队会形成无限自触发循环。
         remaining = _count_pending_segments(conn, svc)
-        if remaining > 0:
+        if count > 0 and remaining > 0:
             from cogito.service.knowledge.sync import enqueue_knowledge_embed
 
             enqueue_knowledge_embed(
                 conn, origin="knowledge_embed_drain", embed_model=_embed_model_from(ctx)
             )
         conn.commit()
+        if count == 0 and remaining > 0:
+            return f"knowledge embedding deferred: no vectors written (remaining_pending={remaining})"
         return f"knowledge embedded: {count} (remaining_pending={remaining})"
     except Exception:
         conn.rollback()
@@ -762,21 +918,130 @@ def _handle_mcp_connector_poll(task: Task, ctx: TaskHandlerContext) -> str:
     return handle_mcp_connector_poll(task, ctx)
 
 
-def _proactive_web_target(principal_id: str) -> dict[str, str]:
-    """Build a complete, stable Web TargetSnapshot for proactive inboxes."""
+def _proactive_web_target(conn, principal_id: str) -> dict[str, str] | None:
+    """Resolve a proactive push to the owner's most recently active Web chat.
+
+    The browser Web channel persists real conversations using an internal
+    principal ID, while proactive candidates commonly use the configured
+    default ``owner`` ID.  Therefore the target is selected from the latest
+    inbound user message on an active Web conversation instead of fabricating
+    an invisible ``proactive:<principal>`` WebSocket-only inbox.
+    """
+    row = conn.execute(
+        "SELECT c.platform_conversation_id "
+        "FROM conversations c "
+        "JOIN endpoints e ON e.endpoint_id=c.conversation_endpoint_id "
+        "JOIN messages m ON m.conversation_id=c.conversation_id "
+        "WHERE e.channel_type='web' AND e.status='active' "
+        "AND c.status='active' AND c.platform_conversation_id<>'' "
+        "AND m.role='user' AND m.direction='inbound' "
+        "ORDER BY m.created_at DESC, m.receive_sequence DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
     return {
         "channel": "web",
         "adapter_id": "web",
-        "conversation_id": f"proactive:{principal_id}",
+        "conversation_id": str(row["platform_conversation_id"]),
         "principal_id": principal_id,
     }
+
+
+def _task_delivery_service(ctx: TaskHandlerContext, conn: sqlite3.Connection) -> Any:
+    """Return a delivery service bound to the task's SQLite connection.
+
+    Reusing the application's long-lived DeliveryService opens a second writer
+    while this task connection has an active proactive-decision transaction,
+    which can cause SQLite ``database is locked`` failures.
+    """
+    if ctx.delivery_service_factory is not None:
+        return ctx.delivery_service_factory(conn)
+    return ctx.delivery_service
+
+
+def _proactive_delivery_content_ref(
+    conn: sqlite3.Connection,
+    *,
+    target: dict[str, Any],
+    text: str,
+    principal_id: str,
+    idempotency_key: str,
+) -> str:
+    """Persist a live Web proactive message and return its content reference.
+
+    A Delivery alone only reaches the in-memory WebSocket adapter. Persisting
+    the assistant Message first makes a proactive notification visible after a
+    page reload and prevents the Chat history effect from erasing it.
+    """
+    existing = conn.execute(
+        "SELECT message_id FROM messages WHERE "
+        "json_extract(capability_snapshot_json, '$.idempotency_key')=? "
+        "ORDER BY created_at DESC, receive_sequence DESC LIMIT 1",
+        (idempotency_key,),
+    ).fetchone()
+    if existing is not None and existing["message_id"]:
+        return str(existing["message_id"])
+
+    if target.get("channel") != "web":
+        return text
+    platform_conversation_id = str(target.get("conversation_id") or "")
+    if not platform_conversation_id:
+        return text
+    conversation = conn.execute(
+        "SELECT conversation_id FROM conversations WHERE platform_conversation_id=?",
+        (platform_conversation_id,),
+    ).fetchone()
+    if conversation is None:
+        _LOGGER.warning(
+            "Skipping proactive message persistence: Web conversation not found: %s",
+            platform_conversation_id,
+        )
+        return text
+
+    conversation_id = str(conversation["conversation_id"])
+    session = conn.execute(
+        "SELECT session_id FROM sessions WHERE conversation_id=? AND status='active' "
+        "ORDER BY created_at DESC LIMIT 1",
+        (conversation_id,),
+    ).fetchone()
+    reply_to = conn.execute(
+        "SELECT message_id FROM messages WHERE conversation_id=? AND role='user' "
+        "ORDER BY receive_sequence DESC LIMIT 1",
+        (conversation_id,),
+    ).fetchone()
+
+    from cogito.domain.message import ContentPart, Message, MessageDirection, MessageRole
+    from cogito.store.repositories import MessageRepository
+
+    message = Message(
+        conversation_id=conversation_id,
+        session_id=str(session["session_id"]) if session is not None else "",
+        sender_principal_id="cogito",
+        sender_endpoint_id="web",
+        role=MessageRole.assistant,
+        direction=MessageDirection.outbound,
+        content_parts=[ContentPart(content_type="text", inline_data=text, trust_label="internal")],
+        reply_to_message_id=str(reply_to["message_id"]) if reply_to is not None else None,
+        reply_route={
+            "channel_instance_id": target.get("adapter_id") or "web",
+            "platform_conversation_id": platform_conversation_id,
+        },
+        capability_snapshot={"origin": "proactive", "idempotency_key": idempotency_key},
+        trust_label="internal",
+    )
+    repo = MessageRepository(conn)
+    message.receive_sequence = repo.next_receive_sequence(conversation_id)
+    repo.insert(message)
+    for part in message.content_parts:
+        repo.insert_content_part(part, message.message_id)
+    return message.message_id
 
 
 async def _handle_proactive_delivery_ready(task: Task, ctx: TaskHandlerContext) -> str:
     """proactive.delivery.ready: scheduled_delivery_request 到期 → Delivery。
 
     payload_ref=request_id。取 content_factory 创建 new Delivery 实例，入
-    DeliveryWorker 队列（async enqueue，在主 loop 上 await）。
+    canonical Delivery effect 队列（async enqueue，在主 loop 上 await）。
     """
     request_id = task.payload_ref
     if not request_id:
@@ -790,7 +1055,7 @@ async def _handle_proactive_delivery_ready(task: Task, ctx: TaskHandlerContext) 
         result = await _deliver_scheduled_request_async(
             conn,
             request_id,
-            ctx.delivery_service,
+            _task_delivery_service(ctx, conn),
             proactive_config=ctx.proactive_config,
         )
         try:
@@ -843,18 +1108,34 @@ async def _deliver_scheduled_request_async(
 
     target = dict(info["suggested_target"] or {})
     if target.get("channel") == "web":
-        # Requests created before complete proactive targets were introduced may
-        # only contain {channel, principal_id}.  Fill the stable Web routing keys
-        # at delivery time so already-persisted requests remain deliverable.
-        for key, value in _proactive_web_target(principal_id).items():
-            target.setdefault(key, value)
+        # Old scheduled requests may still point to the invisible
+        # ``proactive:<principal>`` mailbox. Resolve them at send time too.
+        if not target.get("conversation_id") or str(target["conversation_id"]).startswith(
+            "proactive:"
+        ):
+            target = _proactive_web_target(conn, principal_id)
+            if target is None:
+                _LOGGER.warning(
+                    "Skipping proactive delivery %s: no active Web conversation for %s",
+                    request_id,
+                    principal_id,
+                )
+                mark_request_converted(conn, request_id, "skipped-no-active-web-conversation")
+                return "converted (skipped: no active web conversation)"
 
     # 在主 loop 上 await，避免跨 loop
+    delivery_key = f"proactive-scheduled:{request_id}"
     delivery_id = await delivery_service.enqueue(
         DeliveryRequest(
             target=target,
-            content_ref=content_ref or "",
-            idempotency_key=f"proactive-scheduled:{request_id}",
+            content_ref=_proactive_delivery_content_ref(
+                conn,
+                target=target,
+                text=content_ref or "",
+                principal_id=principal_id,
+                idempotency_key=delivery_key,
+            ),
+            idempotency_key=delivery_key,
         )
     )
     mark_request_converted(conn, request_id, delivery_id)
@@ -881,7 +1162,7 @@ async def _handle_proactive_digest_publish(task: Task, ctx: TaskHandlerContext) 
             principal_id,
             digest_date,
             topic,
-            ctx.delivery_service,
+            _task_delivery_service(ctx, conn),
             proactive_config=ctx.proactive_config,
         )
         try:
@@ -935,11 +1216,27 @@ async def _publish_digest_async(
     from cogito.service.delivery_service import DeliveryRequest
 
     # 在主 loop 上 await，避免跨 loop 复用 httpx 连接池
+    target = _proactive_web_target(conn, principal_id)
+    if target is None:
+        _LOGGER.warning(
+            "Skipping proactive digest %s: no active Web conversation for %s",
+            digest_id,
+            principal_id,
+        )
+        return "digest.publish skipped: no active web conversation"
+
+    delivery_key = f"proactive-digest:{digest_id}"
     delivery_id = await delivery_service.enqueue(
         DeliveryRequest(
-            target=_proactive_web_target(principal_id),
-            content_ref=text,
-            idempotency_key=f"proactive-digest:{digest_id}",
+            target=target,
+            content_ref=_proactive_delivery_content_ref(
+                conn,
+                target=target,
+                text=text,
+                principal_id=principal_id,
+                idempotency_key=delivery_key,
+            ),
+            idempotency_key=delivery_key,
         )
     )
     mark_digest_sent(conn, digest_id)
@@ -949,13 +1246,13 @@ async def _publish_digest_async(
 # ── memory.extract （B5: 替换 stub 为真实流程）──
 
 
-def _handle_memory_extract(task: Task, ctx: TaskHandlerContext) -> str:
+async def _handle_memory_extract(task: Task, ctx: TaskHandlerContext) -> str:
     """Run one durable, idempotent memory extraction window.
 
-    保持同步签名：handler 由 worker 通过 to_thread 在线程池运行，
-    避免阻塞主 loop（主 loop 还要服务 API / WebSocket / httpx）。
-    内部的异步模型调用（extract_from_messages）通过 ThreadPoolExecutor +
-    asyncio.run() 隔离到独立 loop，避免与主 loop 的 httpx 连接池冲突。
+    该 handler 必须运行在 TaskWorker 所在的事件循环中。ModelRouter 复用的
+    httpx.AsyncClient 已绑定该 loop；在线程中另起 asyncio.run() 会使连接池
+    内的 asyncio 原语跨 loop 使用，进而导致 ``bound to a different event
+    loop``。SQLite 操作保持短事务，网络等待期间不会阻塞主 loop。
     """
     payload = MemoryExtractionPayload.from_payload_ref(task.payload_ref or "{}")
     _LOGGER.info(
@@ -1031,32 +1328,27 @@ def _handle_memory_extract(task: Task, ctx: TaskHandlerContext) -> str:
             model_role=payload.model_role,
             strict=True,
         )
-        # 异步模型调用：隔离到独立 loop（在线程池内 asyncio.run），
-        # 避免与主 loop 的 httpx 连接池冲突（解决 cross-loop 错误），
-        # 同时也避免阻塞主 loop（解决 database is locked）
-        import asyncio
-        import concurrent.futures
-
-        async def _extract():
-            return await extractor.extract_from_messages(
+        try:
+            written = await extractor.extract_from_messages(
                 messages,
                 principal_id=payload.principal_id,
                 session_id=payload.session_id,
                 from_sequence=payload.from_sequence,
                 to_sequence=payload.to_sequence,
             )
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        if loop and loop.is_running():
-            # 在主 loop 上下文中（理论上不会走到这里，因为 handler 已被 to_thread），
-            # 用线程池隔离
-            with concurrent.futures.ThreadPoolExecutor(1) as pool:
-                written = pool.submit(asyncio.run, _extract()).result()
-        else:
-            written = asyncio.run(_extract())
+        except MemoryExtractionWriteError as exc:
+            if _is_database_lock_error(exc):
+                _LOGGER.error(
+                    "memory.extract SQLite write lock: task=%s attempt=%s session=%s "
+                    "range=[%d..%d] diagnostics=%s",
+                    task.task_id,
+                    ctx._attempt_id,
+                    payload.session_id,
+                    payload.from_sequence,
+                    payload.to_sequence,
+                    _sqlite_lock_diagnostics(conn),
+                )
+            raise
 
         # MEM-01: 声明本 Task 实际创建的记忆（成功后写 task_succeeded 信号）
         ctx.declare_memory_dependencies(extractor.created_memory_ids)
@@ -1136,20 +1428,22 @@ def _handle_memory_recompute_weight(task: Task, ctx: TaskHandlerContext) -> str:
             policy=MemoryWeightPolicy(),
             signals_repo=SignalRepository(conn),
         )
-        # PLAN-16 M2 TX-04: 权重重算事件与权重在同一事务提交（先写事件再 commit），
-        # 失败则整体回滚，避免权重推进但事件丢失。
-        from cogito.domain.events import DomainEvent
-        from cogito.store.repositories import OutboxRepository
+        # 权重与规范 Event 在同一事务提交；完整信号不进入 Event 日志。
+        from cogito.domain.event import Event, EventClass, EventContext
+        from cogito.store.event_store import EventStore
 
-        OutboxRepository(conn).insert(
-            DomainEvent(
-                event_type="MemoryWeightRecomputed",
-                aggregate_type="memory_weight",
-                aggregate_id=f"recompute-{ctx._task_id}",
-                aggregate_version=1,
-                payload={"recomputed_count": count, "task_id": ctx._task_id},
-                payload_ref=__import__("json").dumps({"recomputed_count": count}),
-                origin="memory_recompute_weight_handler",
+        EventStore(conn).append(
+            Event(
+                event_type="memory.weight.recomputed",
+                stream_type="memory_weight",
+                stream_id=f"recompute-{ctx._task_id}",
+                producer="memory-recompute-weight-handler",
+                event_class=EventClass.OPERATION,
+                context=EventContext(task_id=ctx._task_id),
+                summary="Memory weights recomputed",
+                attributes={"recomputed_count": count},
+                outcome="recomputed",
+                idempotency_key=f"memory-weight-recompute:{ctx._task_id}",
             )
         )
         conn.commit()
@@ -1375,6 +1669,7 @@ async def _evaluate_candidates_async(conn, ctx) -> str:
     actions = {"send_now": 0, "send_later": 0, "digest": 0, "silent": 0, "discard": 0, "other": 0}
     # global/config 与 Principal policy 任一要求 dry-run 都禁止真实副作用。
     dry_run = bool(config.dry_run or policy.dry_run)
+    delivery_service = _task_delivery_service(ctx, conn)
     energy_model_version = "v1"
 
     for c in candidates:
@@ -1410,19 +1705,34 @@ async def _evaluate_candidates_async(conn, ctx) -> str:
         )
         # 根据 action 触发后续
         if action == "send_now":
-            if dry_run or ctx.delivery_service is None:
+            if dry_run or delivery_service is None:
                 pass  # dry_run: 仅记录，不创建真实 Delivery
             else:
                 from cogito.service.delivery_service import DeliveryRequest
 
                 # 在主 loop 上 await，避免跨 loop 复用 httpx 连接池
-                await ctx.delivery_service.enqueue(
-                    DeliveryRequest(
-                        target=_proactive_web_target(c.principal_id),
-                        content_ref=c.summary,
-                        idempotency_key=f"proactive-now:{c.candidate_id}",
+                target = _proactive_web_target(conn, c.principal_id)
+                if target is None:
+                    _LOGGER.warning(
+                        "Skipping proactive candidate %s: no active Web conversation for %s",
+                        c.candidate_id,
+                        c.principal_id,
                     )
-                )
+                else:
+                    delivery_key = f"proactive-now:{c.candidate_id}"
+                    await delivery_service.enqueue(
+                        DeliveryRequest(
+                            target=target,
+                            content_ref=_proactive_delivery_content_ref(
+                                conn,
+                                target=target,
+                                text=c.summary,
+                                principal_id=c.principal_id,
+                                idempotency_key=delivery_key,
+                            ),
+                            idempotency_key=delivery_key,
+                        )
+                    )
             ProactiveCandidateRepository(conn).update_status(
                 c.candidate_id,
                 "decided",
@@ -1436,7 +1746,11 @@ async def _evaluate_candidates_async(conn, ctx) -> str:
                     conn,
                     candidate_id=c.candidate_id,
                     content_ref=c.summary,
-                    suggested_target=_proactive_web_target(c.principal_id),
+                    # The latest Web conversation can legitimately be absent
+                    # when this task runs.  Keep a resolvable Web target and
+                    # resolve it when the scheduled request becomes due.
+                    suggested_target=_proactive_web_target(conn, c.principal_id)
+                    or {"channel": "web", "principal_id": c.principal_id},
                     reason=f"decide={action}",
                     delay_minutes=policy.digest_max_delay_minutes,
                     policy_version=policy.version,

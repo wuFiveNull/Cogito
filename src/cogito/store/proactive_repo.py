@@ -15,6 +15,17 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from cogito.contracts.clock import epoch_ms, now_ms
+from cogito.domain.event import Event, EventClass, EventContext
+from cogito.store.event_store import EventStore
+
+
+def _append_event(conn: sqlite3.Connection, event: Event) -> None:
+    """Write Event atomically with the temporary proactive SQL projection."""
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='event_log'"
+    ).fetchone()
+    if exists:
+        EventStore(conn).append(event)
 
 # ── 数据类（frozen 不可变）──────────────────────────────────────────────────
 
@@ -128,6 +139,29 @@ class ProactiveCandidateRepository:
                 c.created_at,
                 c.status,
                 1 if c.critical_override else 0,
+            ),
+        )
+        _append_event(
+            self._conn,
+            Event(
+                event_type="proactive.candidate.created",
+                stream_type="proactive_candidate",
+                stream_id=c.candidate_id,
+                producer="proactive-candidate-repository",
+                event_class=EventClass.DOMAIN,
+                context=EventContext(principal_id=c.principal_id),
+                summary="Proactive candidate created",
+                attributes={
+                    "stream_type": c.stream_type,
+                    "origin": c.origin or "",
+                    "recommended_action": c.recommended_action,
+                    "policy_version": c.policy_version,
+                    "critical_override": c.critical_override,
+                },
+                payload_ref=c.source_payload_ref,
+                outcome=c.status,
+                occurred_at=c.created_at or now_ms(),
+                idempotency_key=f"proactive-candidate:{c.candidate_id}:created",
             ),
         )
 
@@ -357,6 +391,30 @@ class ProactiveDecisionRepository:
                 d.last_user_at,
                 d.energy_model_version,
                 d.config_version_id,
+            ),
+        )
+        _append_event(
+            self._conn,
+            Event(
+                event_type="proactive.decision.made",
+                stream_type="proactive_candidate",
+                stream_id=d.candidate_id,
+                producer="proactive-decision-repository",
+                event_class=EventClass.DOMAIN,
+                context=EventContext(principal_id=d.principal_id),
+                summary="Proactive decision made",
+                attributes={
+                    "decision_id": d.decision_id,
+                    "action": d.action,
+                    "policy_version": d.policy_version,
+                    "dry_run": d.dry_run,
+                    "scheduled_for": d.scheduled_for or 0,
+                    "delivery_id": d.delivery_id or "",
+                    "digest_id": d.digest_id or "",
+                },
+                outcome=d.action,
+                occurred_at=d.decided_at or now_ms(),
+                idempotency_key=f"proactive-decision:{d.decision_id}:made",
             ),
         )
 

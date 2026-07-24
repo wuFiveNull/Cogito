@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import uuid
 
@@ -196,7 +197,7 @@ class TestMemoryExtractHandler:
         """无 connection_factory 时跳过。"""
         task = Task(task_id="t1", task_type="memory.extract", status=TaskStatus.queued)
         ctx = TaskHandlerContext()
-        result = _handle_memory_extract(task, ctx)
+        result = asyncio.run(_handle_memory_extract(task, ctx))
         assert "skipped" in result
 
     def test_extract_cas_advances_watermark(self, db: sqlite3.Connection, conv_session):
@@ -345,7 +346,7 @@ class TestMemoryExtractHandler:
                     }
                 ),
             )
-            r1 = _handle_memory_extract(task1, ctx)
+            r1 = asyncio.run(_handle_memory_extract(task1, ctx))
             assert "upto=3" in r1
 
             # 第二次
@@ -364,7 +365,7 @@ class TestMemoryExtractHandler:
                     }
                 ),
             )
-            r2 = _handle_memory_extract(task2, ctx)
+            r2 = asyncio.run(_handle_memory_extract(task2, ctx))
             assert "already processed" in r2 or "upto=3" in r2
         finally:
             try:

@@ -41,7 +41,7 @@ class ChannelAttachment:
 
 @dataclass(frozen=True)
 class ChannelSendRequest:
-    """Delivery 发送请求 —— 从 DeliveryWorker 到 Adapter 的结构化契约。"""
+    """Delivery 发送请求 —— 从 canonical effect 到 Adapter 的结构化契约。"""
 
     delivery_id: str
     attempt_id: str

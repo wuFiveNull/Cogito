@@ -29,7 +29,6 @@ from .envelope import (
     CommandEnvelope,
     ErrorCategory,
     ErrorEnvelope,
-    EventEnvelope,
     ReplyMode,
     ReplyRoute,
     ToolRequest,
@@ -40,9 +39,12 @@ from .memory import MemoryReader as MemoryReader
 from .memory import MemoryWriter as MemoryWriter
 from .tool_call import ToolCallSink as ToolCallSink
 from .trace_context import TraceContext
+from .event_query import EventCursorError, EventPayloadUnavailableError
 
 __all__ = [
     "TraceContext",
+    "EventCursorError",
+    "EventPayloadUnavailableError",
     "ChannelEnvelope",
     "ReplyRoute",
     "AgentRequest",
@@ -54,7 +56,6 @@ __all__ = [
     "ErrorEnvelope",
     "ErrorCategory",
     "CommandEnvelope",
-    "EventEnvelope",
     # PLAN-09 M2: shared time contract
     "Clock",
     "ProductionClock",

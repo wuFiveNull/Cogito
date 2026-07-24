@@ -656,6 +656,17 @@ class AgentLoop:
                 ),
             ),
             stream=stream,
+            trace_context={
+                "trace_id": context.trace_id or context.turn_id,
+                "correlation_id": context.correlation_id or context.trace_id or context.turn_id,
+                "causation_id": context.causation_id,
+                "principal_id": context.principal_id,
+                "conversation_id": context.conversation_id,
+                "session_id": context.session_id,
+                "turn_id": context.turn_id,
+                "attempt_id": state.attempt_id,
+                "context_snapshot_id": context.snapshot_id,
+            },
         )
 
     def _make_assistant_message(
@@ -796,8 +807,10 @@ class AgentLoop:
     ) -> ToolContext:
         return ToolContext(
             attempt_id=state.attempt_id,
-            trace_id=state.turn_id,
+            trace_id=context.trace_id or state.turn_id,
             tool_call_id=tool_call_id,
+            correlation_id=context.correlation_id or context.trace_id or state.turn_id,
+            causation_id=context.causation_id,
             principal_id=context.principal_id,
             session_id=context.session_id,
             turn_id=context.turn_id,

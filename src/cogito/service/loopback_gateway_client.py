@@ -19,7 +19,7 @@ class LoopbackGatewayClient:
     """合并进程 GatewayClient：直接调 ChannelManager → Adapter。
 
     真实部署中应传入应用组合根里的 ChannelManager；
-    测试部署时可注入 FakeGateway。
+    测试部署时可注入 fake gateway client。
     """
 
     def __init__(self, channel_gateway: Any) -> None:

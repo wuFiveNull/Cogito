@@ -18,7 +18,6 @@ from cogito.store.repositories import (
     EndpointRepository,
     InboxRepository,
     MessageRepository,
-    OutboxRepository,
     PrincipalRepository,
     SessionRepository,
     TurnRepository,
@@ -37,8 +36,9 @@ class UnitOfWorkMemoryWriter:
     保证 never 跨工具调用串事务。
     """
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, *, payload_store: Any | None = None) -> None:
         self._conn = conn
+        self._payload_store = payload_store
 
     def _uow(self) -> UnitOfWork:
         return UnitOfWork(self._conn)
@@ -143,8 +143,9 @@ class UnitOfWork:
             uow.commit()
     """
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, *, payload_store: Any | None = None) -> None:
         self._conn = conn
+        self._payload_store = payload_store
         self._committed = False
 
         self._inbox: InboxRepository | None = None
@@ -154,7 +155,6 @@ class UnitOfWork:
         self._session: SessionRepository | None = None
         self._message: MessageRepository | None = None
         self._turn: TurnRepository | None = None
-        self._outbox: OutboxRepository | None = None
         self._memory: MemoryRepository | None = None
         self._memory_service: SqliteMemoryService | None = None
 
@@ -191,7 +191,7 @@ class UnitOfWork:
     @property
     def message(self) -> MessageRepository:
         if self._message is None:
-            self._message = MessageRepository(self._conn)
+            self._message = MessageRepository(self._conn, payload_store=self._payload_store)
         return self._message
 
     @property
@@ -199,12 +199,6 @@ class UnitOfWork:
         if self._turn is None:
             self._turn = TurnRepository(self._conn)
         return self._turn
-
-    @property
-    def outbox(self) -> OutboxRepository:
-        if self._outbox is None:
-            self._outbox = OutboxRepository(self._conn)
-        return self._outbox
 
     @property
     def memory(self) -> MemoryRepository:

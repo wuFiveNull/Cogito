@@ -26,7 +26,33 @@ from cogito.domain.memory import (
     MemoryKind,
     MemoryStatus,
 )
+from cogito.domain.event import Event, EventClass, EventContext
+from cogito.store.event_store import EventStore
 from cogito.store.memory_repo import MemoryRepository
+
+
+_MEMORY_EVENT_TYPES = {
+    "MemoryConfirmed": "memory.confirmed",
+    "MemoryCandidateCreated": "memory.candidate.created",
+    "MemoryRejected": "memory.rejected",
+    "MemorySuperseded": "memory.superseded",
+    "MemoryExpired": "memory.expired",
+    "MemoryErased": "memory.erased",
+}
+_MEMORY_EVENT_ATTRIBUTE_KEYS = frozenset(
+    {
+        "kind",
+        "status",
+        "principal_id",
+        "confirmed_by",
+        "method",
+        "corrected",
+        "superseded_by",
+        "source_resource_id",
+        "reason",
+        "receipt_id",
+    }
+)
 
 
 def _normalize_text(text: str) -> str:
@@ -209,27 +235,33 @@ class SqliteMemoryService:
     def _emit_memory_event(
         self, event_type: str, memory_id: str, payload: dict | None = None
     ) -> None:
-        """发布 Memory 领域事件到 Outbox（PLAN-16 M2 TX-01/TX-03 + 完整版本单调）。
-
-        与调用方共享同一连接 / 事务：写入失败会向上传播，由调用方
-        决定回滚，确保 Memory 行与 Outbox 事件原子提交。
-        aggregate_version 由 OutboxRepository.next_aggregate_version 在同一事务内
-        MAX+1 取得，保证同一 aggregate 事件序列严格单调（不受实体 version 变化影响）。
-        """
-        from cogito.domain.events import DomainEvent
-        from cogito.store.repositories import OutboxRepository
-
-        data = payload or {}
-        version = OutboxRepository(self._repo._conn).next_aggregate_version("memory", memory_id)
-        OutboxRepository(self._repo._conn).insert(
-            DomainEvent(
-                event_type=event_type,
-                aggregate_type="memory",
-                aggregate_id=memory_id,
-                aggregate_version=version,
-                payload=data,
-                payload_ref=__import__("json").dumps(data, ensure_ascii=False),
-                origin="memory_service",
+        """在调用方事务内追加受限的规范 Memory Event。"""
+        canonical_type = _MEMORY_EVENT_TYPES[event_type]
+        attributes = {
+            key: value
+            for key, value in (payload or {}).items()
+            if key in _MEMORY_EVENT_ATTRIBUTE_KEYS and isinstance(value, str | int | float | bool)
+        }
+        store = EventStore(self._repo._conn)
+        stream = store.read_stream("memory", memory_id)
+        source = stream[-1] if stream else None
+        source_context = source.context if source else EventContext()
+        store.append(
+            Event(
+                event_type=canonical_type,
+                stream_type="memory",
+                stream_id=memory_id,
+                producer="memory-service",
+                event_class=EventClass.DOMAIN,
+                context=EventContext(
+                    trace_id=source_context.trace_id,
+                    correlation_id=source_context.correlation_id,
+                    causation_id=source.event_id if source else source_context.causation_id,
+                    principal_id=str(attributes.get("principal_id", source_context.principal_id)),
+                ),
+                summary=canonical_type.replace(".", " "),
+                attributes=attributes,
+                outcome=canonical_type.rsplit(".", 1)[-1],
             )
         )
 

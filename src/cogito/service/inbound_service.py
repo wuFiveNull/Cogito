@@ -7,7 +7,7 @@
 4. 分配 receive_sequence
 5. 写入 Message 与 ContentPart（含回复路由快照）
 6. 创建 Turn（accepted → queued）
-7. 写入 Event Outbox
+7. 追加规范 Event
 8. 返回 message_id、turn_id
 """
 
@@ -29,7 +29,7 @@ from cogito.domain.conversation import (
     Session,
     SessionStatus,
 )
-from cogito.domain.events import DomainEvent
+from cogito.domain.event import Event, EventClass, EventContext
 from cogito.domain.message import ContentPart, Message, MessageDirection, MessageRole
 from cogito.domain.principal import (
     Endpoint,
@@ -41,6 +41,8 @@ from cogito.domain.principal import (
 from cogito.domain.state_machines import validate_transition_turn
 from cogito.domain.turn import Turn, TurnStatus
 from cogito.service.unit_of_work import UnitOfWork
+from cogito.store.event_store import EventStore
+from cogito.store.event_replay import replay_turn
 from cogito.store.repositories import InboxRecord
 
 _LOGGER = logging.getLogger("cogito.inbound")
@@ -69,6 +71,7 @@ class InboundService:
         *,
         asset_service: Any | None = None,
         vision_service: Any | None = None,
+        payload_store: Any | None = None,
         max_assets_per_message: int = 4,
         drift_preemption: Any = None,  # None ⇒ 不发射抢占(P0-05 默认关闭)
     ) -> None:
@@ -77,6 +80,13 @@ class InboundService:
         self._notify = notify
         self._asset_service = asset_service
         self._vision_service = vision_service
+        if payload_store is not None:
+            self._payload_store = payload_store
+        else:
+            from cogito.infrastructure.payload_store import PayloadStore
+            import tempfile
+
+            self._payload_store = PayloadStore(tempfile.mkdtemp(prefix="cogito-inbound-"), conn)
         self._max_assets_per_message = max_assets_per_message
         self._drift_preemption = drift_preemption
 
@@ -87,16 +97,33 @@ class InboundService:
         首次返回新 ID，重复返回已有 ID。
         """
         _bench_timing.checkpoint("inbound:enter")
-        with UnitOfWork(self._conn) as uow:
+        producer = f"channel:{envelope.channel_type or 'unknown'}"
+        inbound_idempotency_key = (
+            f"inbound-message:{envelope.channel_instance_id}:"
+            f"{envelope.platform_message_id or envelope.message_id}"
+        )
+        with UnitOfWork(self._conn, payload_store=self._payload_store) as uow:
             # ── 1. Inbox 幂等去重 ──
             platform_event_id = envelope.platform_message_id or envelope.message_id
-            existing = uow.inbox.find(envelope.channel_instance_id, platform_event_id)
-            if existing is not None and existing.message_id:
+            accepted_event = (
+                EventStore(self._conn).find_idempotent(producer, inbound_idempotency_key)
+                if self._payload_store is not None
+                else None
+            )
+            if accepted_event is not None:
                 return AcceptInboundResult(
-                    message_id=existing.message_id,
-                    turn_id=self._find_turn_id_by_message(existing.message_id, uow),
+                    message_id=accepted_event.stream_id,
+                    turn_id=self._find_turn_id_by_message(accepted_event.stream_id, uow),
                     is_new=False,
                 )
+            if self._payload_store is None:
+                existing = uow.inbox.find(envelope.channel_instance_id, platform_event_id)
+                if existing is not None and existing.message_id:
+                    return AcceptInboundResult(
+                        message_id=existing.message_id,
+                        turn_id=self._find_turn_id_by_message(existing.message_id, uow),
+                        is_new=False,
+                    )
 
             # ── 2. 解析/创建 Principal ──
             # 优先使用 sender_endpoint_ref，兼容旧测试：Ref 为空时退回现有 platform ID
@@ -117,7 +144,7 @@ class InboundService:
                     principal_type=PrincipalType.external_user,
                     status=PrincipalStatus.active,
                 )
-                uow.principal.insert(principal)
+                principal = uow.principal.insert(principal)
 
             # ── 3. 解析/创建 Endpoint ──
             endpoint: Endpoint | None = None
@@ -139,7 +166,10 @@ class InboundService:
                     endpoint_ref=envelope.sender_endpoint_ref or "",
                     status=EndpointStatus.active,
                 )
-                uow.endpoint.insert(endpoint)
+                endpoint = uow.endpoint.insert(endpoint)
+                # An idempotent endpoint append can return the aggregate won
+                # by another worker; continue with that canonical principal.
+                principal = uow.principal.find(endpoint.principal_id) or principal
 
             # ── 4. 解析/创建 Conversation ──
             conversation: Conversation | None = None
@@ -260,57 +290,94 @@ class InboundService:
                 input_message_id=message.message_id,
                 status=TurnStatus.accepted,
             )
-            uow.turn.insert(turn)
+            trace_id = envelope.message_id or platform_event_id
+            message_context = EventContext(
+                trace_id=trace_id,
+                correlation_id=trace_id,
+                causation_id=trace_id,
+                actor_id=principal.principal_id,
+                principal_id=principal.principal_id,
+                conversation_id=conversation.conversation_id,
+                session_id=session.session_id,
+                turn_id=turn.turn_id,
+            )
+            events = EventStore(self._conn)
+            accepted = events.append(
+                Event(
+                    event_type="interaction.message.accepted",
+                    stream_type="message",
+                    stream_id=message.message_id,
+                    producer=producer,
+                    event_class=EventClass.DOMAIN,
+                    context=message_context,
+                    summary="Inbound message accepted",
+                    attributes={
+                        "channel_type": envelope.channel_type,
+                        "channel_instance_id": envelope.channel_instance_id,
+                        "platform_message_id": platform_event_id,
+                        "content_part_count": len(content_parts),
+                        "receive_sequence": seq,
+                    },
+                    outcome="accepted",
+                    occurred_at=int(datetime.now(UTC).timestamp() * 1000),
+                    idempotency_key=inbound_idempotency_key,
+                )
+            )
+            if accepted.stream_id != message.message_id:
+                # A competing worker committed the same channel Event first.
+                # Returning without commit rolls this provisional payload/Event
+                # back; only the immutable winning aggregate remains.
+                return AcceptInboundResult(
+                    message_id=accepted.stream_id,
+                    turn_id=self._find_turn_id_by_message(accepted.stream_id, uow),
+                    is_new=False,
+                )
+            turn_accepted = uow.turn.insert(
+                turn,
+                event_context=EventContext(
+                    trace_id=message_context.trace_id,
+                    correlation_id=message_context.correlation_id,
+                    causation_id=accepted.event_id,
+                    actor_id=message_context.actor_id,
+                    principal_id=message_context.principal_id,
+                    conversation_id=message_context.conversation_id,
+                    session_id=message_context.session_id,
+                    turn_id=message_context.turn_id,
+                ),
+                event_producer=producer,
+            )
             # 状态推进：accepted → queued
             validate_transition_turn(turn.turn_id, turn.status, TurnStatus.queued)
-            ok = uow.turn.update_status(turn.turn_id, TurnStatus.queued, turn.version)
+            ok = uow.turn.update_status(
+                turn.turn_id,
+                TurnStatus.queued,
+                turn.version,
+                event_context=EventContext(
+                    trace_id=message_context.trace_id,
+                    correlation_id=message_context.correlation_id,
+                    causation_id=turn_accepted.event_id,
+                    actor_id=message_context.actor_id,
+                    principal_id=message_context.principal_id,
+                    conversation_id=message_context.conversation_id,
+                    session_id=message_context.session_id,
+                    turn_id=message_context.turn_id,
+                ),
+                event_producer=producer,
+            )
             if not ok:
                 raise RuntimeError(f"Turn status transition failed: {turn.turn_id}")
 
-            # ── 9. 写入 Event Outbox ──
-            now = datetime.now(UTC)
-            uow.outbox.insert(
-                DomainEvent(
-                    event_id="",
-                    event_type="InboundMessageAccepted",
-                    aggregate_type="message",
-                    aggregate_id=message.message_id,
-                    aggregate_version=1,
-                    payload={
-                        "message_id": message.message_id,
-                        "conversation_id": conversation.conversation_id,
-                    },
-                    occurred_at=now,
-                    correlation_id=envelope.message_id,
-                    causation_id=envelope.message_id,
-                    origin=envelope.channel_type or "channel",
+            # ── 9. 记录 Inbox ──
+            if self._payload_store is None:
+                uow.inbox.insert(
+                    InboxRecord(
+                        channel_instance_id=envelope.channel_instance_id,
+                        platform_event_id=platform_event_id,
+                        status="processed",
+                        message_id=message.message_id,
+                        received_at=datetime.now(UTC).isoformat(),
+                    )
                 )
-            )
-            uow.outbox.insert(
-                DomainEvent(
-                    event_id="",
-                    event_type="TurnQueued",
-                    aggregate_type="turn",
-                    aggregate_id=turn.turn_id,
-                    aggregate_version=2,
-                    payload={"turn_id": turn.turn_id, "message_id": message.message_id},
-                    occurred_at=now,
-                    correlation_id=envelope.message_id,
-                    causation_id=envelope.message_id,
-                    origin=envelope.channel_type or "channel",
-                )
-            )
-
-            # ── 10. 记录 Inbox ──
-            uow.inbox.insert(
-                InboxRecord(
-                    channel_instance_id=envelope.channel_instance_id,
-                    platform_event_id=platform_event_id,
-                    status="processed",
-                    message_id=message.message_id,
-                    received_at=datetime.now(UTC).isoformat(),
-                )
-            )
 
             uow.commit()
         _bench_timing.checkpoint("inbound:commit_done", extra={"turn_id": turn.turn_id})
@@ -352,10 +419,8 @@ class InboundService:
 
     def _find_turn_id_by_message(self, message_id: str, uow: UnitOfWork) -> str:
         """通过 input_message_id 查找已创建的 turn_id。"""
-        row = uow._conn.execute(
-            "SELECT turn_id FROM turns WHERE input_message_id=?",
-            (message_id,),
-        ).fetchone()
-        if row is None:
-            return ""
-        return row["turn_id"]
+        events = EventStore(uow._conn).read_stream_type("turn")
+        for turn_id in {event.stream_id for event in events}:
+            if (state := replay_turn(events, turn_id)) is not None and state.input_message_id == message_id:
+                return turn_id
+        return ""

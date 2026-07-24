@@ -1,49 +1,29 @@
-"""Tests for DomainEvent entity."""
+"""Tests for the one canonical durable Event contract."""
 
-from cogito.domain.events import DomainEvent
+from cogito.domain.event import Event, EventClass, EventContext
 
 
-class TestDomainEvent:
-    def test_create_default(self):
-        e = DomainEvent()
-        assert e.event_id is not None
-        assert e.schema_version == "1.0"
-        assert e.trust_label == "unverified"
-        assert e.origin == "system"
-
-    def test_create_with_values(self):
-        e = DomainEvent(
+class TestEvent:
+    def test_roundtrip_preserves_context_and_safe_metadata(self):
+        event = Event(
             event_id="evt1",
-            event_type="TurnCompleted",
-            aggregate_type="turn",
-            aggregate_id="t1",
-            aggregate_version=2,
-            payload={"result": "ok"},
-            origin="agent",
+            event_type="memory.candidate.created",
+            stream_type="memory",
+            stream_id="mem1",
+            stream_version=2,
+            producer="memory-service",
+            event_class=EventClass.DOMAIN,
+            context=EventContext(correlation_id="corr1", causation_id="caus1"),
+            attributes={"memory_id": "mem1", "confidence": 0.8},
+            payload_ref="payload-1",
+            payload_hash="hash-1",
+            occurred_at=1_700_000_000_000,
         )
-        assert e.event_type == "TurnCompleted"
-        assert e.aggregate_id == "t1"
-        assert e.payload == {"result": "ok"}
-        assert e.origin == "agent"
+        assert Event.from_dict(event.to_dict()) == event
 
-    def test_to_dict_roundtrip(self):
-        e1 = DomainEvent(
-            event_id="evt1",
-            event_type="MemoryCandidateCreated",
-            aggregate_type="memory",
-            aggregate_id="mem1",
-            correlation_id="corr1",
-            causation_id="caus1",
-            origin="system",
-        )
-        d = e1.to_dict()
-        e2 = DomainEvent.from_dict(d)
-        assert e1 == e2
-        assert e2.correlation_id == "corr1"
-        assert e2.causation_id == "caus1"
-        assert e2.origin == "system"
-
-    def test_origin_field_in_dict(self):
-        e = DomainEvent(origin="channel")
-        d = e.to_dict()
-        assert d["origin"] == "channel"
+    def test_child_context_preserves_correlation(self):
+        context = EventContext(trace_id="trace-1", correlation_id="corr-1", span_id="span-1")
+        child = context.child(span_id="span-2")
+        assert child.trace_id == "trace-1"
+        assert child.parent_span_id == "span-1"
+        assert child.causation_id == "span-1"

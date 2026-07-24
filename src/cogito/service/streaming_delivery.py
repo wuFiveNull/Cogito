@@ -7,7 +7,7 @@ delivery_receipts 证据。
 设计不变量 (STREAMING-DELIVERY):
 - 每个流式操作 = Delivery Attempt 内的一个 operation_seq + receipt 证据
 - 最终 Assistant Message 是内容事实源；Delivery 是发送状态事实源
-- 流式 Delivery 创建为 status='streaming'，避开非流式 DeliveryWorker
+- 流式 Delivery 创建为 status='streaming'，避开非流式 canonical effect worker
 - 降级模式在首 token 前依 adapter capabilities 写定，运行中不切换
 """
 
@@ -22,13 +22,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from cogito.bench import timing as _bench_timing
-from cogito.contracts.clock import Clock, ProductionClock
-from cogito.domain.events import DomainEvent
+from cogito.contracts.clock import Clock, ProductionClock, epoch_ms
+from cogito.domain.event import Event, EventClass, EventContext
 from cogito.domain.message import ContentPart, Message, MessageDirection, MessageRole
 from cogito.runtime.loop import AgentLoop
 from cogito.service.dispatcher import Dispatcher
+from cogito.service.streaming_delivery_event_store import StreamingDeliveryEventStore
 from cogito.service.unit_of_work import UnitOfWork
-from cogito.store.repositories import DeliveryRepository
+from cogito.store.event_replay import replay_turn
+from cogito.store.event_store import EventStore
 
 _LOG = logging.getLogger("cogito.streaming.delivery")
 
@@ -64,7 +66,7 @@ class StreamInputMeta:
 class StreamingDeliveryController:
     """流式投递控制器。
 
-    协调 AgentLoop.run_stream → ChannelGateway.edit → DeliveryRepository，
+    协调 AgentLoop.run_stream → ChannelGateway.edit → StreamingDeliveryEventStore，
     并在完成时写入不可变 Assistant Message 并定稿 Delivery。
     """
 
@@ -76,8 +78,9 @@ class StreamingDeliveryController:
         capabilities: Any,
         clock: Clock | None = None,
         policy: StreamPolicy | None = None,
-        delivery_repo: DeliveryRepository | None = None,
+        delivery_repo: StreamingDeliveryEventStore | None = None,
         dispatcher: Dispatcher | None = None,
+        payload_store: Any | None = None,
     ) -> None:
         self._conn = conn
         self._gateway = gateway
@@ -85,8 +88,9 @@ class StreamingDeliveryController:
         self._capabilities = capabilities
         self._clock = clock or ProductionClock()
         self._policy = policy or StreamPolicy()
-        self._delivery_repo = delivery_repo or DeliveryRepository(conn, clock=self._clock)
+        self._delivery_repo = delivery_repo or StreamingDeliveryEventStore(conn, clock=self._clock)
         self._dispatcher = dispatcher or Dispatcher(conn, clock=self._clock)
+        self._payload_store = payload_store
 
     async def run_streaming_turn(
         self,
@@ -114,20 +118,29 @@ class StreamingDeliveryController:
         idempotency_key = f"delivery_{input_meta.conversation_id}_{turn.turn_id}"
         target = self._build_target(input_meta, delivery_id, attempt_id, idempotency_key)
         target_json = json.dumps(target)
+        trace_context = self._event_context_for_turn(turn, attempt, input_meta)
 
-        self._delivery_repo.create_streaming_delivery(
-            delivery_id=delivery_id,
-            attempt_id=attempt_id,
-            target=target,
-            content_ref="",
-            degradation_mode=degradation_mode,
-            idempotency_key=idempotency_key,
-            policy={
-                "throttle_ms": self._policy.throttle_ms,
-                "max_operations": self._policy.max_operations,
-            },
-            turn_id=turn.turn_id,
-        )
+        # 流式状态需要在模型网络调用前落盘（供崩溃恢复扫描），但不能让
+        # 这次 INSERT 的隐式写事务跨越模型调用。否则同一进程的审计、
+        # memory.extract 等独立连接会被 SQLite 写锁阻塞到 busy_timeout。
+        with UnitOfWork(self._conn, payload_store=self._payload_store) as uow:
+            self._delivery_repo.create_streaming_delivery(
+                delivery_id=delivery_id,
+                attempt_id=attempt_id,
+                target=target,
+                content_ref="",
+                degradation_mode=degradation_mode,
+                idempotency_key=idempotency_key,
+                policy={
+                    "throttle_ms": self._policy.throttle_ms,
+                    "max_operations": self._policy.max_operations,
+                },
+                turn_id=turn.turn_id,
+                conversation_id=input_meta.conversation_id,
+                session_id=input_meta.session_id or getattr(turn, "session_id", ""),
+                context=trace_context,
+            )
+            uow.commit()
 
         accumulated: list[str] = []
         operation_seq = 0
@@ -315,7 +328,7 @@ class StreamingDeliveryController:
         meta: StreamInputMeta,
     ) -> str | None:
         """短事务：写入最终 Assistant Message + 定稿 Delivery + 完成 Turn。"""
-        with UnitOfWork(self._conn) as uow:
+        with UnitOfWork(self._conn, payload_store=self._payload_store) as uow:
             parts = [ContentPart(content_type="text", inline_data=text)]
             message = Message(
                 conversation_id=meta.conversation_id,
@@ -336,39 +349,46 @@ class StreamingDeliveryController:
             for part in message.content_parts:
                 uow.message.insert_content_part(part, message.message_id)
 
-            self._delivery_repo.finish_streaming(
+            delivery_completed = self._delivery_repo.finish_streaming(
                 delivery_id,
                 message.message_id,
                 platform_message_id or "",
                 text,
             )
-
-            now = self._clock.now()
-            uow.outbox.insert(
-                DomainEvent(
-                    event_type="TurnCompleted",
-                    aggregate_type="turn",
-                    aggregate_id=turn.turn_id,
-                    aggregate_version=turn.version + 1,
-                    payload={
-                        "turn_id": turn.turn_id,
-                        "message_id": message.message_id,
-                        "delivery_id": delivery_id,
-                    },
-                    occurred_at=now,
-                    correlation_id=turn.turn_id,
-                    causation_id=turn.turn_id,
-                    origin="agent",
-                )
+            completion_context = EventContext(
+                trace_id=delivery_completed.context.trace_id,
+                correlation_id=delivery_completed.context.correlation_id,
+                causation_id=delivery_completed.event_id,
+                actor_id=delivery_completed.context.actor_id,
+                principal_id=delivery_completed.context.principal_id,
+                conversation_id=delivery_completed.context.conversation_id,
+                session_id=delivery_completed.context.session_id,
+                turn_id=turn.turn_id,
+                attempt_id=attempt.attempt_id,
             )
 
+            # Context assembly and other causal observations may be appended to
+            # the Turn stream after it was claimed.  Completion must replay the
+            # current aggregate version rather than reuse the stale claim view.
+            turn_stream = EventStore(self._conn).read_stream("turn", turn.turn_id)
+            replayed_turn = replay_turn(turn_stream, turn.turn_id)
+            current_turn_version = (
+                replayed_turn.stream_version if replayed_turn is not None else turn.version
+            )
             ok = self._dispatcher.complete(
                 turn.turn_id,
                 attempt.attempt_id,
-                turn.version,
+                current_turn_version,
                 worker_id=attempt.worker_id,
                 lease_version=attempt.lease_version,
                 final_message_id=message.message_id,
+                event_context=completion_context,
+                event_producer="streaming-delivery",
+                event_summary="Turn completed with streamed response",
+                event_attributes={
+                    "final_message_id": message.message_id,
+                    "delivery_id": delivery_id,
+                },
                 _uow=uow,
             )
             if not ok:
@@ -381,3 +401,22 @@ class StreamingDeliveryController:
             uow.commit()
 
         return message.message_id
+
+    def _event_context_for_turn(
+        self, turn: Any, attempt: Any, meta: StreamInputMeta
+    ) -> EventContext:
+        turn_id = getattr(turn, "turn_id", "")
+        prior = EventStore(self._conn).read_stream("turn", turn_id)
+        source_event = next((event for event in reversed(prior) if event.context.trace_id), None)
+        source = source_event.context if source_event is not None else EventContext()
+        return EventContext(
+            trace_id=source.trace_id,
+            correlation_id=source.correlation_id,
+            causation_id=source_event.event_id if source_event is not None else source.causation_id,
+            actor_id=source.actor_id,
+            principal_id=meta.principal_id or source.principal_id,
+            conversation_id=meta.conversation_id or source.conversation_id,
+            session_id=meta.session_id or source.session_id or getattr(turn, "session_id", ""),
+            turn_id=turn_id,
+            attempt_id=getattr(attempt, "attempt_id", ""),
+        )

@@ -73,12 +73,31 @@ def test_list_connectors_channels_conversations_deliveries(client):
     assert d.json()["total"] == 1
 
 
-def test_trace(client):
-    r = client.get("/api/traces/tr1")
+def test_event_trace_and_timeline(client):
+    r = client.get("/api/event-traces/tr1")
     assert r.status_code == 200
-    assert len(r.json()["model_calls"]) == 1
-    r = client.get("/api/traces/missing")
+    assert len(r.json()["events"]) == 1
+    r = client.get("/api/event-timelines?session_id=s1")
+    assert r.status_code == 200
+    assert len(r.json()["events"]) == 1
+    r = client.get("/api/event-traces/missing")
     assert r.status_code == 404
+
+    assert client.get("/api/traces/tr1").status_code == 404
+
+
+def test_event_payload_requires_a_dedicated_access_token(client):
+    assert client.get("/api/events/payload-event-1/payload").status_code == 403
+    response = client.get(
+        "/api/events/payload-event-1/payload",
+        headers={"X-Cogito-Payload-Token": "test-payload-token"},
+    )
+    assert response.status_code == 200
+    assert response.content == b"restricted event payload"
+    assert client.get(
+        "/api/events/missing/payload",
+        headers={"X-Cogito-Payload-Token": "test-payload-token"},
+    ).status_code == 404
 
 
 def test_plugins(client):

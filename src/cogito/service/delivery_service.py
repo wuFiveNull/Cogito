@@ -58,6 +58,7 @@ class DeliveryView:
     platform_message_id: str | None = None
     attempts: list[dict[str, Any]] = field(default_factory=list)
     receipts: list[dict[str, Any]] = field(default_factory=list)
+    stream_version: int = 0
 
 
 class DeliveryService(Protocol):
@@ -90,6 +91,8 @@ class DeliveryService(Protocol):
         self,
         delivery_id: str,
         platform_message_id: str | None = None,
+        *,
+        confirmed: bool = False,
     ) -> ReconcileResult:
         """Ask Gateway for evidence before resolving an unknown Delivery."""
         ...

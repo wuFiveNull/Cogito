@@ -126,6 +126,9 @@ class ModelRouter:
                                 "latency_ms": 0,
                                 "attempt": attempt,
                                 "retry_count": attempt,
+                                "started_at": started_at,
+                                "completed_at": started_at,
+                                "trace_context": dict(request.trace_context),
                             }
                         )
                         continue
@@ -145,6 +148,9 @@ class ModelRouter:
                             "latency_ms": call_latency,
                             "attempt": attempt,
                             "retry_count": attempt,
+                            "started_at": started_at,
+                            "completed_at": epoch_ms(datetime.now(UTC)),
+                            "trace_context": dict(request.trace_context),
                         }
                     )
 
@@ -171,6 +177,9 @@ class ModelRouter:
                             "latency_ms": call_latency,
                             "attempt": attempt,
                             "retry_count": attempt,
+                            "started_at": started_at,
+                            "completed_at": epoch_ms(datetime.now(UTC)),
+                            "trace_context": dict(request.trace_context),
                         }
                     )
 
@@ -226,6 +235,9 @@ class ModelRouter:
                         "status": "error",
                         "error_category": "health_check",
                         "latency_ms": 0,
+                        "started_at": started_at,
+                        "completed_at": started_at,
+                        "trace_context": dict(request.trace_context),
                     }
                 )
                 raise RouterError(f"Provider {provider_id} unhealthy")
@@ -243,6 +255,9 @@ class ModelRouter:
                     "model_id": (last_chunk.model_id if last_chunk else provider_id),
                     "status": "success",
                     "latency_ms": call_latency,
+                    "started_at": started_at,
+                    "completed_at": epoch_ms(datetime.now(UTC)),
+                    "trace_context": dict(request.trace_context),
                 }
             )
 
@@ -256,6 +271,9 @@ class ModelRouter:
                     "status": "error",
                     "error_category": e.envelope.category.value,
                     "latency_ms": call_latency,
+                    "started_at": started_at,
+                    "completed_at": epoch_ms(datetime.now(UTC)),
+                    "trace_context": dict(request.trace_context),
                 }
             )
             raise RouterError(

@@ -1,8 +1,8 @@
-"""ChannelGateway — Gateway Protocol 实现，连接 DeliveryWorker 到 ChannelManager。
+"""ChannelGateway — ChannelManager 的同步边界适配器。
 
-数据流:
-Delivery (DB) → DeliveryWorker.lease_next() → deliver()
-  → ChannelGateway.send(target_snapshot, content_ref)
+普通投递数据流：
+Delivery Event → CanonicalDeliveryEffectExecutor → LoopbackGatewayClient
+  → ChannelGateway.send_text(target_snapshot, content)
   → ChannelManager.get(adapter_id).send(conversation_id, text)
   → Platform API 发送消息
 
@@ -10,8 +10,7 @@ QQ-ONEBOT-E2E-01 / PR 2:
 - 使用结构化 ChannelSendRequest/ChannelSendResult
 - 返回真实 platform_message_id（不再 fake_）
 - 区分 temporary/permanent/unknown
-- 避免同 event loop 死锁：DeliveryWorker 通过 asyncio.to_thread 调用，
-  Gateway 在工作线程内使用 run_coroutine_threadsafe 回到主 loop
+- 同步调用适配器时，必要时使用独立事件循环完成 async send。
 """
 
 from __future__ import annotations
@@ -30,7 +29,6 @@ from cogito.channel.base import (
     ChannelSendResult,
 )
 from cogito.channel.manager import ChannelManager
-from cogito.service.delivery_worker import Gateway
 
 _LOG = logging.getLogger("cogito.channel.gateway")
 
@@ -47,7 +45,7 @@ class _TextContent:
 _Content = _TextContent
 
 
-class ChannelGateway(Gateway):
+class ChannelGateway:
     """消息发送通道 —— 将 Delivery 转发到 Channel Adapter。
 
     解析 target_snapshot JSON 获取 adapter_id 和 conversation_id，
@@ -71,7 +69,8 @@ class ChannelGateway(Gateway):
     def send_request(self, target_snapshot: str, content_ref: str) -> ChannelSendResult:
         """结构化发送 —— 返回 ChannelSendResult。
 
-        由 DeliveryWorker 通过 asyncio.to_thread() 调用。
+        仅为旧调用方保留；canonical normal delivery 使用 ``send_text``，
+        不读取消息表。
         在工作线程内使用 run_coroutine_threadsafe 回到主 loop 调用 Adapter。
 
         如果在 running loop 内被同步调用（如测试），直接使用 asyncio.run。
@@ -262,9 +261,35 @@ class ChannelGateway(Gateway):
             return ChannelSendResult(status="unknown", error_code=type(e).__name__)
 
     def _read_message_content(self, content_ref: str) -> _Content | None:
-        """从 content_ref (message_id) 读取内容：文本 + 图片附件（按 ordinal）。"""
+        """从 message_id 读取内容：文本 + 图片附件。
+
+        Uses EventMessageReader when available, falls back to content_parts
+        table for legacy messages.
+        """
         if not content_ref:
             return _TextContent(text="")
+
+        # Try Event-based reading first
+        msg = self._event_reader.get(content_ref) if hasattr(self, '_event_reader') and self._event_reader else None
+        if msg is not None:
+            text = ""
+            attachments: list[ChannelAttachment] = []
+            for part in msg.content_parts:
+                if part.content_type in ("text", "markdown"):
+                    text = part.inline_data or ""
+                elif part.content_type in ("image",) or part.content_type.startswith("image/"):
+                    if part.payload_ref:
+                        meta = part.metadata or {}
+                        attachments.append(
+                            ChannelAttachment(
+                                payload_ref=part.payload_ref,
+                                mime=str(meta.get("mime") or "image/png"),
+                                name=str(meta.get("name") or meta.get("filename") or ""),
+                            )
+                        )
+            return _TextContent(text=text, attachments=tuple(attachments))
+
+        # Legacy fallback — read from content_parts table
         text_row = self._conn.execute(
             "SELECT cp.inline_data FROM content_parts cp "
             "WHERE cp.message_id=? AND cp.content_type IN ('text','markdown') "

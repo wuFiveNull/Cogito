@@ -14,6 +14,9 @@ from cogito.capability.models import ToolDef
 from cogito.capability.plugin_runtime import PluginManifest, SqlitePluginRuntime
 from cogito.capability.registry import CapabilityRegistry
 from cogito.interaction_web.server import create_app
+from cogito.domain.event import Event, EventClass, EventContext
+from cogito.infrastructure.payload_store import PayloadStore
+from cogito.store.event_store import EventStore
 from cogito.store.migration import migrate
 
 
@@ -39,9 +42,6 @@ def client():
         "INSERT INTO turns (turn_id,session_id,input_message_id,status,priority,version,created_at) VALUES ('t1','s1','m1','completed',80,1,1700000000000)"
     )
     conn.execute(
-        "INSERT INTO tasks (task_id,task_type,status,priority,idempotency_key,origin,created_at) VALUES ('task1','connector.poll','failed',40,'k1','system',1700000000000)"
-    )
-    conn.execute(
         "INSERT INTO memory_items (memory_id,kind,subject,predicate,value,principal_id,status,confidence,importance,created_at) VALUES ('mem1','fact','site','uptime','99%','owner','candidate',0.7,0.5,'2026-01-01T00:00:00Z')"
     )
     # confirmed memory for search test (RetrievalService 仅返回 confirmed)
@@ -51,17 +51,88 @@ def client():
     conn.execute(
         "INSERT INTO connectors (connector_id,connector_type,name,url,status,created_at) VALUES ('con1','rss','Hacker News','https://hnrss.org/frontpage','active',1700000000000)"
     )
-    conn.execute(
-        "INSERT INTO model_calls (model_call_id,attempt_id,status,input_tokens,output_tokens,started_at,completed_at,trace_id) VALUES ('mc1','a1','success',100,200,1700000000000,1700000010000,'tr1')"
+    EventStore(conn).append(
+        Event(
+            event_type="model.call.started",
+            stream_type="model_call",
+            stream_id="mc1",
+            producer="test-fixture",
+            event_class=EventClass.OPERATION,
+            context=EventContext(trace_id="tr1", attempt_id="a1"),
+            attributes={"provider_id": "stub", "model_id": "stub"},
+            occurred_at=1700000000000,
+        )
+    )
+    EventStore(conn).append(
+        Event(
+            event_type="model.call.completed",
+            stream_type="model_call",
+            stream_id="mc1",
+            producer="test-fixture",
+            event_class=EventClass.OPERATION,
+            context=EventContext(trace_id="tr1", attempt_id="a1"),
+            attributes={"input_tokens": 100, "output_tokens": 200, "latency_ms": 10},
+            outcome="success",
+            occurred_at=1700000010000,
+        )
+    )
+    EventStore(conn).append(
+        Event(
+            event_type="task.created",
+            stream_type="task",
+            stream_id="task1",
+            producer="test-fixture",
+            event_class=EventClass.DOMAIN,
+            context=EventContext(task_id="task1"),
+            attributes={
+                "task_type": "connector.poll",
+                "priority": 40,
+                "origin": "system",
+                "task_idempotency_key": "k1",
+            },
+            outcome="queued",
+            occurred_at=1700000000000,
+        )
+    )
+    EventStore(conn).append(
+        Event(
+            event_type="task.failed",
+            stream_type="task",
+            stream_id="task1",
+            producer="test-fixture",
+            event_class=EventClass.DOMAIN,
+            context=EventContext(task_id="task1"),
+            outcome="failed",
+            occurred_at=1700000010000,
+        ),
+        expected_version=1,
     )
     conn.execute(
         "INSERT INTO run_attempts (attempt_id,turn_id,attempt_no,status,started_at,finished_at) VALUES ('a1','t1','1','succeeded',1700000000000,1700000005000)"
     )
-    conn.execute(
-        "INSERT INTO approvals (approval_id,request,status,expires_at,created_at) VALUES ('ap1','{}','pending','2027-01-01T00:00:00Z','2026-01-01T00:00:00Z')"
+    EventStore(conn).append(
+        Event(
+            event_type="approval.requested",
+            stream_type="approval",
+            stream_id="ap1",
+            producer="test-fixture",
+            event_class=EventClass.DOMAIN,
+            context=EventContext(trace_id="tr1", turn_id="t1", attempt_id="a1"),
+            outcome="pending",
+            occurred_at=1700000000000,
+        )
     )
-    conn.execute(
-        "INSERT INTO deliveries (delivery_id,status,idempotency_key,created_at) VALUES ('d1','failed','dk1',1700000000000)"
+    EventStore(conn).append(
+        Event(
+            event_type="delivery.requested",
+            stream_type="delivery",
+            stream_id="d1",
+            producer="test-fixture",
+            event_class=EventClass.DOMAIN,
+            context=EventContext(trace_id="tr1", session_id="s1", turn_id="t1"),
+            outcome="failed",
+            occurred_at=1700000000000,
+        )
     )
     conn.commit()
     plugin_runtime = SqlitePluginRuntime(conn)
@@ -70,6 +141,7 @@ def client():
     cfg = Config()
     cfg.storage.db_path = db_path
     cfg.workspace_path = db_dir
+    cfg.interaction.payload_access_token = "test-payload-token"
     cfg.capability = cfg.capability._from_raw(
         {
             "mcp": {
@@ -83,6 +155,23 @@ def client():
             },
         }
     )
+    payload = PayloadStore(cfg.resolve_payload_dir(), conn).put(
+        b"restricted event payload", content_type="text/plain", retention_class="secret"
+    )
+    EventStore(conn).append(
+        Event(
+            event_id="payload-event-1",
+            event_type="runtime.checkpoint.saved",
+            stream_type="turn",
+            stream_id="t1",
+            producer="test-fixture",
+            event_class=EventClass.OPERATION,
+            context=EventContext(trace_id="tr1", session_id="s1", turn_id="t1"),
+            payload_ref=payload.payload_id,
+            payload_hash=payload.sha256,
+        )
+    )
+    conn.commit()
 
     async def now_handler(_args, _context):
         return "now"

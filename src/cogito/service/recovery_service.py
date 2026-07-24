@@ -1,13 +1,12 @@
 """RecoveryService — 启动恢复扫描和定期清理。
 
 处理以下场景（EXECUTION-LIFECYCLE / 5.3 进程重启）：
-1. 过期的 Outbox Lease（status='leased' 且 lease_expires_at < now）
-2. 长时间处于 sending 的 Delivery（Lease 过期 → unknown）
-3. 无有效执行权的 running Turn/RunAttempt
-4. unknown Delivery 保持待对账，不转回普通重试
+1. 无有效执行权的 running Turn/RunAttempt
+2. Event-first 流式 Delivery 的中断恢复
 
-恢复操作必须使用条件更新，重新验证 lease_version + lease_expires_at，
-防止与 heartbeat 产生竞态（Worker 在 SELECT→UPDATE 间续期 Lease）。
+投递副作用的待办与未知状态由 Event 流恢复；本服务不再读取或修改
+旧 ``deliveries`` 行。其余恢复操作必须使用条件更新，重新验证
+lease_version + lease_expires_at，防止与 heartbeat 产生竞态。
 
 recover_stale_turns 原子保证：
 1. SELECT 保存 attempt 的 lease_version 和原 lease_expires_at
@@ -18,15 +17,15 @@ recover_stale_turns 原子保证：
 
 from __future__ import annotations
 
-import logging
 import sqlite3
 from datetime import datetime
 
 from cogito.contracts.clock import Clock, ProductionClock, epoch_ms
+from cogito.domain.event import Event, EventClass, EventContext
 from cogito.domain.turn import RunAttemptStatus, TurnStatus
 from cogito.service.unit_of_work import UnitOfWork
-
-_LOG = logging.getLogger("cogito.recovery")
+from cogito.store.event_replay import replay_delivery, replay_run_attempt, replay_turn
+from cogito.store.event_store import EventStore, StreamVersionConflictError
 
 
 class RecoveryService:
@@ -38,60 +37,6 @@ class RecoveryService:
 
     def _now(self, override: datetime | None = None) -> datetime:
         return override if override is not None else self._clock.now()
-
-    def recover_outbox_leases(self, clock: datetime | None = None) -> int:
-        now_ms_val = epoch_ms(self._now(clock))
-
-        with UnitOfWork(self._conn) as uow:
-            rows = self._conn.execute(
-                "SELECT event_id, lease_version FROM outbox_events "
-                "WHERE status='leased' AND lease_expires_at IS NOT NULL "
-                "AND lease_expires_at < ?",
-                (now_ms_val,),
-            ).fetchall()
-
-            count = 0
-            for row in rows:
-                updated = self._conn.execute(
-                    "UPDATE outbox_events SET status='pending', lease_owner=NULL, "
-                    "lease_expires_at=NULL, lease_version=lease_version+1 "
-                    "WHERE event_id=? AND status='leased' AND lease_version=? "
-                    "AND lease_expires_at IS NOT NULL AND lease_expires_at < ?",
-                    (row["event_id"], row["lease_version"], now_ms_val),
-                )
-                if updated.rowcount > 0:
-                    count += 1
-
-            if count > 0:
-                uow.commit()
-        return count
-
-    def recover_delivery_leases(self, clock: datetime | None = None) -> int:
-        now_ms_val = epoch_ms(self._now(clock))
-
-        with UnitOfWork(self._conn) as uow:
-            rows = self._conn.execute(
-                "SELECT delivery_id, lease_version FROM deliveries "
-                "WHERE status='sending' AND lease_expires_at IS NOT NULL "
-                "AND lease_expires_at < ?",
-                (now_ms_val,),
-            ).fetchall()
-
-            count = 0
-            for row in rows:
-                updated = self._conn.execute(
-                    "UPDATE deliveries SET status='unknown', lease_owner=NULL, "
-                    "lease_expires_at=NULL, lease_version=lease_version+1 "
-                    "WHERE delivery_id=? AND status='sending' AND lease_version=? "
-                    "AND lease_expires_at IS NOT NULL AND lease_expires_at < ?",
-                    (row["delivery_id"], row["lease_version"], now_ms_val),
-                )
-                if updated.rowcount > 0:
-                    count += 1
-
-            if count > 0:
-                uow.commit()
-        return count
 
     def recover_stale_turns(self, clock: datetime | None = None) -> int:
         """标记无有效执行权的 running Turn/RunAttempt 为 abandoned。
@@ -107,62 +52,7 @@ class RecoveryService:
         Turn 不会被修改。
         """
         now_ms_val = epoch_ms(self._now(clock))
-
-        with UnitOfWork(self._conn) as uow:
-            rows = self._conn.execute(
-                """
-                SELECT t.turn_id, t.version, t.active_attempt_id,
-                       a.attempt_id, a.lease_version, a.lease_expires_at
-                FROM turns t
-                JOIN run_attempts a ON a.attempt_id = t.active_attempt_id
-                WHERE t.status = 'running'
-                  AND a.status = 'running'
-                  AND (
-                      a.lease_expires_at IS NULL
-                      OR a.lease_expires_at < ?
-                  )
-            """,
-                (now_ms_val,),
-            ).fetchall()
-
-            count = 0
-            for row in rows:
-                # Step 1: 条件标记 Attempt — 验证 lease_version + lease_expires_at 仍匹配且过期
-                attempt_updated = self._conn.execute(
-                    "UPDATE run_attempts SET status=?, finished_at=?, lease_version=lease_version+1 "
-                    "WHERE attempt_id=? AND status='running' "
-                    "AND lease_version=? "
-                    "AND (lease_expires_at IS NULL OR lease_expires_at = ?)",
-                    (
-                        RunAttemptStatus.abandoned.value,
-                        now_ms_val,
-                        row["active_attempt_id"],
-                        row["lease_version"],
-                        row["lease_expires_at"],
-                    ),
-                )
-
-                # Step 2: 只有 Attempt 更新成功才能修改 Turn
-                if attempt_updated.rowcount == 0:
-                    continue  # heartbeat 续期 — 跳过，不修改 Turn
-
-                # Step 3: 更新 Turn — 验证 version + active_attempt_id
-                turn_updated = self._conn.execute(
-                    "UPDATE turns SET status=?, active_attempt_id=NULL, version=version+1 "
-                    "WHERE turn_id=? AND version=? AND status='running' AND active_attempt_id=?",
-                    (
-                        TurnStatus.queued.value,
-                        row["turn_id"],
-                        row["version"],
-                        row["active_attempt_id"],
-                    ),
-                )
-                if turn_updated.rowcount > 0:
-                    count += 1
-
-            if count > 0:
-                uow.commit()
-        return count
+        return self._recover_event_stale_turns(now_ms_val)
 
     def recover_stale_tasks(self, clock: datetime | None = None) -> int:
         """标记无有效执行权的 running Task/TaskAttempt 为 abandoned+queued。
@@ -173,52 +63,7 @@ class RecoveryService:
         3. 仅 Attempt rowcount > 0 才将 Task 回 queued
         """
         now_ms_val = epoch_ms(self._now(clock))
-
-        with UnitOfWork(self._conn) as uow:
-            # 查 running Task 及其当前 running 的 Attempt
-            rows = self._conn.execute(
-                """
-                SELECT t.task_id,
-                       a.task_attempt_id AS attempt_id,
-                       a.lease_version, a.lease_expires_at
-                FROM tasks t
-                JOIN task_attempts a ON a.task_id = t.task_id
-                WHERE t.status = 'running'
-                  AND a.status = 'running'
-                  AND (
-                      a.lease_expires_at IS NULL
-                      OR a.lease_expires_at < ?
-                  )
-            """,
-                (now_ms_val,),
-            ).fetchall()
-
-            count = 0
-            for row in rows:
-                # Step 1: 条件标记 Attempt 为 abandoned（验证 lease_version + 仍过期）
-                attempt_updated = self._conn.execute(
-                    "UPDATE task_attempts SET status='abandoned', "
-                    "  finished_at=?, lease_version=lease_version+1 "
-                    "WHERE task_attempt_id=? AND status='running' "
-                    "AND lease_version=? "
-                    "AND (lease_expires_at IS NULL OR lease_expires_at = ?)",
-                    (now_ms_val, row["attempt_id"], row["lease_version"], row["lease_expires_at"]),
-                )
-                if attempt_updated.rowcount == 0:
-                    continue  # heartbeat 续期成功，跳过
-
-                # Step 2: Task 回 queued
-                self._conn.execute(
-                    "UPDATE tasks SET status='queued', lease_owner=NULL, "
-                    "  lease_expires_at=NULL "
-                    "WHERE task_id=? AND status='running'",
-                    (row["task_id"],),
-                )
-                count += 1
-
-            if count > 0:
-                uow.commit()
-        return count
+        return self._recover_event_stale_tasks(now_ms_val)
 
     def recover_streaming_deliveries(self, clock: datetime | None = None) -> int:
         """撤回崩溃遗留的流式 Delivery（status='streaming' 且 Turn 已不再 running）。
@@ -241,68 +86,212 @@ class RecoveryService:
         AgentRunner 不冲突——后者要么已把 delivery 推进到 sent/interrupted，要么
         其 Turn 仍 running，不会被选中。
         """
+        return self._recover_event_streaming_deliveries(clock)
+
+    def _recover_event_streaming_deliveries(self, clock: datetime | None = None) -> int:
+        """Recover Event-first streams; legacy rows are handled separately."""
+        events = EventStore(self._conn)
+        grouped: dict[str, list[Event]] = {}
+        for event in events.read_stream_type("delivery"):
+            grouped.setdefault(event.stream_id, []).append(event)
+
+        count = 0
         with UnitOfWork(self._conn) as uow:
-            rows = self._conn.execute("""
-                SELECT d.delivery_id, d.turn_id, d.platform_message_id,
-                       t.status AS turn_status, t.version AS turn_version,
-                       t.active_attempt_id
-                FROM deliveries d
-                LEFT JOIN turns t ON t.turn_id = d.turn_id
-                WHERE d.status = 'streaming'
-            """).fetchall()
-
-            count = 0
-            for row in rows:
-                turn_status = row["turn_status"]
-                reset_turn = False
-
-                if turn_status is None:
-                    orphan = True
-                elif turn_status != "running":
-                    orphan = True
-                else:
-                    # Turn 名义 running —— 需确认其 active attempt 是否仍存活
-                    attempt_row = self._conn.execute(
-                        "SELECT status FROM run_attempts WHERE attempt_id=?",
-                        (row["active_attempt_id"],),
-                    ).fetchone()
-                    attempt_status = attempt_row["status"] if attempt_row else None
-                    if attempt_status == "running":
-                        continue  # 仍由存活的 attempt 持有，跳过
-                    orphan = True
-                    reset_turn = True
-
-                if not orphan:
+            for delivery_id, stream in grouped.items():
+                state = replay_delivery(stream, delivery_id)
+                if (
+                    state is None
+                    or state.delivery_mode != "streaming"
+                    or state.status not in {"streaming", "sending"}
+                ):
                     continue
-
-                # 条件撤回：仅当仍 streaming，避免与运行中的 run_once 竞态
-                updated = self._conn.execute(
-                    "UPDATE deliveries SET status='interrupted', stream_status=NULL, "
-                    "lease_version=lease_version+1 "
-                    "WHERE delivery_id=? AND status='streaming'",
-                    (row["delivery_id"],),
-                )
-                if updated.rowcount == 0:
+                reset_turn = self._streaming_turn_is_orphan(state.turn_id)
+                if reset_turn is None:
                     continue
-                count += 1
-                _LOG.info(
-                    "recover_streaming_deliveries: withdrawn orphan delivery=%s (turn=%s)",
-                    row["delivery_id"],
-                    row["turn_id"],
-                )
-
-                # Turn 名义 running 但 attempt 已死 → 重置为 queued 以便重放
-                if reset_turn and turn_status == "running":
-                    self._conn.execute(
-                        "UPDATE turns SET status='queued', active_attempt_id=NULL, "
-                        "version=version+1 "
-                        "WHERE turn_id=? AND status='running' AND version=?",
-                        (row["turn_id"], row["turn_version"]),
+                events.append(
+                    Event(
+                        event_type="delivery.cancelled",
+                        stream_type="delivery",
+                        stream_id=delivery_id,
+                        event_class=EventClass.DOMAIN,
+                        producer="streaming-recovery",
+                        context=EventContext(
+                            conversation_id=state.conversation_id,
+                            session_id=state.session_id,
+                            turn_id=state.turn_id,
+                            attempt_id=state.attempt_id,
+                        ),
+                        summary="Streaming delivery cancelled during startup recovery",
+                        outcome="cancelled",
+                        error_category="startup_recovery",
+                        occurred_at=epoch_ms(self._now(clock)),
+                        idempotency_key=f"streaming-recovery:{delivery_id}:cancelled",
                     )
-
-            if count > 0:
+                )
+                count += 1
+                if reset_turn:
+                    self._reset_orphaned_turn(state.turn_id)
+            if count:
                 uow.commit()
         return count
+
+    def _recover_event_stale_turns(self, now_ms_val: int) -> int:
+        """Abandon an expired RunAttempt and requeue its Turn using Events only."""
+        events = EventStore(self._conn)
+        grouped: dict[str, list[Event]] = {}
+        for event in events.read_stream_type("turn"):
+            grouped.setdefault(event.stream_id, []).append(event)
+
+        recovered = 0
+        with UnitOfWork(self._conn) as uow:
+            for turn_id, turn_stream in grouped.items():
+                turn = replay_turn(turn_stream, turn_id)
+                if turn is None or turn.status != "running" or not turn.active_attempt_id:
+                    continue
+                attempt_stream = events.read_stream("run_attempt", turn.active_attempt_id)
+                attempt = replay_run_attempt(attempt_stream, turn.active_attempt_id)
+                if (
+                    attempt is None
+                    or attempt.status != "running"
+                    or attempt.lease_expires_at is None
+                    or attempt.lease_expires_at > now_ms_val
+                ):
+                    continue
+
+                source = attempt_stream[-1].context if attempt_stream else EventContext()
+                abandoned = Event(
+                    event_type="runtime.attempt.abandoned",
+                    stream_type="run_attempt",
+                    stream_id=attempt.attempt_id,
+                    producer="startup-recovery",
+                    event_class=EventClass.OPERATION,
+                    context=EventContext(
+                        trace_id=source.trace_id,
+                        span_id=source.span_id,
+                        parent_span_id=source.parent_span_id,
+                        correlation_id=source.correlation_id,
+                        causation_id=attempt_stream[-1].event_id if attempt_stream else source.causation_id,
+                        actor_id=source.actor_id,
+                        principal_id=source.principal_id,
+                        conversation_id=source.conversation_id,
+                        session_id=source.session_id,
+                        turn_id=turn_id,
+                        attempt_id=attempt.attempt_id,
+                    ),
+                    summary="Expired run attempt abandoned during startup recovery",
+                    attributes={"lease_version": attempt.lease_version},
+                    outcome="abandoned",
+                    occurred_at=now_ms_val,
+                    idempotency_key=f"startup-recovery:{attempt.attempt_id}:abandoned",
+                )
+                requeued = Event(
+                    event_type="runtime.turn.queued",
+                    stream_type="turn",
+                    stream_id=turn_id,
+                    producer="startup-recovery",
+                    event_class=EventClass.DOMAIN,
+                    context=EventContext(
+                        trace_id=source.trace_id,
+                        correlation_id=source.correlation_id,
+                        causation_id=abandoned.event_id,
+                        actor_id=source.actor_id,
+                        principal_id=source.principal_id,
+                        conversation_id=source.conversation_id,
+                        session_id=turn.session_id or source.session_id,
+                        turn_id=turn_id,
+                    ),
+                    summary="Expired Turn requeued during startup recovery",
+                    outcome="queued",
+                    occurred_at=now_ms_val,
+                    idempotency_key=f"startup-recovery:{turn_id}:queued",
+                )
+                try:
+                    events.append_many(
+                        (abandoned, requeued),
+                        expected_versions={
+                            ("run_attempt", attempt.attempt_id): attempt.stream_version,
+                            ("turn", turn_id): turn.stream_version,
+                        },
+                    )
+                except StreamVersionConflictError:
+                    continue
+                recovered += 1
+            if recovered:
+                uow.commit()
+        return recovered
+
+    def _recover_event_stale_tasks(self, now_ms_val: int) -> int:
+        """Abandon expired TaskAttempts and requeue their Task by Event only."""
+        from cogito.store.task_repo import TaskAttemptRepository, TaskRepository
+
+        task_repo = TaskRepository(self._conn)
+        attempt_repo = TaskAttemptRepository(self._conn)
+        recovered = 0
+        with UnitOfWork(self._conn) as uow:
+            for task in task_repo.list_filtered(status="running", limit=50_000):
+                if task.lease_expires_at is None or epoch_ms(task.lease_expires_at) > now_ms_val:
+                    continue
+                attempts = attempt_repo.list_for_task(task.task_id)
+                active = next(
+                    (
+                        attempt
+                        for attempt in reversed(attempts)
+                        if attempt.status.value == "running"
+                        and attempt.lease_version == task.lease_version
+                    ),
+                    None,
+                )
+                if active is None:
+                    continue
+                if not attempt_repo.abandon(active.task_attempt_id, finished_at=now_ms_val):
+                    continue
+                if task_repo.recover_expired_lease(
+                    task.task_id,
+                    task.lease_owner or "",
+                    task.lease_version,
+                    now_ms_val,
+                ):
+                    recovered += 1
+            if recovered:
+                uow.commit()
+        return recovered
+
+    def _streaming_turn_is_orphan(self, turn_id: str) -> bool | None:
+        """Return ``None`` for a live turn, else whether it must be reset."""
+        if not turn_id:
+            return False
+        events = EventStore(self._conn)
+        turn = replay_turn(events.read_stream("turn", turn_id), turn_id)
+        if turn is None:
+            return False
+        if turn.status != "running":
+            return False
+        attempt = replay_run_attempt(
+            events.read_stream("run_attempt", turn.active_attempt_id), turn.active_attempt_id
+        )
+        if attempt is not None and attempt.status == "running":
+            return None
+        return True
+
+    def _reset_orphaned_turn(self, turn_id: str) -> None:
+        events = EventStore(self._conn)
+        turn = replay_turn(events.read_stream("turn", turn_id), turn_id)
+        if turn is None or turn.status != "running":
+            return
+        events.append(
+            Event(
+                event_type="runtime.turn.queued",
+                stream_type="turn",
+                stream_id=turn_id,
+                producer="streaming-recovery",
+                event_class=EventClass.DOMAIN,
+                context=EventContext(session_id=turn.session_id, turn_id=turn_id),
+                summary="Orphaned streaming Turn requeued during recovery",
+                outcome="queued",
+                idempotency_key=f"streaming-recovery:{turn_id}:requeued",
+            ),
+            expected_version=turn.stream_version,
+        )
 
     def recover_stale_ingestion_batches(self, clock: datetime | None = None) -> int:
         """收尾崩溃遗留的 MCP ingestion batch。
@@ -326,8 +315,6 @@ class RecoveryService:
 
     def recover_all(self, clock: datetime | None = None) -> dict[str, int]:
         return {
-            "outbox_leases": self.recover_outbox_leases(clock),
-            "delivery_leases": self.recover_delivery_leases(clock),
             "stale_turns": self.recover_stale_turns(clock),
             "stale_tasks": self.recover_stale_tasks(clock),
             "streaming_deliveries": self.recover_streaming_deliveries(clock),

@@ -35,7 +35,6 @@ SAMPLE_BODY = textwrap.dedent("""\
     concurrency = 1
     lease_duration_seconds = 300
     heartbeat_interval_seconds = 60
-    outbox_lease_ttl_seconds = 120
     delivery_lease_ttl_seconds = 120
     recovery_grace_period_seconds = 30
 """)
@@ -111,7 +110,6 @@ class TestPublicConfigApi:
                 concurrency = 1
                 lease_duration_seconds = 300
                 heartbeat_interval_seconds = 60
-                outbox_lease_ttl_seconds = 120
                 delivery_lease_ttl_seconds = 120
                 recovery_grace_period_seconds = 30
                 [model]
@@ -141,8 +139,7 @@ class TestPublicConfigApi:
             app = RuntimeApplication.build(cfg)
             try:
                 counts = app.recovery_counts()
-                assert "outbox_leases" in counts
-                assert "delivery_leases" in counts
+                assert "streaming_deliveries" in counts
                 assert "stale_turns" in counts
             finally:
                 app.close()

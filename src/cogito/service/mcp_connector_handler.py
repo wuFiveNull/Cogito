@@ -7,7 +7,7 @@
 4. 校验结构化结果 + schema_hash
 5. 归档 Raw Payload
 6. 逐项 Normalize / Quarantine
-7. 短事务写 ConnectorItem + Outbox(SourceEventIngested)
+7. 短事务写 ConnectorItem + EventStore(connector.source.ingested)
 8. 成功后 CAS 推进 Cursor
 9. 完成 IngestionBatch
 """
@@ -34,7 +34,7 @@ from cogito.domain.connector import (
     ConnectorStatus,
     ItemStatus,
 )
-from cogito.domain.events import DomainEvent
+from cogito.domain.event import Event, EventClass, EventContext
 from cogito.domain.mcp_connector import MCPConnectorConfig
 from cogito.domain.task import Task
 from cogito.service.relevance import decide, score_relevance
@@ -48,7 +48,7 @@ from cogito.store.connector_repo import (
     ConnectorRepository,
 )
 from cogito.store.mcp_connector_repo import MCPConnectorConfigRepository
-from cogito.store.repositories import OutboxRepository
+from cogito.store.event_store import EventStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -216,7 +216,8 @@ def _poll_mcp_connector(
             if not isinstance(items, list):
                 items = [items]
 
-            fetched_items.extend(it for it in items if isinstance(it, dict))
+            remaining_budget = mapping.max_items_per_poll - len(fetched_items)
+            fetched_items.extend(it for it in items[:remaining_budget] if isinstance(it, dict))
 
             # 翻页：优先 next_cursor；其次 has_more=false 停止
             more = mapping.resolve_path(structured, mapping.has_more_path)
@@ -280,14 +281,6 @@ def _poll_mcp_connector(
         relevance = score_relevance(title, body, occurred_at, interests=[])
         decision = decide(relevance, threshold=0.4)
         item_status = ItemStatus.digest if decision == "digest" else ItemStatus.silent
-        summary_text = ""
-        model_router = getattr(ctx, "model_router", None)
-        if model_router is not None and (title or body):
-            try:
-                summary_text = asyncio.run(summarize_item(title, body, model_router))
-            except Exception:
-                _LOGGER.warning("summary failed for %s", external_id)
-
         prepared_items.append(
             {
                 "item": item,
@@ -299,12 +292,47 @@ def _poll_mcp_connector(
                 "occurred_at": occurred_at,
                 "content_hash": content_hash,
                 "relevance": relevance,
-                "summary_text": summary_text,
+                "summary_text": "",
                 "item_status": item_status,
             }
         )
 
-    # 5. Persist Raw + normalized items + Outbox + Cursor in one short UoW.
+    # The handler runs in a worker thread. Use one event loop for the whole
+    # enrichment batch so a shared async HTTP client is never rebound to a new
+    # loop for every item.
+    # AIHOT already returns a curated `summary` field. Re-summarizing it blocks
+    # ingestion on an optional model call and can keep a durable Task alive for
+    # several heartbeat periods without adding information.
+    model_router = (
+        None
+        if mapping.tool_name == "aihot_items" and mapping.body_path == "summary"
+        else getattr(ctx, "model_router", None)
+    )
+    if model_router is not None:
+
+        async def _summarize_all() -> None:
+            semaphore = asyncio.Semaphore(4)
+
+            async def _summarize_one(prepared: dict[str, Any]) -> None:
+                title = prepared["title"]
+                body = prepared["body"]
+                if not (title or body):
+                    return
+                try:
+                    async with semaphore:
+                        prepared["summary_text"] = await summarize_item(
+                            title,
+                            body,
+                            model_router,
+                        )
+                except Exception:
+                    _LOGGER.warning("summary failed for %s", prepared["external_id"])
+
+            await asyncio.gather(*(_summarize_one(item) for item in prepared_items))
+
+        asyncio.run(_summarize_all())
+
+    # 5. Persist Raw + normalized items + Event + Cursor in one short UoW.
     with UnitOfWork(conn) as uow:
         ConnectorRawRepository(conn).insert(raw)
 
@@ -370,21 +398,33 @@ def _poll_mcp_connector(
                     make_payload_store=ctx.payload_store_factory,
                 )
 
-            # 6. 发 Outbox —— SourceEventIngested
-            event = DomainEvent(
-                event_type="SourceEventIngested",
-                aggregate_type="source",
-                aggregate_id=external_id,
-                aggregate_version=1,
-                payload_ref=connector_item.item_id,
-                payload=None,
-                content_hash=content_hash,
-                trust_label="external_untrusted",
-                schema_version=mapping.config_version,
-                correlation_id=batch_id,
-                origin=f"mcp:{mapping.server_name}:{mapping.tool_name}",
+            # 6. 记录安全的摄取事实；正文仍只在 ConnectorItem/PayloadStore 中保留。
+            EventStore(conn).append(
+                Event(
+                    event_type="connector.source.ingested",
+                    stream_type="source",
+                    stream_id=external_id,
+                    producer=f"mcp:{mapping.server_name}:{mapping.tool_name}",
+                    event_class=EventClass.DOMAIN,
+                    context=EventContext(
+                        correlation_id=batch_id,
+                        task_id=task_id_from_ctx(ctx),
+                    ),
+                    summary="Connector source item ingested",
+                    payload_ref=connector_item.item_id,
+                    payload_hash=content_hash,
+                    attributes={
+                        "connector_id": connector_id,
+                        "source_item_id": external_id,
+                        "item_status": connector_item.status.value,
+                        "config_version": mapping.config_version,
+                    },
+                    outcome="ingested",
+                    idempotency_key=(
+                        f"connector-source:{connector_id}:{external_id}:{content_hash}"
+                    ),
+                )
             )
-            OutboxRepository(conn).insert(event)
             new_count += 1
 
         # 7. 成功后推进 cursor

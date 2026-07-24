@@ -78,22 +78,17 @@ class TaskDispatcher:
             if not ok:
                 return None
 
-            lease_version = self._conn.execute(
-                "SELECT lease_version FROM tasks WHERE task_id=?",
-                (task.task_id,),
-            ).fetchone()[0]
-
-            # 计算 attempt_no
-            max_no = self._conn.execute(
-                "SELECT COALESCE(MAX(attempt_no), 0) + 1 FROM task_attempts WHERE task_id=?",
-                (task.task_id,),
-            ).fetchone()[0]
+            claimed_task = self._task_repo.get(task.task_id)
+            if claimed_task is None:
+                return None
+            lease_version = claimed_task.lease_version
+            max_no = len(self._attempt_repo.list_for_task(task.task_id)) + 1
 
             # 创建 TaskAttempt
             attempt = TaskAttempt(
                 task_id=task.task_id,
                 attempt_no=max_no,
-                status=TaskAttemptStatus.created,
+                status=TaskAttemptStatus.running,
                 lease_owner=worker_id,
                 lease_version=lease_version,
                 lease_expires_at=from_epoch_ms(lease_expires),
@@ -103,16 +98,11 @@ class TaskDispatcher:
             # 插入 Attempt
             self._attempt_repo.insert(attempt)
 
-            # 更新 Attempt 状态为 running
-            self._conn.execute(
-                "UPDATE task_attempts SET status='running' WHERE task_attempt_id=?",
-                (attempt.task_attempt_id,),
-            )
-
             # 更新 Task 状态（已由 claim 完成）
             task.status = TaskStatus.running
             task.lease_owner = worker_id
             task.lease_expires_at = from_epoch_ms(lease_expires)
+            task.lease_version = lease_version
             attempt.status = TaskAttemptStatus.running
 
             uow.commit()
@@ -133,7 +123,7 @@ class TaskDispatcher:
             ok = self._task_repo.complete(
                 task.task_id,
                 worker_id,
-                attempt.lease_version,
+                task.lease_version,
                 now_ms=now_ms,
                 result_ref=task.result_ref,
             )
@@ -162,7 +152,7 @@ class TaskDispatcher:
             ok = self._task_repo.fail(
                 task.task_id,
                 worker_id,
-                attempt.lease_version,
+                task.lease_version,
                 now_ms=now_ms,
             )
             if not ok:
@@ -185,23 +175,47 @@ class TaskDispatcher:
         now_ms = epoch_ms(self._now(clock))
         scheduled_at = now_ms + max(0, delay_seconds) * 1000
         with UnitOfWork(self._conn) as uow:
-            cur = self._conn.execute(
-                "UPDATE tasks SET status='scheduled',scheduled_at=?,lease_owner=NULL,"
-                "lease_expires_at=NULL WHERE task_id=? AND lease_owner=? "
-                "AND lease_version=? AND status='running' AND lease_expires_at>?",
-                (
-                    scheduled_at,
-                    task.task_id,
-                    worker_id,
-                    attempt.lease_version,
-                    now_ms,
-                ),
+            ok = self._task_repo.schedule_retry(
+                task.task_id,
+                worker_id,
+                attempt.lease_version,
+                scheduled_at,
+                now_ms,
             )
-            if cur.rowcount != 1:
+            if not ok:
                 return False
             ok = self._attempt_repo.fail(attempt.task_attempt_id, finished_at=now_ms)
             uow.commit()
             return ok
+
+    def wait(
+        self,
+        task: Task,
+        attempt: TaskAttempt,
+        worker_id: str,
+        status: TaskStatus,
+        waiting_id: str,
+        clock: datetime | None = None,
+    ) -> bool:
+        """Finish an Attempt and atomically record a user/external Task wait."""
+        now_ms = epoch_ms(self._now(clock))
+        with UnitOfWork(self._conn) as uow:
+            ok = self._task_repo.wait(
+                task.task_id,
+                worker_id,
+                attempt.lease_version,
+                status,
+                waiting_id,
+                now_ms,
+            )
+            if not ok:
+                return False
+            ok = self._attempt_repo.succeed(attempt.task_attempt_id, finished_at=now_ms)
+            if not ok:
+                uow.rollback()
+                return False
+            uow.commit()
+            return True
 
     def heartbeat(
         self,
@@ -214,10 +228,37 @@ class TaskDispatcher:
         """延长当前有效 Lease。"""
         now_ms = epoch_ms(self._now(clock))
 
-        return self._task_repo.heartbeat(
-            task_id,
-            worker_id,
-            lease_version,
-            self._lease_ttl_s * 1000,
-            now_ms=now_ms,
+        # Repository methods deliberately do not commit. Heartbeat is a complete
+        # write operation and must close its transaction immediately; otherwise
+        # the worker's main connection can hold SQLite's write lock throughout a
+        # long-running external handler.
+        with UnitOfWork(self._conn) as uow:
+            ok = self._task_repo.heartbeat(
+                task_id,
+                worker_id,
+                lease_version,
+                self._lease_ttl_s * 1000,
+                now_ms=now_ms,
+            )
+            if ok:
+                uow.commit()
+            return ok
+
+    def lease_valid(
+        self,
+        task_id: str,
+        worker_id: str,
+        lease_version: int,
+        clock: datetime | None = None,
+    ) -> bool:
+        """Read the current lease from the active persistence boundary."""
+        task = self._task_repo.get(task_id)
+        now_ms = epoch_ms(self._now(clock))
+        return bool(
+            task is not None
+            and task.status == TaskStatus.running
+            and task.lease_owner == worker_id
+            and task.lease_version == lease_version
+            and task.lease_expires_at is not None
+            and epoch_ms(task.lease_expires_at) > now_ms
         )

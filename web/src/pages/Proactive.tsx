@@ -362,6 +362,7 @@ export default function ProactivePage() {
   const [fetchRun, setFetchRun] = useState<ProactiveFetchRun | null>(null);
   const [fetching, setFetching] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const [fetchSource, setFetchSource] = useState<"mock" | "aihot" | null>(null);
 
   const refreshAll = () => {
     status.reload();
@@ -372,13 +373,16 @@ export default function ProactivePage() {
     feedback.reload();
   };
 
-  const startFetch = async () => {
+  const startFetch = async (source: "mock" | "aihot") => {
     setFetching(true);
     setFetchError(null);
     setFetchRun(null);
+    setFetchSource(source);
     try {
-      const key = `web-aihot-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-      const result = await api.fetchProactiveData(key);
+      const key = `web-${source}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const result = source === "mock"
+        ? await api.triggerProactiveMock(key)
+        : await api.fetchProactiveData(key);
       const taskId = String(result.details.poll_task_id ?? "");
       if (!taskId) throw new Error("后端未返回 poll_task_id");
       setFetchTaskId(taskId);
@@ -429,11 +433,19 @@ export default function ProactivePage() {
         action={
           <div className="flex gap-2">
             <CommandButton
-              onClick={startFetch}
-              disabled={fetching || !s.fetch_available}
-              title={!s.fetch_available ? s.fetch_unavailable_reason : "从 AIHOT 拉取并执行 dry-run 评估"}
+              onClick={() => startFetch("mock")}
+              disabled={fetching || !s.mock_available}
+              title={!s.mock_available ? s.mock_unavailable_reason : "生成一条测试事件，并投递到最近使用的 Web 对话"}
             >
-              {fetching ? "获取中…" : "获取主动推送数据"}
+              {fetching && fetchSource === "mock" ? "投递中…" : "触发 Mock 投递"}
+            </CommandButton>
+            <CommandButton
+              variant="ghost"
+              onClick={() => startFetch("aihot")}
+              disabled={fetching || !s.fetch_available}
+              title={!s.fetch_available ? s.fetch_unavailable_reason : "从 AIHOT 拉取数据并评估"}
+            >
+              {fetching && fetchSource === "aihot" ? "获取中…" : "抓取 AIHOT"}
             </CommandButton>
             <Link to="/deliveries" className="btn-ghost">投递 →</Link>
             <Link to="/connectors" className="btn-ghost">连接器 →</Link>
@@ -443,7 +455,7 @@ export default function ProactivePage() {
 
       {(fetchRun || fetchError) && (
         <div className={`rounded-xl border p-3 text-sm ${fetchRun?.failed || fetchError ? "border-danger/30 bg-danger/5 text-danger" : "border-info/30 bg-info/5 text-info"}`}>
-          {fetchError ? `获取失败：${fetchError}` : (
+          {fetchError ? `${fetchSource === "mock" ? "Mock 投递" : "AIHOT 抓取"}失败：${fetchError}` : (
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
               <Badge tone={fetchRun?.done ? (fetchRun.failed ? "danger" : "ok") : "info"}>
                 {fetchRun?.failed ? "失败" : fetchRun?.done ? "完成" : "处理中"}
@@ -456,7 +468,7 @@ export default function ProactivePage() {
               <span>候选 {fetchRun?.candidate_count ?? 0}</span>
               <span>决策 {fetchRun?.decision_count ?? 0}</span>
               {fetchRun?.error && <span>{fetchRun.error}</span>}
-              <Badge tone="info">dry-run</Badge>
+              <Badge tone={s.dry_run ? "info" : "ok"}>{s.dry_run ? "dry-run" : "live"}</Badge>
             </div>
           )}
         </div>

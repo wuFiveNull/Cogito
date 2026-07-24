@@ -45,7 +45,6 @@ def _make_example_body(workspace: Path) -> str:
     concurrency = 1
     lease_duration_seconds = 300
     heartbeat_interval_seconds = 60
-    outbox_lease_ttl_seconds = 120
     delivery_lease_ttl_seconds = 120
     recovery_grace_period_seconds = 30
 """)
@@ -75,6 +74,12 @@ class TestNewWorkspaceStubInteractive:
 
             app = RuntimeApplication.build(cfg)
             try:
+                assert app._config_version_id
+                persisted_config = app.conn.execute(
+                    "SELECT 1 FROM config_versions WHERE version_id=?",
+                    (app._config_version_id,),
+                ).fetchone()
+                assert persisted_config is not None
                 # Send one message through the public in-process API
                 reply = asyncio.run(app.process_terminal_message("hello"))
                 assert isinstance(reply, str) and reply, "expected a non-empty reply"
@@ -281,8 +286,6 @@ class TestRecoveryAtStartup:
         try:
             counts = app.recovery_counts()
             assert set(counts.keys()) >= {
-                "outbox_leases",
-                "delivery_leases",
                 "stale_turns",
                 "stale_tasks",
             }

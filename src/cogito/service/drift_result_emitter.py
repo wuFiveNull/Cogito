@@ -1,4 +1,4 @@
-"""drift.run 完成后的 DriftResult 持久化 + Outbox DriftResultCommitted 事件发射。
+"""drift.run 完成后的 DriftResult 持久化 + 规范 Event 发射。
 
 在 Drift Handler 完成事务中由 _finish_drift 调用（与 DriftRun 投影同一事务提交）。
 Consumer (DriftResultCommittedConsumer) 校验 completed/principal/config/manifest 后
@@ -14,7 +14,8 @@ import time
 from typing import Any
 
 from cogito.domain.drift import DriftCandidateDraft, DriftReasonCode
-from cogito.domain.events import DomainEvent
+from cogito.domain.event import Event, EventClass, EventContext
+from cogito.store.event_store import EventStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ def emit_drift_result(
     reason_code: DriftReasonCode | str | None = None,
     manifest_can_emit_candidate: bool = False,
 ) -> str | None:
-    """为 Drift Handler 完成持久化 DriftResult + 发射 Outbox 事件。
+    """为 Drift Handler 完成持久化 DriftResult + 发射规范 Event。
 
     - result_kind:
         - 'candidate_emission': 当 can_emit_candidate 且 items 非空 (供 Consumer 投影)
@@ -111,16 +112,25 @@ def emit_drift_result(
         )
     )
 
-    # 发射 Outbox 事件：Candidate emission path / internal_only 都发事件，
+    # Candidate emission path / internal_only 都记录事实，
     # Consumer 决定实际投影（遵循"dry-run 仅 preview"语义由 DriftProjectionService 决定）。
-    event = DomainEvent(
-        event_id="",
-        event_type="DriftResultCommitted",
-        aggregate_type="drift_result",
-        aggregate_id=result_id,
-        aggregate_version=1,
-        payload_ref=drift_run_id,  # payload 指向 run id
-        payload={
+    EventStore(conn).append(
+        Event(
+            event_type="drift.result.committed",
+            stream_type="drift_result",
+            stream_id=result_id,
+            producer="drift-runner",
+            event_class=EventClass.DOMAIN,
+            context=EventContext(
+                trace_id=drift_run_id,
+                correlation_id=drift_run_id,
+                attempt_id=task_attempt_id,
+            ),
+            summary="Drift result committed",
+            # The existing consumer uses this stable result reference to find the
+            # completed DriftRun; item bodies remain in DriftResult/PayloadStore.
+            payload_ref=drift_run_id,
+            attributes={
             "drift_run_id": drift_run_id,
             "drift_result_id": result_id,
             "result_kind": result_kind,
@@ -129,12 +139,11 @@ def emit_drift_result(
             "reason_code": rc_value,
             "has_items": has_items,
             "item_kinds": [str(it.get("kind", "")) for it in items],
-        },
-        origin="drift-runner",
+            },
+            outcome="committed",
+            idempotency_key=f"drift-result:{result_id}:committed",
+        )
     )
-    from cogito.store.repositories import OutboxRepository
-
-    OutboxRepository(conn).insert(event)
     _LOGGER.info(
         "drift result emitted: run=%s result=%s kind=%s (items=%d)",
         drift_run_id,

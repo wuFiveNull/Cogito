@@ -62,6 +62,30 @@ def test_approve_is_idempotent_single_resume(db: Any) -> None:
     assert second is None  # 幂等：第二次不恢复
 
 
+def test_command_decision_and_resume_append_causal_events_without_outbox(db: Any) -> None:
+    """Dashboard approval records both the decision and the resumed Turn as canonical facts."""
+    _create_waiting_turn(db)
+    approval = SqliteApprovalService(db).create(turn_id="t1", request={})
+
+    assert set_approval_decision(
+        db,
+        approval_id=approval.approval_id,
+        decision="approved",
+        responder_id="owner",
+        expected_version=1,
+    )
+    assert resume_turn_after_approval(db, approval_id=approval.approval_id) == "t1"
+
+    from cogito.store.event_store import EventStore
+
+    approval_event = EventStore(db).read_stream("approval", approval.approval_id)[-1]
+    turn_event = EventStore(db).read_stream("turn", "t1")[-1]
+    assert approval_event.event_type == "approval.responded"
+    assert turn_event.event_type == "runtime.turn.queued"
+    assert turn_event.context.causation_id == approval_event.event_id
+    assert db.execute("SELECT COUNT(*) FROM outbox_events").fetchone()[0] == 0
+
+
 def test_reject_does_not_resume_turn(db: Any) -> None:
     """拒绝不能让 Turn 恢复。"""
     _create_waiting_turn(db)

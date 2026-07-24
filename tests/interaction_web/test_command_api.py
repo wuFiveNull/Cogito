@@ -3,6 +3,26 @@
 from types import SimpleNamespace
 
 
+def test_legacy_replay_delivery_route_is_removed():
+    from cogito.service.api.command_handlers import router
+
+    assert "/api/commands/replay-delivery" not in {
+        route.path for route in router.routes
+    }
+
+
+def test_outbox_event_control_routes_are_removed():
+    from cogito.interaction_web.query import router as query_router
+    from cogito.service.api.command_handlers import router as command_router
+
+    assert {"/outbox", "/dead-letter"}.isdisjoint(
+        {route.path for route in query_router.routes}
+    )
+    assert "/api/commands/replay-event" not in {
+        route.path for route in command_router.routes
+    }
+
+
 def _audit_count(client):
     # 偷看 audit_records 数量需要 DB 访问；直接通过公共接口行为断言即可。
     return None
@@ -50,19 +70,6 @@ def test_retry_task_failed(client):
     # 已 retry → queued，再次 retry 应失败
     r2 = client.post("/api/commands/retry-task", json={"task_id": "task1"})
     assert r2.json()["status"] == "failed"
-
-
-def test_replay_delivery(client):
-    r = client.post("/api/commands/replay-delivery", json={"delivery_id": "d1"})
-    assert r.status_code == 200
-    assert r.json()["status"] == "ok"
-    r = client.post("/api/commands/replay-delivery", json={"delivery_id": "d1"})
-    assert r.json()["status"] == "failed"  # 已是 pending
-
-
-def test_replay_missing_delivery(client):
-    r = client.post("/api/commands/replay-delivery", json={"delivery_id": "ghost"})
-    assert r.status_code == 404
 
 
 def test_pause_connector(client):
@@ -163,3 +170,32 @@ def test_fetch_proactive_data_is_fixed_to_aihot_and_idempotent(client):
     run = client.get(f"/api/proactive/fetch-runs/{first_details['poll_task_id']}")
     assert run.status_code == 200
     assert run.json()["poll_status"] == "queued"
+
+
+def test_trigger_proactive_mock_queues_a_manual_poll(client):
+    provider = client.app.state._provider
+    provider.config.capability.proactive.enabled = True
+    provider.config.capability.proactive.dry_run = False
+    conn = provider.open_conn()
+    conn.execute(
+        "INSERT INTO connectors "
+        "(connector_id, connector_type, name, url, status, created_at) "
+        "VALUES ('connector-proactive-mock','mcp','Mock','mcp://proactive-mock','active',1700000000000)"
+    )
+    conn.commit()
+    conn.close()
+    client.app.state.runtime.mcp_manager = SimpleNamespace(
+        get_client=lambda server_id: SimpleNamespace(connected=server_id == "proactive_mock")
+    )
+
+    payload = {"idempotency_key": "mock-delivery-test"}
+    first = client.post("/api/commands/trigger-proactive-mock", json=payload)
+    second = client.post("/api/commands/trigger-proactive-mock", json=payload)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_details = first.json()["details"]
+    assert first_details["connector_id"] == "connector-proactive-mock"
+    assert first_details["dry_run"] is False
+    assert second.json()["details"]["poll_task_id"] == first_details["poll_task_id"]
+    assert second.json()["details"]["idempotent"] is True

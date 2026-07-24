@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from types import SimpleNamespace
 
 from cogito.channel.drivers.web import WebChannelAdapter
 from cogito.channel.manager import ChannelManager
@@ -21,6 +22,13 @@ from cogito.model.stub_provider import StubModelProvider
 from cogito.service.agent_runner import RunOutcome, build_agent_runner
 from cogito.service.channel_gateway import ChannelGateway
 from cogito.service.inbound_service import InboundService
+from cogito.service.streaming_delivery import (
+    StreamInputMeta,
+    StreamingDeliveryController,
+)
+from cogito.infrastructure.payload_store import PayloadStore
+from cogito.store.event_replay import replay_delivery, replay_message, replay_turn
+from cogito.store.event_store import EventStore
 from cogito.store.migration import migrate
 
 
@@ -37,9 +45,13 @@ async def _run_streaming_scenario() -> tuple[sqlite3.Connection, list[dict], boo
     config = Config()
     provider = StubModelProvider()
     runner = build_agent_runner(config=config, connection=conn, provider=provider)
+    inbound = InboundService(
+        conn,
+        payload_store=PayloadStore(config.resolve_payload_dir(), conn),
+    )
 
     adapter = WebChannelAdapter(adapter_id="web", channel_type="web")
-    manager = ChannelManager(InboundDispatcher(InboundService(conn)))
+    manager = ChannelManager(InboundDispatcher(inbound))
     manager._adapters["web"] = adapter
     await adapter.start()
     gateway = ChannelGateway(conn, manager)
@@ -56,7 +68,6 @@ async def _run_streaming_scenario() -> tuple[sqlite3.Connection, list[dict], boo
         reply_route=ReplyRoute(channel_instance_id="web", platform_conversation_id=conv_id),
         trust_label="authenticated",
     )
-    inbound = InboundService(conn)
     result = inbound.accept(envelope)
     assert result.turn_id, "inbound should produce a turn"
 
@@ -96,14 +107,79 @@ def test_agent_runner_streams_to_web_adapter() -> None:
         if it.get("kind") in ("send", "edit"):
             assert it.get("platform_message_id") == msg_id, f"platform_message_id mismatch: {it}"
 
-    # DB：Turn 完成 + 存在 assistant 消息（内部 conversation_id 为 UUID，按 role 统计）
-    turn = conn.execute("SELECT status FROM turns").fetchone()
-    assert turn["status"] == "completed"
-    msg = conn.execute("SELECT COUNT(*) AS c FROM messages WHERE role='assistant'").fetchone()
-    assert msg["c"] >= 1, "assistant message should be persisted"
+    # Event replay：Turn 完成 + 存在 assistant Message Event。
+    turn_events = EventStore(conn).read_stream_type("turn")
+    completed_turns = [
+        state
+        for turn_id in {event.stream_id for event in turn_events}
+        if (state := replay_turn(turn_events, turn_id)) is not None and state.status == "completed"
+    ]
+    assert completed_turns
+    message_events = EventStore(conn).read_stream_type("message")
+    assistants = [
+        state
+        for message_id in {event.stream_id for event in message_events}
+        if (state := replay_message(message_events, message_id)) is not None and state.role == "assistant"
+    ]
+    assert assistants, "assistant message should be persisted as an Event"
 
-    delivery = conn.execute("SELECT content_mode, stream_status, status FROM deliveries").fetchone()
-    assert delivery is not None, "streaming delivery should be persisted"
-    assert delivery["content_mode"] == "final", delivery
-    assert delivery["stream_status"] == "done", delivery
-    assert delivery["status"] == "sent", delivery
+    streams: dict[str, list] = {}
+    for event in EventStore(conn).read_stream_type("delivery"):
+        streams.setdefault(event.stream_id, []).append(event)
+    stream = next(
+        stream
+        for stream in streams.values()
+        if stream[0].attributes.get("delivery_mode") == "streaming"
+    )
+    assert [event.event_type for event in stream] == [
+        "delivery.requested",
+        "delivery.started",
+        "delivery.completed",
+    ]
+    state = replay_delivery(stream, stream[0].stream_id)
+    assert state is not None and state.status == "sent"
+    assert conn.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0] == 0
+
+
+def test_streaming_delivery_commits_before_model_call() -> None:
+    """创建 provisional Delivery 后，模型调用前主连接不能保留写事务。"""
+    conn = _make_conn()
+    seen_transactions: list[bool] = []
+
+    class _CheckingLoop:
+        async def run_stream(self, *_args, **_kwargs):
+            seen_transactions.append(conn.in_transaction)
+            raise RuntimeError("stop after transaction check")
+            yield "", True  # pragma: no cover - make this an async generator
+
+    class _Gateway:
+        def send_text(self, *_args, **_kwargs):
+            return SimpleNamespace(status="sent")
+
+    controller = StreamingDeliveryController(
+        conn=conn,
+        gateway=_Gateway(),
+        loop=_CheckingLoop(),
+        capabilities=SimpleNamespace(supports_edit=True),
+    )
+    input_meta = StreamInputMeta(
+        conversation_id="web:transaction-check",
+        session_id="",
+        endpoint_id="",
+        principal_id="",
+        reply_route={},
+        capability_snapshot={},
+        input_message_id="",
+    )
+
+    result = asyncio.run(
+        controller.run_streaming_turn(
+            turn=SimpleNamespace(turn_id=""),
+            attempt=SimpleNamespace(),
+            context=SimpleNamespace(),
+            input_meta=input_meta,
+        )
+    )
+
+    assert result is None
+    assert seen_transactions == [False]

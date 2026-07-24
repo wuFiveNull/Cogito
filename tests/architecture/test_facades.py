@@ -62,6 +62,44 @@ def test_previously_missing_facades_have_implementations() -> None:
     assert hasattr(ident, "resolve_session")
 
 
+def test_identity_conversation_facade_uses_events_without_identity_rows() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    from cogito.store.migration import migrate
+
+    migrate(conn)
+    service = SqliteIdentityConversationService(conn)
+    identity = service.resolve_identity(
+        channel_type="web",
+        channel_instance_id="web-1",
+        platform_account_id="account-1",
+        endpoint_ref="endpoint-ref-1",
+    )
+    conversation, created_conversation = service.resolve_conversation(
+        channel_type="web",
+        channel_instance_id="web-1",
+        conversation_ref="conversation-ref-1",
+    )
+    session, created_session = service.resolve_session(
+        conversation_id=conversation.conversation_id,
+        principal_id=identity.principal.principal_id,
+    )
+
+    assert identity.created_principal and identity.created_endpoint
+    assert created_conversation and created_session
+    assert session.conversation_id == conversation.conversation_id
+    for table in ("principals", "endpoints", "conversations", "sessions"):
+        assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+
+    second = service.resolve_identity(
+        channel_type="web",
+        channel_instance_id="web-1",
+        platform_account_id="account-1",
+    )
+    assert second.principal == identity.principal
+    assert second.endpoint == identity.endpoint
+
+
 # ---------------------------------------------------------------------------
 # 2. Approval facade: the unique write entry replaces direct SQL in commands.
 # ---------------------------------------------------------------------------
@@ -70,12 +108,11 @@ def test_previously_missing_facades_have_implementations() -> None:
 def _mem_db_with_approvals() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.execute(
-        "CREATE TABLE approvals ("
-        "approval_id TEXT PRIMARY KEY, turn_id TEXT, request TEXT NOT NULL DEFAULT '{}', "
-        "status TEXT NOT NULL DEFAULT 'pending', responder_id TEXT, decided_at TEXT, "
-        "expires_at TEXT NOT NULL, created_at TEXT NOT NULL)"
-    )
+    # Approval is now an Event aggregate: use the production migration that
+    # creates the canonical event_log rather than a mutable approvals table.
+    from cogito.store.migration import migrate
+
+    migrate(conn)
     return conn
 
 
