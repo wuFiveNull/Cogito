@@ -448,15 +448,15 @@ class Scheduler:
     def _estimate_interval(self, schedule: Schedule) -> float | None:
         """估算 schedule 的触发间隔（秒）。
 
-        优先使用 normalized_interval_s；否则从 expression 解析。
+        优先使用 Event replay 的 normalized_interval_s；否则从 expression 解析。
         """
-        # 尝试从 schedule 的规范化字段获取
-        row = self._conn.execute(
-            "SELECT normalized_interval_s FROM schedules WHERE schedule_id=?",
-            (schedule.schedule_id,),
-        ).fetchone()
-        if row and row[0]:
-            return float(row[0])
+        # 从 Event stream 获取最新 normalized_interval_s
+        from cogito.store.event_replay import replay_schedule
+
+        events = EventStore(self._conn).read_stream("schedule", schedule.schedule_id)
+        projection = replay_schedule(events, schedule.schedule_id)
+        if projection is not None and projection.normalized_interval_s is not None:
+            return float(projection.normalized_interval_s)
         # 回退：从 expression 解析
         from cogito.domain.schedule import parse_duration
 
@@ -543,10 +543,13 @@ class Scheduler:
                 )
             return None
 
-        # Claim schedule lease: 条件更新版本号（将 next_fire_at 暂设为自身以锁定）
+        # 计算下次触发时间（claim 前确定，确保 Event 包含真实 next_fire_at）
+        nxt = next_fire_at(schedule.expression, schedule.timezone, now)
+
+        # Claim schedule lease: 有条件附加 schedule.fired Event（乐观锁）
         if not self._schedule_repo.update_fire_time(
             schedule.schedule_id,
-            schedule.next_fire_at,
+            nxt,
             now,
             schedule.version,
         ):
@@ -560,9 +563,6 @@ class Scheduler:
                 status=FireStatus.fired,
             )
             self._fire_repo.insert(fire)
-
-            # 计算下次触发时间
-            nxt = next_fire_at(schedule.expression, schedule.timezone, now)
 
             # 选择 task_type：按 connector_type 分派（mcp vs rss/json/atom）
             task_type = schedule.task_type or POLL_TASK_TYPE
@@ -602,13 +602,6 @@ class Scheduler:
                 origin="scheduler",
             )
             self._task_repo.insert(task)
-
-            # 更新 schedule 的 next_fire_at + last_fired_at（version 再 +1）
-            self._conn.execute(
-                "UPDATE schedules SET next_fire_at=?, last_fired_at=?, version=version+1 "
-                "WHERE schedule_id=?",
-                (epoch_ms(nxt), epoch_ms(fire_at), schedule.schedule_id),
-            )
 
             # 回填 fire.task_id
             self._fire_repo.update_status(

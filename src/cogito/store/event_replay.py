@@ -1121,6 +1121,71 @@ def replay_side_effect_receipt(
     return state
 
 
+@dataclass(frozen=True, slots=True)
+class ScheduleProjection:
+    """Schedule configuration reconstructed from its Event stream."""
+
+    schedule_id: str
+    schedule_type: str = ""
+    expression: str = ""
+    timezone: str = ""
+    misfire_policy: str = ""
+    max_catch_up: int | None = None
+    enabled: bool = False
+    connector_id: str = ""
+    task_type: str = ""
+    task_payload: str = ""
+    next_fire_at: int | None = None
+    last_fire_at: int | None = None
+    normalized_interval_s: int | None = None
+    version: int = 0
+    created_at: int | None = None
+    stream_version: int = 0
+
+
+def replay_schedule(events: Iterable[Event], schedule_id: str) -> ScheduleProjection | None:
+    """Rebuild a Schedule's current configuration from its Event stream."""
+    state: ScheduleProjection | None = None
+    for event in _stream(events, "schedule", schedule_id):
+        attrs = event.attributes
+        if event.event_type == "schedule.created":
+            state = ScheduleProjection(
+                schedule_id=schedule_id,
+                schedule_type=str(attrs.get("schedule_type", "")),
+                expression=str(attrs.get("expression", "")),
+                timezone=str(attrs.get("timezone", "")),
+                misfire_policy=str(attrs.get("misfire_policy", "")),
+                max_catch_up=_optional_int(attrs.get("max_catch_up")),
+                enabled=bool(attrs.get("enabled", False)),
+                connector_id=str(attrs.get("connector_id", "")),
+                task_type=str(attrs.get("task_type", "")),
+                task_payload=str(attrs.get("task_payload", "")),
+                next_fire_at=_optional_int(attrs.get("next_fire_at")),
+                last_fire_at=_optional_int(attrs.get("last_fire_at")),
+                normalized_interval_s=_optional_int(attrs.get("normalized_interval_s")),
+                created_at=event.occurred_at,
+                stream_version=event.stream_version,
+            )
+        elif state is not None and event.event_type == "schedule.fired":
+            state = replace(
+                state,
+                next_fire_at=_optional_int(attrs.get("next_fire_at")) or state.next_fire_at,
+                last_fire_at=_optional_int(attrs.get("last_fire_at")) or state.last_fire_at,
+                version=state.version + 1,
+                stream_version=event.stream_version,
+            )
+        elif state is not None and event.event_type == "schedule.enabled_toggled":
+            state = replace(
+                state,
+                enabled=bool(attrs.get("enabled", not state.enabled)),
+                version=state.version + 1,
+                stream_version=event.stream_version,
+            )
+        elif state is not None and state.stream_version != event.stream_version:
+            state = replace(state, stream_version=event.stream_version)
+    return state
+
+
 def _stream(events: Iterable[Event], stream_type: str, stream_id: str) -> list[Event]:
     return sorted(
         (
