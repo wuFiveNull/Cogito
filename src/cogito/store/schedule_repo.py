@@ -9,11 +9,13 @@ import sqlite3
 from datetime import datetime
 
 from cogito.contracts.clock import epoch_ms, from_epoch_ms
+from cogito.domain.event import Event, EventClass, EventContext
 from cogito.domain.schedule import (
     FireStatus,
     Schedule,
     ScheduledFire,
 )
+from cogito.store.event_store import EventStore
 
 
 class ScheduleRepository:
@@ -28,8 +30,35 @@ class ScheduleRepository:
         return self._row_to_schedule(row) if row else None
 
     def insert(self, schedule: Schedule) -> None:
-        # 计算规范化间隔（用于 misfire 检测）
         normalized_s = self._compute_interval(schedule.expression)
+        EventStore(self._conn).append(
+            Event(
+                event_type="schedule.created",
+                stream_type="schedule",
+                stream_id=schedule.schedule_id,
+                producer="schedule-repository",
+                event_class=EventClass.DOMAIN,
+                summary=f"Schedule {schedule.schedule_type.value} created",
+                attributes={
+                    "schedule_type": schedule.schedule_type.value,
+                    "expression": schedule.expression,
+                    "timezone": schedule.timezone,
+                    "misfire_policy": schedule.misfire_policy.value,
+                    "max_catch_up": schedule.max_catch_up,
+                    "enabled": schedule.enabled,
+                    "connector_id": schedule.connector_id or "",
+                    "task_type": schedule.task_type,
+                    "task_payload": schedule.task_payload or "",
+                    "next_fire_at": epoch_ms(schedule.next_fire_at) if schedule.next_fire_at else None,
+                    "last_fire_at": epoch_ms(schedule.last_fire_at) if schedule.last_fire_at else None,
+                    "normalized_interval_s": normalized_s,
+                },
+                outcome="active",
+                idempotency_key=f"schedule:{schedule.schedule_id}:created",
+            ),
+            expected_version=0,
+        )
+        # Legacy table INSERT for FK compatibility
         self._conn.execute(
             "INSERT INTO schedules (schedule_id, schedule_type, expression, "
             "  timezone, misfire_policy, max_catch_up, enabled, "
@@ -52,15 +81,6 @@ class ScheduleRepository:
                 epoch_ms(schedule.created_at),
             ),
         )
-        # Added by migration 0061; keep the original INSERT compatible with
-        # databases that are being upgraded in the same startup transaction.
-        try:
-            self._conn.execute(
-                "UPDATE schedules SET task_type=?, task_payload=? WHERE schedule_id=?",
-                (schedule.task_type, schedule.task_payload, schedule.schedule_id),
-            )
-        except sqlite3.OperationalError:
-            pass
 
     @staticmethod
     def _compute_interval(expression: str) -> int | None:
@@ -98,6 +118,23 @@ class ScheduleRepository:
         expected_version: int,
     ) -> bool:
         """条件更新触发时间（乐观锁）。返回 True 表示更新成功。"""
+        EventStore(self._conn).append(
+            Event(
+                event_type="schedule.fired",
+                stream_type="schedule",
+                stream_id=schedule_id,
+                producer="schedule-repository",
+                event_class=EventClass.OPERATION,
+                summary="Schedule fired",
+                attributes={
+                    "next_fire_at": epoch_ms(next_fire_at) if next_fire_at else None,
+                    "last_fire_at": epoch_ms(last_fire_at) if last_fire_at else None,
+                    "expected_version": expected_version,
+                },
+                outcome="fired",
+                idempotency_key=f"schedule:{schedule_id}:fired:{epoch_ms(next_fire_at) if next_fire_at else 'none'}",
+            ),
+        )
         cursor = self._conn.execute(
             "UPDATE schedules SET next_fire_at=?, last_fire_at=?, version=version+1 "
             "WHERE schedule_id=? AND version=?",
