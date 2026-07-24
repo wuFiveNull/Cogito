@@ -9,12 +9,15 @@ from datetime import UTC, datetime
 from typing import Any
 
 from cogito.capability.models import DeferredExecution, ToolContext
+from cogito.contracts.clock import epoch_ms
 from cogito.domain.delegation import (
     allocate_child_budget,
     resolve_delegation_role,
     select_role_toolsets,
 )
+from cogito.domain.event import Event, EventClass, EventContext
 from cogito.domain.task import Task, TaskStatus
+from cogito.store.event_store import EventStore
 from cogito.store.task_repo import TaskRepository
 
 
@@ -69,7 +72,8 @@ class DelegationLifecycleService:
             raise ValueError("unsupported delegation join/failure policy")
         delegation_id = uuid.uuid4().hex
         waiting_id = uuid.uuid4().hex
-        now = datetime.now(UTC).isoformat()
+        now_dt = datetime.now(UTC)
+        now = now_dt.isoformat()
         common_budget = dict(args.get("budget") or {})
         if "max_steps" in args:
             common_budget["max_loop_iterations"] = args["max_steps"]
@@ -189,6 +193,27 @@ class DelegationLifecycleService:
                     json.dumps({"tool_call_id": context.tool_call_id}),
                     now,
                 ),
+            )
+            EventStore(self._conn).append(
+                Event(
+                    event_type="delegation.created",
+                    stream_type="delegation",
+                    stream_id=delegation_id,
+                    producer="delegation-lifecycle",
+                    event_class=EventClass.DOMAIN,
+                    summary=f"Delegation created: {len(raw_tasks)} children",
+                    attributes={
+                        "parent_turn_id": context.turn_id,
+                        "parent_attempt_id": context.attempt_id,
+                        "principal_id": context.principal_id,
+                        "child_count": len(raw_tasks),
+                        "join_policy": join_policy,
+                        "depth": depth + 1,
+                    },
+                    occurred_at=epoch_ms(now_dt),
+                    idempotency_key=f"delegation:{delegation_id}:created",
+                ),
+                expected_version=0,
             )
             self._conn.commit()
         except Exception:
