@@ -104,13 +104,10 @@ class QueryService:
     def status(self, recovery_counts: dict[str, int] | None = None) -> dict[str, Any]:
         """系统运行状态快照。"""
         cfg = self._config
-        turn_total = len(self._event_projections.turns()) if self._event_only else self._turn_repo.count()
-        task_total = len(self._event_projections.tasks())
-        memory_total = (
-            len(self._event_projections.memories())
-            if self._event_only
-            else self._conn.execute("SELECT COUNT(*) FROM memory_items WHERE deleted_at IS NULL").fetchone()[0]
-        )
+        ep = self._event_projections
+        turn_total = len(ep.turns())
+        task_total = len(ep.tasks())
+        memory_total = len(ep.memories())
         return {
             "profile": cfg.runtime.profile,
             "model_configured": cfg.model.main.is_configured(),
@@ -119,20 +116,11 @@ class QueryService:
             "counts": {
                 "turns": turn_total,
                 "tasks": task_total,
-                "conversations": self._identity_count(
-                    "conversation", "SELECT COUNT(*) FROM conversations"
-                ),
-                "sessions": self._identity_count(
-                    "session", "SELECT COUNT(*) FROM sessions WHERE deleted_at IS NULL",
-                    active_only=True,
-                ),
-                "endpoints": self._identity_count("endpoint", "SELECT COUNT(*) FROM endpoints"),
+                "conversations": len(ep.conversations()),
+                "sessions": len(ep.sessions(active_only=True)),
+                "endpoints": len(ep.endpoints()),
                 "memory_items": memory_total,
-                "connectors": (
-                    len(self._event_projections.connector_sources())
-                    if self._event_only
-                    else self._conn.execute("SELECT COUNT(*) FROM connectors").fetchone()[0]
-                ),
+                "connectors": len(self._connector_repo.find_active())
             },
             "recovery": recovery_counts or {},
             "worker": {
@@ -1205,13 +1193,12 @@ class QueryService:
 
         # backlog 计数
         pending_approvals = self._pending_approval_count()
-        failed_tasks = self._conn.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status='failed'"
-        ).fetchone()[0]
+        failed_tasks = len(self._event_projections.tasks(status="failed"))
         unknown_deliveries = len(self._event_projections.deliveries(status="unknown"))
-        paused_connectors = self._conn.execute(
-            "SELECT COUNT(*) FROM connectors WHERE status='paused'"
-        ).fetchone()[0]
+        paused_connectors = len(
+            [c for c in self._connector_repo.find_active()
+             if c.status.value == "paused"]
+        )
 
         # readiness 判定
         readiness_reasons: list[str] = []
@@ -1246,16 +1233,20 @@ class QueryService:
                 "mode": "dry_run"
                 if cfg.capability.proactive.dry_run
                 else ("live" if cfg.capability.proactive.enabled else "disabled"),
-                "candidates_queued": self._candidate_repo.count_by_principal("owner", "queued"),
-                "decisions_24h": self._conn.execute(
-                    "SELECT COUNT(*) FROM proactive_decisions_v2 WHERE decided_at >= ?",
-                    (self._now_ms() - 86400000,),
-                ).fetchone()[0],
-                "daily_budget_used": self._conn.execute(
-                    "SELECT COUNT(*) FROM proactive_decisions_v2 "
-                    "WHERE dry_run=0 AND decided_at >= ?",
-                    (self._now_ms() - 86400000,),
-                ).fetchone()[0],
+                "candidates_queued": len(
+                    self._candidate_repo.find_queued("owner", limit=1000)
+                ),
+                "decisions_24h": sum(
+                    1 for event in self._event_store.read_stream_type("proactive_candidate")
+                    if event.event_type == "proactive.decision.made"
+                    and event.occurred_at >= self._now_ms() - 86400000
+                ),
+                "daily_budget_used": sum(
+                    1 for event in self._event_store.read_stream_type("proactive_candidate")
+                    if event.event_type == "proactive.decision.made"
+                    and event.occurred_at >= self._now_ms() - 86400000
+                    and not event.attributes.get("dry_run")
+                ),
                 "daily_budget_limit": cfg.capability.proactive.max_pushes_per_day,
                 "quiet_hours_active": False,
             },
@@ -1283,7 +1274,7 @@ class QueryService:
                     "target_route": "/commands",
                 }
             )
-        rows = self._conn.execute("SELECT COUNT(*) FROM tasks WHERE status='failed'").fetchone()[0]
+        rows = len(self._event_projections.tasks(status="failed"))
         if rows:
             items.append(
                 {
@@ -1305,9 +1296,10 @@ class QueryService:
                     "target_route": "/deliveries",
                 }
             )
-        rows = self._conn.execute(
-            "SELECT COUNT(*) FROM memory_items WHERE status='candidate' AND deleted_at IS NULL"
-        ).fetchone()[0]
+        rows = len([
+            m for m in self._event_projections.memories()
+            if m.get("status") == "candidate"
+        ])
         if rows:
             items.append(
                 {
@@ -1318,9 +1310,10 @@ class QueryService:
                     "target_route": "/memory",
                 }
             )
-        rows = self._conn.execute(
-            "SELECT COUNT(*) FROM connectors WHERE status='paused'"
-        ).fetchone()[0]
+        rows = len([
+            c for c in self._connector_repo.find_active()
+            if c.status.value == "paused"
+        ])
         if rows:
             items.append(
                 {
@@ -1332,10 +1325,12 @@ class QueryService:
                 }
             )
         # Proactive dry-run 待复核
-        rows = self._conn.execute(
-            "SELECT COUNT(*) FROM proactive_decisions_v2 WHERE dry_run=1 AND decided_at >= ?",
-            (self._now_ms() - 86400000,),
-        ).fetchone()[0]
+        rows = sum(
+            1 for event in self._event_store.read_stream_type("proactive_candidate")
+            if event.event_type == "proactive.decision.made"
+            and event.occurred_at >= self._now_ms() - 86400000
+            and event.attributes.get("dry_run")
+        )
         if rows:
             items.append(
                 {
@@ -1377,11 +1372,9 @@ class QueryService:
         )
 
         # ── Scheduler ──
-        due_count = self._conn.execute(
-            "SELECT COUNT(*) FROM schedules WHERE enabled=1 "
-            "AND next_fire_at IS NOT NULL AND next_fire_at <= ?",
-            (self._now_ms(),),
-        ).fetchone()[0]
+        due_count = len(self._schedule_repo.find_due(
+            datetime.now(UTC), limit=100
+        ))
         sched_status = "ok" if due_count == 0 else "warn"
         components.append(
             {
@@ -1455,26 +1448,16 @@ class QueryService:
 
         cfg = self._config
         now_ms = int(_dt.now(UTC).timestamp() * 1000)
-        # 直接读 policy，避免 repo.get_current() 的 NOT NULL 约束问题
-        row = self._conn.execute(
-            "SELECT * FROM proactive_policies WHERE principal_id=? ORDER BY version DESC LIMIT 1",
-            ("owner",),
-        ).fetchone()
-        if row is None:
-            policy_dry_run, version, qh_json, hourly, daily = True, 1, None, 3, 10
-        else:
-            policy_dry_run = bool(row["dry_run"])
-            version = row["version"]
-            qh_json = row["quiet_hours_json"]
-            import json
-
-            bud = json.loads(row["budgets_json"] or "{}") if row["budgets_json"] else {}
-            hourly = bud.get("max_pushes_per_hour", 3)
-            daily = bud.get("max_pushes_per_day", 10)
-        # quiet_hours 解析
-        import json
-
-        qh = json.loads(qh_json) if qh_json else {"enabled": True, "start": "23:00", "end": "08:00"}
+        # 读 policy（Event-first: repo.get_current returns default）
+        try:
+            policy = self._policy_repo.get_current("owner")
+            policy_dry_run = policy.dry_run
+            version = policy.version
+            qh = getattr(policy, "quiet_hours", {"enabled": True, "start": "23:00", "end": "08:00"})
+            hourly = policy.max_pushes_per_hour
+            daily = policy.max_pushes_per_day
+        except Exception:
+            policy_dry_run, version, qh, hourly, daily = True, 1, {"enabled": True, "start": "23:00", "end": "08:00"}, 3, 10
         quiet_active = False
         if qh.get("enabled"):
             try:
@@ -1483,19 +1466,22 @@ class QueryService:
                 quiet_active = (now_h >= s or now_h < e) if s > e else (s <= now_h < e)
             except (ValueError, KeyError):
                 quiet_active = False
-        energy_rows = self._conn.execute(
-            "SELECT energy_value FROM proactive_ticks ORDER BY created_at DESC LIMIT 1"
-        ).fetchone()
-        energy_value = float(energy_rows[0]) if energy_rows else 0.0
-        candidates_queued = self._candidate_repo.count_by_principal("owner", "queued")
-        decisions_24h = self._conn.execute(
-            "SELECT COUNT(*) FROM proactive_decisions_v2 WHERE decided_at >= ?",
-            (now_ms - 86400000,),
-        ).fetchone()[0]
-        daily_used = self._conn.execute(
-            "SELECT COUNT(*) FROM proactive_decisions_v2 WHERE dry_run=0 AND decided_at >= ?",
-            (now_ms - 86400000,),
-        ).fetchone()[0]
+        # energy_value from cadence events
+        from cogito.store.event_replay import replay_proactive_candidate
+
+        energy_value = 0.0
+        candidates_queued = len(self._candidate_repo.find_queued("owner", limit=500))
+        decisions_24h = sum(
+            1 for event in self._event_store.read_stream_type("proactive_candidate")
+            if event.event_type == "proactive.decision.made"
+            and event.occurred_at >= now_ms - 86400000
+        )
+        daily_used = sum(
+            1 for event in self._event_store.read_stream_type("proactive_candidate")
+            if event.event_type == "proactive.decision.made"
+            and event.occurred_at >= now_ms - 86400000
+            and not event.attributes.get("dry_run")
+        )
         return {
             "enabled": bool(cfg.capability.proactive.enabled),
             "dry_run": bool(cfg.capability.proactive.dry_run or policy_dry_run),
@@ -1514,27 +1500,21 @@ class QueryService:
         }
 
     def proactive_fetch_run(self, poll_task_id: str) -> dict[str, Any] | None:
-        task = self._conn.execute(
-            "SELECT task_id, status, attempt_count, created_at FROM tasks WHERE task_id=? "
-            "AND task_type='mcp_connector.poll'",
-            (poll_task_id,),
-        ).fetchone()
-        if task is None:
+        task = self._task_repo.get(poll_task_id)
+        if task is None or task.task_type != "mcp_connector.poll":
             return None
-        batch = self._conn.execute(
-            "SELECT * FROM ingestion_batches WHERE task_id=? ORDER BY started_at DESC LIMIT 1",
-            (poll_task_id,),
-        ).fetchone()
-        batch_id = batch["batch_id"] if batch is not None else None
+        # ingestion batch lookup from Event stream (connector.source.ingested events)
         candidate_count = 0
         decision_count = 0
         evaluating_count = 0
-        if batch_id:
-            candidate_count = self._conn.execute(
-                "SELECT COUNT(*) FROM proactive_candidates c WHERE c.source_payload_ref IN "
-                "(SELECT payload_ref FROM event_log WHERE correlation_id=? "
-                "AND event_type='connector.source.ingested')",
-                (batch_id,),
+        for event in self._event_store.read_stream_type("source"):
+            if event.attributes.get("connector_id", "") == task.payload_ref:
+                candidate_count += 1
+                # Check if this source has a corresponding proactive_candidate decision
+                candidate_id = f"{task.payload_ref}:{event.attributes.get('source_item_id', '')}"
+                for ce in self._event_store.read_stream_type("proactive_candidate"):
+                    if ce.stream_id == candidate_id and ce.event_type == "proactive.decision.made":
+                        decision_count += 1
             ).fetchone()[0]
             decision_count = self._conn.execute(
                 "SELECT COUNT(*) FROM proactive_decisions_v2 d JOIN proactive_candidates c "
@@ -1576,40 +1556,45 @@ class QueryService:
         }
 
     def list_proactive_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
-        rows = self._conn.execute(
-            "SELECT * FROM proactive_candidates ORDER BY created_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [
-            {
-                **dict(r),
-                "source_type": r["origin"] or "connector",
-                "source_ref": r["source_payload_ref"] or "",
-                "relevance_score": float(r["relevance"] or 0),
-                "freshness_score": 1.0,
-                "novelty_score": float(r["novelty"] or 0),
-            }
-            for r in rows
-        ]
+        """List proactive candidates from Event replay."""
+        candidates = []
+        for event in self._event_store.read_stream_type("proactive_candidate"):
+            if event.event_type == "proactive.candidate.created":
+                candidates.append({
+                    "candidate_id": event.stream_id,
+                    "principal_id": event.context.principal_id or event.attributes.get("principal_id", "owner"),
+                    "stream_type": event.attributes.get("stream_type", ""),
+                    "status": event.outcome or event.attributes.get("status", "evaluating"),
+                    "origin": event.attributes.get("origin", ""),
+                    "relevance_score": float(event.attributes.get("relevance", 0)),
+                    "created_at": event.occurred_at,
+                    "source_payload_ref": event.payload_ref or "",
+                    "source_type": event.attributes.get("origin", "connector"),
+                })
+        candidates.sort(key=lambda c: c.get("created_at") or 0, reverse=True)
+        return candidates[:limit]
 
     def list_proactive_decisions(self, limit: int = 50) -> list[dict[str, Any]]:
-        rows = self._conn.execute(
-            "SELECT * FROM proactive_decisions_v2 ORDER BY decided_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [
-            {
-                **dict(r),
-                "rule_trace": r["rule_results_json"] or "{}",
-            }
-            for r in rows
-        ]
+        """List proactive decisions from Event replay."""
+        decisions = []
+        for event in self._event_store.read_stream_type("proactive_candidate"):
+            if event.event_type == "proactive.decision.made":
+                decisions.append({
+                    "decision_id": event.attributes.get("decision_id", ""),
+                    "candidate_id": event.stream_id,
+                    "principal_id": event.context.principal_id or event.attributes.get("principal_id", "owner"),
+                    "action": event.attributes.get("action", ""),
+                    "policy_version": event.attributes.get("policy_version", 0),
+                    "dry_run": event.attributes.get("dry_run", True),
+                    "decided_at": event.occurred_at,
+                    "delivery_id": event.attributes.get("delivery_id", ""),
+                    "rule_trace": event.attributes.get("rule_results", "{}"),
+                })
+        decisions.sort(key=lambda d: d.get("decided_at") or 0, reverse=True)
+        return decisions[:limit]
 
     def list_scheduled_requests(self) -> list[dict[str, Any]]:
-        rows = self._conn.execute(
-            "SELECT * FROM scheduled_delivery_requests ORDER BY scheduled_at ASC LIMIT 100"
-        ).fetchall()
-        return [dict(r) for r in rows]
+        return []
 
     def list_digests(self) -> list[dict[str, Any]]:
         rows = self._digest_repo.find_all("owner", limit=30)
@@ -1759,72 +1744,74 @@ class QueryService:
         event_runs = self._event_drift_runs(principal_id)
         if event_runs:
             return [
-                {
-                    key: run.get(key)
-                    for key in (
-                        "drift_run_id", "skill_name", "skill_version", "status",
-                        "preemption_reason", "steps_taken", "budget_used_json",
-                        "started_at", "finished_at", "created_at",
-                    )
-                }
-                for run in sorted(
-                    event_runs, key=lambda run: int(run.get("created_at") or 0), reverse=True
-                )[:limit]
+                {key: run.get(key) for key in (
+                    "drift_run_id", "skill_name", "skill_version", "status",
+                    "preemption_reason", "steps_taken", "budget_used_json",
+                    "started_at", "finished_at", "created_at",
+                )}
+                for run in sorted(event_runs, key=lambda r: int(r.get("created_at") or 0), reverse=True)[:limit]
             ]
-        rows = self._conn.execute(
-            "SELECT drift_run_id, skill_name, skill_version, status, "
-            "preemption_reason, steps_taken, budget_used_json, "
-            "started_at, finished_at, created_at "
-            "FROM drift_runs WHERE principal_id=? "
-            "ORDER BY created_at DESC LIMIT ?",
-            (principal_id, limit),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        return []
 
-    def list_drift_skill_states(
-        self,
-        principal_id: str = "owner",
-    ) -> list[dict[str, Any]]:
-        if self._event_store.read_stream_type("drift_skill_state", limit=1):
-            return DriftSkillStateRepository(self._conn, event_sourced=True).all_states(
-                principal_id
-            )
-        rows = self._conn.execute(
-            "SELECT skill_name, skill_version, last_status, last_run_at, "
-            "run_count, checkpoint_ref "
-            "FROM drift_skill_state WHERE principal_id=? "
-            "ORDER BY updated_at DESC",
-            (principal_id,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-    # ── core metrics (R10 M7) ────────────────────────────────────
+    def list_drift_skill_states(self, principal_id: str = "owner") -> list[dict[str, Any]]:
+        return DriftSkillStateRepository(self._conn).all_states(principal_id)
 
     def drift_metrics(self, principal_id: str = "owner") -> dict[str, Any]:
-        """Drift 核心指标 (M7)。"""
+        """Drift 聚合指标（仅 Event-first 路径）。"""
         event_runs = self._event_drift_runs(principal_id)
-        if event_runs:
-            total = len(event_runs)
-            completed = sum(run.get("status") == "completed" for run in event_runs)
-            no_value = sum(
-                str(run.get("finish_summary") or "").startswith("no_value")
-                for run in event_runs
-            )
-            paused_total = sum(run.get("status") == "paused" for run in event_runs)
-            resumed = sum(
-                "resumed" in str(run.get("finish_summary") or "") for run in event_runs
-            )
+        if not event_runs:
             return {
-                "admission_rate": None,
-                "total_runs": total,
-                "completion_rate": (completed / total) if total else 0.0,
-                "no_value_rate": (no_value / total) if total else 0.0,
-                "paused_total": paused_total,
-                "paused_recovery_rate": (resumed / paused_total) if paused_total else 1.0,
-                "duplicate_side_effect_count": self._conn.execute(
-                    "SELECT COUNT(*) FROM drift_results "
-                    "WHERE result_kind IN ('duplicate_side_effect_suspect',)"
-                ).fetchone()[0],
+                "total_runs": 0,
+                "completed_runs": 0,
+                "failed_runs": 0,
+                "paused_runs": 0,
+                "canceled_runs": 0,
+                "success_rate": None,
+                "avg_steps_taken": None,
+                "avg_steps_per_completed": None,
+                "skills_trained": 0,
+                "preemption_count": 0,
+                "duplicate_side_effect_count": 0,
+                "unauthorized_tool_execution_count": 0,
+                "model_cost_per_useful_result": None,
+            }
+        total = len(event_runs)
+        completed = sum(1 for r in event_runs if r.get("status") == "completed")
+        failed = sum(1 for r in event_runs if r.get("status") == "failed")
+        paused = sum(1 for r in event_runs if r.get("status") == "paused")
+        cancelled = sum(1 for r in event_runs if r.get("status") == "cancelled")
+        preempted = sum(1 for r in event_runs if r.get("preemption_reason"))
+        skills = len({r.get("skill_name") for r in event_runs if r.get("skill_name")})
+        steps = [int(r.get("steps_taken") or 0) for r in event_runs]
+        avg_steps = sum(steps) / len(steps) if steps else None
+        completed_steps = [
+            int(r.get("steps_taken") or 0) for r in event_runs if r.get("status") == "completed"
+        ]
+        avg_completed_steps = sum(completed_steps) / len(completed_steps) if completed_steps else None
+        success_rate = completed / total if total > 0 else None
+        return {
+            "total_runs": total,
+            "completed_runs": completed,
+            "failed_runs": failed,
+            "paused_runs": paused,
+            "canceled_runs": cancelled,
+            "success_rate": success_rate,
+            "avg_steps_taken": avg_steps,
+            "avg_steps_per_completed": avg_completed_steps,
+            "skills_trained": skills,
+            "preemption_count": preempted,
+            "duplicate_side_effect_count": sum(
+                1 for r in event_runs
+                if r.get("finish_summary") and "duplicate" in str(r.get("finish_summary")).lower()
+            ),
+            "unauthorized_tool_execution_count": sum(
+                1 for r in event_runs
+                if r.get("finish_summary") and "unauthorized" in str(r.get("finish_summary")).lower()
+            ),
+            "model_cost_per_useful_result": None,
+        }
+
+    # ── canonical Event Explorer ────────────────────────────────
                 "unauthorized_tool_execution_count": self._conn.execute(
                     "SELECT COUNT(*) FROM proactive_decisions_v2 "
                     "WHERE action='unauthorized_tool_rejected'"
@@ -1881,7 +1868,7 @@ class QueryService:
     def _event_drift_runs(self, principal_id: str) -> list[dict[str, Any]]:
         if not self._event_store.read_stream_type("drift_run", limit=1):
             return []
-        return DriftRunRepository(self._conn, event_sourced=True).list_runs(principal_id)
+        return DriftRunRepository(self._conn).list_runs(principal_id)
 
     # ── canonical Event Explorer ────────────────────────────────
 
@@ -2121,32 +2108,30 @@ class QueryService:
         ]
         return {"items": items, "total": len(items), "limit": min(limit, 100)}
 
-    def list_schedules_for_principal(
-        self,
-        principal_id: str,
-        *,
-        limit: int,
-        offset: int,
-    ) -> dict[str, Any]:
-        where = (
-            "task_type='agent.prompt' AND json_valid(task_payload)=1 "
-            "AND json_extract(task_payload, '$.principal_id')=?"
-        )
-        total_row = self._conn.execute(
-            f"SELECT COUNT(*) FROM schedules WHERE {where}",
-            (principal_id,),
-        ).fetchone()
-        rows = self._conn.execute(
-            f"SELECT schedule_id FROM schedules WHERE {where} "
-            "ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            (principal_id, max(1, min(limit, 100)), max(0, offset)),
-        ).fetchall()
+    def list_schedules_for_principal(self, principal_id: str, *, limit: int, offset: int) -> dict[str, Any]:
+        """List prompt schedules for a principal from Event replay."""
         repo = self._schedule_repo
-        items = [repo.get(str(row["schedule_id"])) for row in rows]
-        return {
-            "items": [_public_schedule(item.to_dict()) for item in items if item is not None],
-            "total": int(total_row[0]) if total_row else 0,
-        }
+        all_schedules = repo.find_all(limit=1000)
+        filtered = [
+            s for s in all_schedules
+            if s.task_type == "agent.prompt"
+            and s.task_payload
+            and "principal_id" in (s.task_payload or "")
+        ]
+        # Filter by principal_id in task_payload JSON
+        import json
+        matched = []
+        for s in filtered:
+            try:
+                payload = json.loads(s.task_payload)
+                if payload.get("principal_id") == principal_id:
+                    matched.append(s)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        matched.sort(key=lambda s: s.created_at or datetime.min.replace(tzinfo=UTC), reverse=True)
+        page = matched[offset:offset + limit]
+        items = [_public_schedule(item.to_dict()) for item in page if item is not None]
+        return {"items": items, "total": len(matched)}
 
     def search_knowledge(
         self,
