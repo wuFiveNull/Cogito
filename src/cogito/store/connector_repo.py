@@ -1,7 +1,8 @@
 """Connector / Cursor / RawItem / Item 数据访问层 — Event-only.
 
 Write operations append canonical Events.  Read operations replay from Event
-streams, with legacy table fallback for pre-backfill data.
+streams.  Legacy table writes are kept as rebuildable projections for FK
+compatibility during cutover.
 """
 
 from __future__ import annotations
@@ -21,7 +22,12 @@ from cogito.domain.connector import (
     ItemStatus,
 )
 from cogito.domain.event import Event, EventClass, EventContext
-from cogito.store.event_replay import ConnectorProjection, replay_connector
+from cogito.store.event_replay import (
+    ConnectorProjection,
+    ConnectorSourceProjection,
+    replay_connector,
+    replay_connector_source,
+)
 from cogito.store.event_store import EventStore
 
 
@@ -33,13 +39,7 @@ class ConnectorRepository:
         state = replay_connector(
             EventStore(self._conn).read_stream("connector", connector_id), connector_id
         )
-        if state is not None:
-            return self._projection_to_connector(state)
-        row = self._conn.execute(
-            "SELECT * FROM connectors WHERE connector_id=?",
-            (connector_id,),
-        ).fetchone()
-        return self._row_to_connector(row) if row else None
+        return self._projection_to_connector(state) if state is not None else None
 
     def insert(self, connector: Connector) -> None:
         EventStore(self._conn).append(
@@ -64,39 +64,11 @@ class ConnectorRepository:
             ),
             expected_version=0,
         )
-        # Legacy row INSERT for FK compatibility with connector_raw_items etc.
-        self._conn.execute(
-            "INSERT OR IGNORE INTO connectors (connector_id, connector_type, name, url, "
-            "  site_link, poll_schedule_id, fetch_timeout_s, status, "
-            "  consecutive_failures, last_success_at, last_attempt_at, created_at) "
-            "VALUES (?,?,?,?,?, ?,?,?,?, ?,?,?)",
-            (
-                connector.connector_id,
-                connector.connector_type.value,
-                connector.name,
-                connector.url,
-                connector.site_link,
-                connector.poll_schedule_id,
-                connector.fetch_timeout_s,
-                connector.status.value,
-                connector.consecutive_failures,
-                epoch_ms(connector.last_success_at),
-                epoch_ms(connector.last_attempt_at),
-                epoch_ms(connector.created_at),
-            ),
-        )
 
     def find_active(self, limit: int = 20) -> list[Connector]:
-        # Try Event replay first
         connectors = self._event_connectors()
-        if connectors:
-            active = [c for c in connectors if c.status.value == "active"]
-            return active[:limit]
-        rows = self._conn.execute(
-            "SELECT * FROM connectors WHERE status='active' LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [self._row_to_connector(r) for r in rows]
+        active = [c for c in connectors if c.status.value == "active"]
+        return active[:limit]
 
     def update_status(self, connector_id: str, status: ConnectorStatus) -> None:
         EventStore(self._conn).append(
@@ -112,15 +84,9 @@ class ConnectorRepository:
                 idempotency_key=f"connector:{connector_id}:status:{status.value}",
             ),
         )
-        # Keep legacy table write for FK compatibility
-        self._conn.execute(
-            "UPDATE connectors SET status=? WHERE connector_id=?",
-            (status.value, connector_id),
-        )
 
     def update_success(self, connector_id: str) -> None:
         now_ms = epoch_ms(datetime.now(UTC))
-        # Also append connector.cursor.updated Event
         EventStore(self._conn).append(
             Event(
                 event_type="connector.status.updated",
@@ -137,10 +103,19 @@ class ConnectorRepository:
 
     def update_failure(self, connector_id: str) -> None:
         now_ms = epoch_ms(datetime.now(UTC))
-        self._conn.execute(
-            "UPDATE connectors SET last_attempt_at=?, "
-            "  consecutive_failures=consecutive_failures+1 WHERE connector_id=?",
-            (now_ms, connector_id),
+        # Append failure Event — successor to the old consecutive_failures counter
+        EventStore(self._conn).append(
+            Event(
+                event_type="connector.status.updated",
+                stream_type="connector",
+                stream_id=connector_id,
+                producer="connector-repository",
+                event_class=EventClass.DOMAIN,
+                summary="Connector poll failed",
+                attributes={"status": "error", "last_attempt_at": now_ms},
+                outcome="error",
+                idempotency_key=f"connector:{connector_id}:failure:{now_ms}",
+            ),
         )
 
     @staticmethod
@@ -163,44 +138,32 @@ class ConnectorRepository:
             if (state := replay_connector(stream, cid)) is not None
         ]
 
-    @staticmethod
-    def _row_to_connector(row: sqlite3.Row) -> Connector:
-        return Connector(
-            connector_id=row["connector_id"],
-            connector_type=row["connector_type"],
-            name=row["name"],
-            url=row["url"],
-            site_link=row["site_link"],
-            poll_schedule_id=row["poll_schedule_id"],
-            fetch_timeout_s=row["fetch_timeout_s"],
-            status=row["status"],
-            consecutive_failures=row["consecutive_failures"],
-            last_success_at=from_epoch_ms(row["last_success_at"]),
-            last_attempt_at=from_epoch_ms(row["last_attempt_at"]),
-            created_at=from_epoch_ms(row["created_at"]),
-        )
-
 
 class ConnectorCursorRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
     def get(self, connector_id: str) -> ConnectorCursor | None:
-        row = self._conn.execute(
-            "SELECT * FROM connector_cursors WHERE connector_id=?",
-            (connector_id,),
-        ).fetchone()
-        if row is None:
+        """Reconstruct cursor from connector stream (connector.cursor.updated Events)."""
+        events = EventStore(self._conn).read_stream("connector", connector_id)
+        cursor_events = [e for e in events if e.event_type == "connector.cursor.updated"]
+        if not cursor_events:
             return None
-        last_ids = json.loads(row["last_item_ids"] or "[]")
+        latest = cursor_events[-1]
+        attrs = latest.attributes
+        last_item_ids = attrs.get("last_item_ids", [])
+        if isinstance(last_item_ids, str):
+            try:
+                last_item_ids = json.loads(last_item_ids)
+            except (TypeError, json.JSONDecodeError):
+                last_item_ids = []
         return ConnectorCursor(
-            connector_id=row["connector_id"],
-            etag=row["etag"],
-            last_modified=row["last_modified"],
-            last_item_ids=last_ids,
-            last_polled_at=from_epoch_ms(row["last_polled_at"]),
-            cursor_json=json.loads(row["cursor_json"] or "{}"),
-            updated_at=from_epoch_ms(row["updated_at"]),
+            connector_id=connector_id,
+            etag=str(attrs.get("etag", "")),
+            last_modified=str(attrs.get("last_modified", "")),
+            last_item_ids=list(last_item_ids),
+            last_polled_at=from_epoch_ms(latest.occurred_at) if latest.occurred_at else None,
+            updated_at=from_epoch_ms(latest.occurred_at) if latest.occurred_at else None,
         )
 
     def upsert(self, cursor: ConnectorCursor) -> None:
@@ -223,12 +186,12 @@ class ConnectorCursorRepository:
 
 
 class ConnectorRawRepository:
+    """ConnectorRawItem 操作投影 — 以 Event 为真相源的可重建缓存。"""
+
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
     def insert(self, raw: ConnectorRawItem) -> None:
-        # Keep legacy INSERT for FK compatibility; the source data is also
-        # captured in the connector.source.ingested Event.
         self._conn.execute(
             "INSERT OR IGNORE INTO connector_raw_items "
             "(raw_item_id, connector_id, source_item_id, fetched_at, "
@@ -296,30 +259,86 @@ class ConnectorItemRepository:
             expected_version=0,
         )
 
+    def _replay_source(self, connector_id: str, source_item_id: str) -> ConnectorSourceProjection | None:
+        """Replay a single source item from its Event stream."""
+        stream_id = f"{connector_id}:{source_item_id}"
+        events = EventStore(self._conn).read_stream("source", stream_id)
+        return replay_connector_source(events, stream_id)
+
+    def _replay_sources(self) -> dict[str, list[ConnectorSourceProjection]]:
+        """Replay all source streams and group by connector_id."""
+        grouped: dict[str, list[Event]] = {}
+        for event in EventStore(self._conn).read_stream_type("source"):
+            grouped.setdefault(event.stream_id, []).append(event)
+        result: dict[str, list[ConnectorSourceProjection]] = {}
+        for sid, stream in grouped.items():
+            proj = replay_connector_source(stream, sid)
+            if proj is not None:
+                # stream_id format: connector_id:source_item_id
+                parts = sid.split(":", 1)
+                cid = parts[0] if len(parts) > 1 else sid
+                result.setdefault(cid, []).append(proj)
+        return result
+
     def find_by_source_id(self, connector_id: str, source_item_id: str) -> ConnectorItem | None:
-        row = self._conn.execute(
-            "SELECT * FROM connector_items WHERE connector_id=? AND source_item_id=?",
-            (connector_id, source_item_id),
-        ).fetchone()
-        return self._row_to_item(row) if row else None
+        proj = self._replay_source(connector_id, source_item_id)
+        if proj is None:
+            return None
+        return ConnectorItem(
+            item_id=proj.source_id or "",
+            connector_id=connector_id,
+            source_item_id=source_item_id,
+            title=proj.title or "",
+            link=proj.link or "",
+            content_hash=proj.content_hash or "",
+            status=ItemStatus(proj.status) if proj.status else ItemStatus.new,
+        )
 
     def find_by_content_hash(self, connector_id: str, content_hash: str) -> ConnectorItem | None:
-        row = self._conn.execute(
-            "SELECT * FROM connector_items WHERE connector_id=? AND content_hash=?",
-            (connector_id, content_hash),
-        ).fetchone()
-        return self._row_to_item(row) if row else None
+        for src_list in self._replay_sources().values():
+            for proj in src_list:
+                if proj.connector_id == connector_id and proj.content_hash == content_hash:
+                    return ConnectorItem(
+                        item_id=proj.source_id or "",
+                        connector_id=connector_id,
+                        source_item_id=proj.source_id or "",
+                        title=proj.title or "",
+                        link=proj.link or "",
+                        content_hash=proj.content_hash or "",
+                        status=ItemStatus(proj.status) if proj.status else ItemStatus.new,
+                    )
+        return None
 
     def update_status(self, item_id: str, status: ItemStatus) -> None:
-        self._conn.execute(
-            "UPDATE connector_items SET status=? WHERE item_id=?",
-            (status.value, item_id),
+        EventStore(self._conn).append(
+            Event(
+                event_type="connector.source.ingested",
+                stream_type="source",
+                stream_id=f"item:{item_id}",
+                producer="connector-repository",
+                event_class=EventClass.OPERATION,
+                summary=f"Connector item status: {status.value}",
+                attributes={"item_id": item_id, "status": status.value},
+                idempotency_key=f"connector:item:{item_id}:status:{status.value}",
+            ),
         )
 
     def update_summary(self, item_id: str, summary_text: str, relevance: float) -> None:
-        self._conn.execute(
-            "UPDATE connector_items SET summary_text=?, relevance=? WHERE item_id=?",
-            (summary_text, relevance, item_id),
+        EventStore(self._conn).append(
+            Event(
+                event_type="connector.source.ingested",
+                stream_type="source",
+                stream_id=f"item:{item_id}:summary",
+                producer="connector-repository",
+                event_class=EventClass.OPERATION,
+                summary="Connector item summary updated",
+                attributes={
+                    "item_id": item_id,
+                    "summary_text": summary_text,
+                    "relevance": relevance,
+                },
+                idempotency_key=f"connector:item:{item_id}:summary:{hash(summary_text)}",
+            ),
         )
 
     def find_by_status(
@@ -328,6 +347,7 @@ class ConnectorItemRepository:
         status: ItemStatus,
         limit: int = 50,
     ) -> list[ConnectorItem]:
+        # Projection-only: maintained by consumers
         rows = self._conn.execute(
             "SELECT * FROM connector_items "
             "WHERE connector_id=? AND status=? ORDER BY created_at DESC LIMIT ?",
