@@ -17,10 +17,11 @@ from cogito.domain.connector import (
     ConnectorItem,
     ConnectorRawItem,
     ConnectorStatus,
+    ConnectorType,
     ItemStatus,
 )
 from cogito.domain.event import Event, EventClass, EventContext
-from cogito.store.event_replay import replay_connector_source
+from cogito.store.event_replay import ConnectorProjection, replay_connector
 from cogito.store.event_store import EventStore
 
 
@@ -29,6 +30,11 @@ class ConnectorRepository:
         self._conn = conn
 
     def get(self, connector_id: str) -> Connector | None:
+        state = replay_connector(
+            EventStore(self._conn).read_stream("connector", connector_id), connector_id
+        )
+        if state is not None:
+            return self._projection_to_connector(state)
         row = self._conn.execute(
             "SELECT * FROM connectors WHERE connector_id=?",
             (connector_id,),
@@ -81,6 +87,11 @@ class ConnectorRepository:
         )
 
     def find_active(self, limit: int = 20) -> list[Connector]:
+        # Try Event replay first
+        connectors = self._event_connectors()
+        if connectors:
+            active = [c for c in connectors if c.status.value == "active"]
+            return active[:limit]
         rows = self._conn.execute(
             "SELECT * FROM connectors WHERE status='active' LIMIT ?",
             (limit,),
@@ -131,6 +142,26 @@ class ConnectorRepository:
             "  consecutive_failures=consecutive_failures+1 WHERE connector_id=?",
             (now_ms, connector_id),
         )
+
+    @staticmethod
+    def _projection_to_connector(state: ConnectorProjection) -> Connector:
+        return Connector(
+            connector_id=state.connector_id,
+            connector_type=ConnectorType(state.connector_type) if state.connector_type else ConnectorType.rss,
+            name=state.name,
+            url=state.url,
+            status=ConnectorStatus(state.status) if state.status else ConnectorStatus.active,
+        )
+
+    def _event_connectors(self) -> list[Connector]:
+        grouped: dict[str, list[Event]] = {}
+        for event in EventStore(self._conn).read_stream_type("connector"):
+            grouped.setdefault(event.stream_id, []).append(event)
+        return [
+            self._projection_to_connector(state)
+            for cid, stream in grouped.items()
+            if (state := replay_connector(stream, cid)) is not None
+        ]
 
     @staticmethod
     def _row_to_connector(row: sqlite3.Row) -> Connector:

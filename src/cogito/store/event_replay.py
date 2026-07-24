@@ -863,6 +863,55 @@ def replay_memory(events: Iterable[Event], memory_id: str) -> MemoryProjection |
     return state
 
 
+@dataclass(frozen=True, slots=True)
+class ConnectorProjection:
+    connector_id: str
+    connector_type: str = ""
+    name: str = ""
+    url: str = ""
+    status: str = ""
+    stream_version: int = 0
+
+
+def replay_connector(events: Iterable[Event], connector_id: str) -> ConnectorProjection | None:
+    """Rebuild a Connector's configuration from its Event stream."""
+    state: ConnectorProjection | None = None
+    for event in _stream(events, "connector", connector_id):
+        attrs = event.attributes
+        if event.event_type in {"connector.created", "connector.imported"}:
+            state = ConnectorProjection(
+                connector_id=connector_id,
+                connector_type=str(attrs.get("connector_type", "")),
+                name=str(attrs.get("name", "")),
+                url=str(attrs.get("url", "")),
+                status=event.outcome or "active",
+                stream_version=event.stream_version,
+            )
+        elif state is not None and event.event_type in {
+            "connector.status.updated", "connector.cursor.updated",
+        }:
+            new_status = event.outcome or attrs.get("status", "")
+            if new_status:
+                state = ConnectorProjection(
+                    connector_id=state.connector_id,
+                    connector_type=state.connector_type,
+                    name=state.name,
+                    url=state.url,
+                    status=new_status,
+                    stream_version=event.stream_version,
+                )
+            else:
+                state = ConnectorProjection(
+                    connector_id=state.connector_id,
+                    connector_type=state.connector_type,
+                    name=state.name,
+                    url=state.url,
+                    status=state.status,
+                    stream_version=event.stream_version,
+                )
+    return state
+
+
 def replay_connector_source(
     events: Iterable[Event], source_item_id: str
 ) -> ConnectorSourceProjection | None:
