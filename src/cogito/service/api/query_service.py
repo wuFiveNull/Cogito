@@ -318,29 +318,17 @@ class QueryService:
         规则：若 conversation 下存在至少一个未删除的 session，则保留；
         若 conversation 下无任何活跃 session（全部已删除或原本无 session），则排除。
         """
-        conversations = self._event_projections.conversations()
-        if conversations:
-            active_conversation_ids = {
-                session["conversation_id"]
-                for session in self._event_projections.sessions(active_only=True)
-            }
-            return {
-                "items": [
-                    conversation
-                    for conversation in reversed(conversations)
-                    if conversation["conversation_id"] in active_conversation_ids
-                ][:limit]
-            }
-        rows = self._conn.execute(
-            "SELECT c.* FROM conversations c "
-            "WHERE EXISTS ("
-            "  SELECT 1 FROM sessions s "
-            "  WHERE s.conversation_id = c.conversation_id AND s.deleted_at IS NULL"
-            ") "
-            "ORDER BY c.conversation_id DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return {"items": [dict(r) for r in rows]}
+        active_conversation_ids = {
+            session["conversation_id"]
+            for session in self._event_projections.sessions(active_only=True)
+        }
+        return {
+            "items": [
+                conversation
+                for conversation in reversed(self._event_projections.conversations())
+                if conversation["conversation_id"] in active_conversation_ids
+            ][:limit]
+        }
 
     def get_conversation_messages(
         self,
@@ -386,36 +374,22 @@ class QueryService:
             return {"conversation_id": conversation_id, "items": items}
 
         # Compatibility path for pre-backfill tables.
-        internal_id = self._conn.execute(
-            "SELECT conversation_id FROM conversations WHERE conversation_id=?",
-            (conversation_id,),
-        ).fetchone()
-        resolved = internal_id["conversation_id"] if internal_id else None
-        if resolved is None:
-            row = self._conn.execute(
-                "SELECT conversation_id FROM conversations WHERE platform_conversation_id=?",
-                (conversation_id,),
-            ).fetchone()
-            resolved = row["conversation_id"] if row else None
+        internal_id = self._event_projections.conversations()
+        if not internal_id:
+            return {"conversation_id": conversation_id, "items": []}
+        resolved = next(
+            (
+                item["conversation_id"]
+                for item in internal_id
+                if item["conversation_id"] == conversation_id
+                or item["platform_conversation_id"] == conversation_id
+            ),
+            None,
+        )
         if resolved is None:
             return {"conversation_id": conversation_id, "items": []}
 
-        rows = self._conn.execute(
-            "SELECT m.message_id, m.role, m.created_at, m.receive_sequence, "
-            "       cp.inline_data AS text "
-            "FROM messages m "
-            "LEFT JOIN content_parts cp ON cp.message_id = m.message_id "
-            "WHERE m.conversation_id = ? "
-            "ORDER BY m.receive_sequence ASC LIMIT ?",
-            (resolved, limit),
-        ).fetchall()
-        items: list[dict[str, Any]] = []
-        for r in rows:
-            d = dict(r)
-            # inline_data 可能为 None（纯元数据消息）
-            d["text"] = d.get("text") or ""
-            items.append(d)
-        return {"conversation_id": conversation_id, "items": items}
+        return {"conversation_id": conversation_id, "items": []}
 
     # ── deliveries ─────────────────────────────────────────────
 
@@ -570,48 +544,7 @@ class QueryService:
             )
             return {"items": items[:limit], "total": len(items)}
 
-        # Compatibility path for pre-backfill tables.
-        rows = self._conn.execute(
-            "SELECT s.session_id, s.conversation_id, s.status, s.created_at, "
-            "       COUNT(t.turn_id) AS turn_count, "
-            "       MAX(t.created_at) AS last_turn_at "
-            "FROM sessions s "
-            "LEFT JOIN turns t ON t.session_id = s.session_id "
-            "WHERE s.deleted_at IS NULL "
-            "GROUP BY s.session_id "
-            "ORDER BY COALESCE(MAX(t.created_at), s.created_at) DESC "
-            "LIMIT ?",
-            (limit,),
-        ).fetchall()
-        items = []
-        for r in rows:
-            d = dict(r)
-            d["turn_count"] = int(d["turn_count"])
-            # 取该 session 下最新一条用户提问作为会话名称
-            name_row = self._conn.execute(
-                "SELECT cp.inline_data AS text "
-                "FROM messages m "
-                "LEFT JOIN content_parts cp ON cp.message_id = m.message_id "
-                "WHERE m.session_id = ? AND m.role = 'user' "
-                "ORDER BY m.receive_sequence DESC LIMIT 1",
-                (d["session_id"],),
-            ).fetchone()
-            raw_text = (name_row["text"] if name_row else None) or ""
-            # inline_data 可能含多段，取第一段非空文本
-            first_line = raw_text.split("\n")[0].strip() if raw_text else ""
-            d["name"] = first_line[:42] if first_line else d["session_id"][:12]
-            d["latest_user_at"] = None
-            if name_row:
-                ts_row = self._conn.execute(
-                    "SELECT created_at FROM messages "
-                    "WHERE session_id=? AND role='user' "
-                    "ORDER BY receive_sequence DESC LIMIT 1",
-                    (d["session_id"],),
-                ).fetchone()
-                d["latest_user_at"] = ts_row["created_at"] if ts_row else None
-            items.append(d)
-        return {"items": items, "total": len(items)}
-
+        return {"items": [], "total": 0}
     def get_session_trace(self, session_id: str) -> dict[str, Any] | None:
         """聚合一个 session 的完整运行 trace。
 
@@ -639,46 +572,7 @@ class QueryService:
                 return None
             return self._event_session_trace(event_session)
 
-        # Compatibility path for pre-backfill tables.
-        session = self._conn.execute(
-            "SELECT * FROM sessions WHERE session_id=? AND deleted_at IS NULL", (session_id,)
-        ).fetchone()
-        if session is None:
-            return None
-        session_dict = dict(session)
-
-        # ── 消息序列（含耗时） ─────────────────────────────────
-        msg_rows = self._conn.execute(
-            "SELECT m.message_id, m.role, m.created_at, m.receive_sequence, "
-            "       cp.inline_data AS text "
-            "FROM messages m "
-            "LEFT JOIN content_parts cp ON cp.message_id = m.message_id "
-            "WHERE m.session_id = ? "
-            "ORDER BY m.receive_sequence ASC",
-            (session_id,),
-        ).fetchall()
-        messages: list[dict[str, Any]] = []
-        prev_ts_ms: int | None = None
-        for r in msg_rows:
-            d = dict(r)
-            text = d.get("text") or ""
-            # inline_data 可能含多段（换行分隔）; 取拼接后的首行预览
-            first_line = text.split("\n")[0].strip() if text else ""
-            d["text"] = text
-            d["preview"] = first_line[:80]
-            # 计算距上一条消息的耗时（ms）
-            cur_ts_ms = self._parse_ts_ms(d.get("created_at"))
-            if cur_ts_ms is not None:
-                d["since_prev_ms"] = (cur_ts_ms - prev_ts_ms) if prev_ts_ms is not None else 0
-                prev_ts_ms = cur_ts_ms
-            else:
-                d["since_prev_ms"] = None
-            messages.append(d)
-
-        # ── turn 执行链路 ───────────────────────────────────────
-        turns = self._turn_repo.list_by_session(session_id)
-        turns_out: list[dict[str, Any]] = []
-        total_model_calls = 0
+        return None
         total_input_tokens = 0
         total_output_tokens = 0
         for turn in turns:
