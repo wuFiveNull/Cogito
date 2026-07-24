@@ -18,8 +18,8 @@ from cogito.domain.knowledge import (
     KnowledgeResource,
     KnowledgeSegment,
 )
-from cogito.domain.event import Event, EventClass, EventContext
 from cogito.store.event_store import EventStore
+
 
 # ── 辅助 ──
 
@@ -66,32 +66,6 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
 
 
 def insert_resource(conn: sqlite3.Connection, r: KnowledgeResource) -> KnowledgeResource:
-    EventStore(conn).append(
-        Event(
-            event_type="knowledge.resource.created",
-            stream_type="knowledge_resource",
-            stream_id=r.resource_id,
-            producer="knowledge-repository",
-            event_class=EventClass.DOMAIN,
-            summary=f"Knowledge resource created: {r.source_kind}",
-            attributes={
-                "principal_id": r.principal_id,
-                "connector_id": r.connector_id,
-                "source_uri_hash": r.source_uri_hash,
-                "source_kind": r.source_kind,
-                "media_type": r.media_type,
-                "content_hash": r.content_hash,
-                "trust_label": r.trust_label,
-                "scope_type": r.scope_type,
-                "scope_id": r.scope_id,
-                "source_version": r.source_version,
-                "retention_class": r.retention_class,
-            },
-            outcome=r.status,
-            idempotency_key=f"knowledge:resource:{r.resource_id}:created",
-        ),
-        expected_version=0,
-    )
     conn.execute(
         "INSERT OR REPLACE INTO knowledge_resources ("
         "  resource_id, principal_id, connector_id, source_uri_hash, source_kind, "
@@ -151,19 +125,6 @@ def get_resource(conn: sqlite3.Connection, resource_id: str) -> KnowledgeResourc
 
 
 def update_resource_status(conn: sqlite3.Connection, resource_id: str, status: str) -> None:
-    EventStore(conn).append(
-        Event(
-            event_type="knowledge.resource.updated",
-            stream_type="knowledge_resource",
-            stream_id=resource_id,
-            producer="knowledge-repository",
-            event_class=EventClass.DOMAIN,
-            summary=f"Knowledge resource status: {status}",
-            attributes={"status": status},
-            outcome=status,
-            idempotency_key=f"knowledge:resource:{resource_id}:status:{status}",
-        ),
-    )
     conn.execute(
         "UPDATE knowledge_resources SET status=?, updated_at=? WHERE resource_id=?",
         (status, datetime.now(UTC).isoformat(), resource_id),
@@ -193,27 +154,6 @@ def insert_document(conn: sqlite3.Connection, doc: KnowledgeDocument) -> Knowled
             doc.created_at.isoformat(),
             doc.updated_at.isoformat() if doc.updated_at else None,
         ),
-    )
-    EventStore(conn).append(
-        Event(
-            event_type="knowledge.document.created",
-            stream_type="knowledge_document",
-            stream_id=doc.document_id,
-            producer="knowledge-repository",
-            event_class=EventClass.DOMAIN,
-            summary=f"Knowledge document created: {doc.title}",
-            attributes={
-                "resource_id": doc.resource_id,
-                "title": doc.title,
-                "language": doc.language,
-                "parser_id": doc.parser_id,
-                "content_version": doc.content_version,
-                "status": doc.status,
-            },
-            outcome=doc.status,
-            idempotency_key=f"knowledge:document:{doc.document_id}:created",
-        ),
-        expected_version=0,
     )
     return doc
 
@@ -271,27 +211,6 @@ def insert_segment(conn: sqlite3.Connection, seg: KnowledgeSegment) -> Knowledge
             seg.updated_at.isoformat() if seg.updated_at else None,
             seg.deleted_at.isoformat() if seg.deleted_at else None,
         ),
-    )
-    EventStore(conn).append(
-        Event(
-            event_type="knowledge.segment.created",
-            stream_type="knowledge_segment",
-            stream_id=seg.segment_id,
-            producer="knowledge-repository",
-            event_class=EventClass.OPERATION,
-            summary=f"Knowledge segment created (ordinal {seg.ordinal})",
-            attributes={
-                "document_id": seg.document_id,
-                "ordinal": seg.ordinal,
-                "segment_kind": seg.segment_kind,
-                "content_hash": seg.content_hash,
-                "token_count": seg.token_count,
-            },
-            payload_ref=seg.payload_ref,
-            outcome="created",
-            idempotency_key=f"knowledge:segment:{seg.segment_id}:created",
-        ),
-        expected_version=0,
     )
     return seg
 
@@ -374,20 +293,6 @@ def write_embedding(
         "VALUES (?, ?, ?, ?, ?)",
         (segment_id, model, version, blob, datetime.now(UTC).isoformat()),
     )
-    EventStore(conn).append(
-        Event(
-            event_type="knowledge.embedding.written",
-            stream_type="knowledge_segment",
-            stream_id=segment_id,
-            producer="knowledge-repository",
-            event_class=EventClass.OPERATION,
-            summary="Knowledge embedding written",
-            attributes={"embedding_model": model, "embedding_version": version},
-            outcome="ready",
-            idempotency_key=f"knowledge:embedding:{segment_id}:{model}:{version}",
-        ),
-    )
-
 
 def get_embedding(conn: sqlite3.Connection, segment_id: str, model: str = "") -> list[float] | None:
     import json

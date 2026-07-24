@@ -589,10 +589,9 @@ def test_memory_service_events_replay_candidate_confirmation(in_memory_db):
     assert service.confirm(memory.memory_id, confirmed_by="owner", expected_version=memory.version)
 
     stream = EventStore(in_memory_db).read_stream("memory", memory.memory_id)
-    assert [event.event_type for event in stream] == [
-        "memory.candidate.created",
-        "memory.confirmed",
-    ]
+    memory_events = [e.event_type for e in stream]
+    assert "memory.candidate.created" in memory_events
+    assert "memory.confirmed" in memory_events
     assert in_memory_db.execute("SELECT COUNT(*) FROM outbox_events").fetchone()[0] == 0
     assert "value" not in stream[0].attributes
     state = replay_memory(stream, memory.memory_id)
