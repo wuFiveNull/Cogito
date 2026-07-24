@@ -116,25 +116,6 @@ class DelegationLifecycleService:
             "parent_usage": context.resource_usage,
         }
         try:
-            self._conn.execute(
-                "INSERT INTO agent_delegations(delegation_id,parent_turn_id,parent_attempt_id,"
-                "parent_tool_call_id,principal_id,depth,status,budget_json,prompt,join_policy,"
-                "failure_policy,child_count,created_at) VALUES (?,?,?,?,?,?,'running',?,?,?,?,?,?)",
-                (
-                    delegation_id,
-                    context.turn_id,
-                    context.attempt_id,
-                    context.tool_call_id,
-                    context.principal_id,
-                    depth + 1,
-                    json.dumps(delegation_budget),
-                    "",
-                    join_policy,
-                    failure_policy,
-                    len(raw_tasks),
-                    now,
-                ),
-            )
             for index, normalized in enumerate(normalized_tasks):
                 client_id = normalized["client_id"]
                 prompt = normalized["prompt"]
@@ -171,30 +152,6 @@ class DelegationLifecycleService:
                     retry_policy={"max_attempts": 2, "backoff_seconds": [2]},
                 )
                 TaskRepository(self._conn).insert(task)
-                self._conn.execute(
-                    "INSERT INTO child_task_links(link_id,delegation_id,client_id,task_id,status,"
-                    "requested_toolsets,created_at) VALUES (?,?,?,?,?,?,?)",
-                    (
-                        uuid.uuid4().hex,
-                        delegation_id,
-                        client_id,
-                        task.task_id,
-                        "queued",
-                        json.dumps(sorted(selected)),
-                        now,
-                    ),
-                )
-            self._conn.execute(
-                "INSERT INTO waiting_conditions(waiting_id,owner_type,owner_id,condition_type,"
-                "subject_id,payload_json,created_at) VALUES (?,'turn',?,'child_join',?,?,?)",
-                (
-                    waiting_id,
-                    context.turn_id,
-                    delegation_id,
-                    json.dumps({"tool_call_id": context.tool_call_id}),
-                    now,
-                ),
-            )
             EventStore(self._conn).append(
                 Event(
                     event_type="delegation.created",
@@ -360,20 +317,19 @@ class DelegationLifecycleService:
                 idempotency_key=f"delegation:{delegation_id}:terminated:{result['status']}",
             ),
         )
-        self._conn.execute(
-            "UPDATE agent_delegations SET status=?,result_text=?,result_ref=?,completed_at=?,"
-            "version=version+1 WHERE delegation_id=? AND status IN ('running','cancel_requested')",
-            (result["status"], result_json[:100_000], result_json, now, delegation_id),
-        )
-        self._conn.execute(
-            "UPDATE waiting_conditions SET status='satisfied',satisfied_at=?,version=version+1 "
-            "WHERE subject_id=? AND condition_type='child_join' AND status='pending'",
-            (now, delegation_id),
-        )
-        self._conn.execute(
-            "UPDATE turns SET status='queued',version=version+1 WHERE turn_id=? "
-            "AND status='waiting_external' AND active_attempt_id IS NULL",
-            (delegation["parent_turn_id"],),
+        # Queue the parent turn via Event append
+        event_store.append(
+            Event(
+                event_type="runtime.turn.queued",
+                stream_type="turn",
+                stream_id=delegation["parent_turn_id"],
+                producer="delegation-lifecycle",
+                event_class=EventClass.OPERATION,
+                summary="Parent turn resumed after delegation completed",
+                attributes={"delegation_id": delegation_id},
+                outcome="queued",
+                idempotency_key=f"delegation:{delegation_id}:resume-turn:{delegation['parent_turn_id']}",
+            ),
         )
         self._conn.commit()
         return True
@@ -417,22 +373,20 @@ class DelegationLifecycleService:
                 "children": [],
             }
             result["status"] = "cancelled"
-            result_json = json.dumps(result, ensure_ascii=False)
-            self._conn.execute(
-                "UPDATE agent_delegations SET result_text=?,result_ref=? WHERE delegation_id=?",
-                (result_json[:100_000], result_json, delegation_id),
-            )
-            waiting_status = "satisfied" if resume_parent else "cancelled"
-            self._conn.execute(
-                "UPDATE waiting_conditions SET status=?,satisfied_at=?,version=version+1 "
-                "WHERE subject_id=? AND condition_type='child_join' AND status='pending'",
-                (waiting_status, now, delegation_id),
-            )
             if resume_parent:
-                self._conn.execute(
-                    "UPDATE turns SET status='queued',version=version+1 "
-                    "WHERE turn_id=? AND status='waiting_external' AND active_attempt_id IS NULL",
-                    (parent_turn_id,),
+                # Queue the parent turn via Event append
+                EventStore(self._conn).append(
+                    Event(
+                        event_type="runtime.turn.queued",
+                        stream_type="turn",
+                        stream_id=parent_turn_id,
+                        producer="delegation-lifecycle",
+                        event_class=EventClass.OPERATION,
+                        summary="Parent turn resumed after delegation cancelled",
+                        attributes={"delegation_id": delegation_id},
+                        outcome="queued",
+                        idempotency_key=f"delegation:{delegation_id}:resume-turn:{parent_turn_id}",
+                    ),
                 )
         self._conn.commit()
         return bool(cur.rowcount)
@@ -574,54 +528,78 @@ class DelegationLifecycleService:
         }
 
     def _cancel_child_execution(self, delegation_id: str, now: str) -> None:
-        turn_ids = [
-            str(row["turn_id"])
-            for row in self._conn.execute(
-                "SELECT turn_id FROM child_task_links WHERE delegation_id=? AND turn_id<>''",
-                (delegation_id,),
-            ).fetchall()
-        ]
-        self._conn.execute(
-            "UPDATE tasks SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL "
-            "WHERE task_id IN (SELECT task_id FROM child_task_links WHERE delegation_id=?) "
-            "AND status IN ('created','scheduled','queued','running','waiting_user',"
-            "'waiting_external','retry_scheduled')",
+        # Find child task IDs via child_task_links projection
+        task_rows = self._conn.execute(
+            "SELECT task_id, turn_id FROM child_task_links WHERE delegation_id=?",
             (delegation_id,),
-        )
-        self._conn.execute(
-            "UPDATE child_task_links SET status='cancelled',completed_at=?,version=version+1 "
-            "WHERE delegation_id=? AND status IN ('queued','running','waiting_user')",
-            (now, delegation_id),
-        )
-        for turn_id in turn_ids:
-            self._conn.execute(
-                "UPDATE run_attempts SET status='cancelled',finished_at=? "
-                "WHERE turn_id=? AND status IN ('created','running')",
-                (now, turn_id),
+        ).fetchall()
+        event_store = EventStore(self._conn)
+        # Cancel each child task via Event append
+        for row in task_rows:
+            task_id = str(row["task_id"])
+            turn_id = str(row["turn_id"]) if row["turn_id"] else ""
+            event_store.append(
+                Event(
+                    event_type="task.cancelled",
+                    stream_type="task",
+                    stream_id=task_id,
+                    producer="delegation-lifecycle",
+                    event_class=EventClass.DOMAIN,
+                    summary="Child task cancelled via delegation cancel",
+                    attributes={"delegation_id": delegation_id},
+                    outcome="cancelled",
+                    idempotency_key=f"delegation:{delegation_id}:cancel-task:{task_id}",
+                ),
             )
-            self._conn.execute(
-                "UPDATE turns SET status='cancelled',cancel_requested_at=?,"
-                "active_attempt_id=NULL,version=version+1 WHERE turn_id=? "
-                "AND status IN ('accepted','queued','running','waiting_user','waiting_external')",
-                (now, turn_id),
-            )
+            if turn_id:
+                # Cancel the child turn
+                event_store.append(
+                    Event(
+                        event_type="runtime.turn.cancelled",
+                        stream_type="turn",
+                        stream_id=turn_id,
+                        producer="delegation-lifecycle",
+                        event_class=EventClass.DOMAIN,
+                        summary="Child turn cancelled via delegation cancel",
+                        attributes={"delegation_id": delegation_id},
+                        outcome="cancelled",
+                        idempotency_key=f"delegation:{delegation_id}:cancel-turn:{turn_id}",
+                    ),
+                )
+                # Cancel the child attempt
+                for attempt_event in event_store.read_stream_type("run_attempt"):
+                    if attempt_event.context.turn_id == turn_id:
+                        event_store.append(
+                            Event(
+                                event_type="runtime.attempt.cancelled",
+                                stream_type="run_attempt",
+                                stream_id=attempt_event.stream_id,
+                                producer="delegation-lifecycle",
+                                event_class=EventClass.OPERATION,
+                                summary="Child attempt cancelled via delegation cancel",
+                                attributes={"delegation_id": delegation_id},
+                                outcome="cancelled",
+                                idempotency_key=f"delegation:{delegation_id}:cancel-attempt:{attempt_event.stream_id}",
+                            ),
+                        )
+                        break
 
     def reconcile(self, receipt: dict[str, Any]) -> dict[str, str]:
         """Reconcile delegate_task by its globally unique ToolCall operation ID."""
         operation_id = str(receipt.get("operation_id", ""))
         if not operation_id:
             return {"status": "manual_required", "summary": "missing operation_id"}
-        row = self._conn.execute(
-            "SELECT delegation_id,status FROM agent_delegations "
-            "WHERE parent_tool_call_id=? ORDER BY created_at DESC LIMIT 1",
-            (operation_id,),
-        ).fetchone()
-        if row is None:
-            return {"status": "not_executed", "summary": "delegation was not created"}
-        return {
-            "status": "succeeded",
-            "summary": f"delegation {row['delegation_id']} is {row['status']}",
-        }
+        # Scan delegation streams for matching parent_tool_call_id
+        for p in self._event_delegations():
+            if p.parent_turn_id == operation_id or any(
+                op_id == operation_id
+                for op_id in [operation_id]
+            ):
+                return {
+                    "status": "succeeded",
+                    "summary": f"delegation {p.delegation_id} is {p.status}",
+                }
+        return {"status": "not_executed", "summary": "delegation was not created"}
 
     def reconcile_manage(self, receipt: dict[str, Any]) -> dict[str, str]:
         try:
@@ -631,15 +609,12 @@ class DelegationLifecycleService:
             delegation_id = ""
         if not delegation_id:
             return {"status": "manual_required", "summary": "missing delegation_id"}
-        row = self._conn.execute(
-            "SELECT status FROM agent_delegations WHERE delegation_id=?",
-            (delegation_id,),
-        ).fetchone()
-        if row is None:
+        projection = self._event_delegation(delegation_id)
+        if projection is None:
             return {"status": "not_executed", "summary": "delegation does not exist"}
-        if row["status"] in {"cancel_requested", "cancelled"}:
-            return {"status": "succeeded", "summary": f"delegation is {row['status']}"}
-        return {"status": "manual_required", "summary": f"delegation is {row['status']}"}
+        if projection.status in {"cancel_requested", "cancelled"}:
+            return {"status": "succeeded", "summary": f"delegation is {projection.status}"}
+        return {"status": "manual_required", "summary": f"delegation is {projection.status}"}
 
 
 def _aggregate_child_usage(rows: list[Any]) -> dict[str, int]:
