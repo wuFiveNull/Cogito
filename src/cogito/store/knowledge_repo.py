@@ -119,68 +119,51 @@ def insert_resource(conn: sqlite3.Connection, r: KnowledgeResource) -> Knowledge
         ),
     )
     return r
-    conn.execute(
-        "INSERT OR REPLACE INTO knowledge_resources ("
-        "  resource_id, principal_id, connector_id, source_uri_hash, source_kind, "
-        "  media_type, payload_ref, content_hash, trust_label, scope_type, scope_id, "
-        "  source_version, status, retention_class, created_at, updated_at, deleted_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            r.resource_id,
-            r.principal_id,
-            r.connector_id,
-            r.source_uri_hash,
-            r.source_kind,
-            r.media_type,
-            r.payload_ref,
-            r.content_hash,
-            r.trust_label,
-            r.scope_type,
-            r.scope_id,
-            r.source_version,
-            r.status,
-            r.retention_class,
-            r.created_at.isoformat(),
-            r.updated_at.isoformat() if r.updated_at else None,
-            r.deleted_at.isoformat() if r.deleted_at else None,
-        ),
-    )
-    return r
 
 
 def get_resource(conn: sqlite3.Connection, resource_id: str) -> KnowledgeResource | None:
-    row = conn.execute(
-        "SELECT * FROM knowledge_resources WHERE resource_id=?",
-        (resource_id,),
-    ).fetchone()
-    if not row:
+    """Read resource from Event stream."""
+    from cogito.store.event_replay import replay_knowledge_resource
+
+    events = EventStore(conn).read_stream("knowledge_resource", resource_id)
+    if not events:
         return None
-    d = _row_as_dict(row)
-    if d:
-        return KnowledgeResource(
-            resource_id=d["resource_id"],
-            principal_id=d.get("principal_id", ""),
-            connector_id=d.get("connector_id", ""),
-            source_uri_hash=d.get("source_uri_hash", ""),
-            source_kind=d.get("source_kind", ""),
-            media_type=d.get("media_type", ""),
-            payload_ref=d.get("payload_ref", ""),
-            content_hash=d.get("content_hash", ""),
-            trust_label=d.get("trust_label", ""),
-            scope_type=d.get("scope_type", ""),
-            scope_id=d.get("scope_id", ""),
-            source_version=d.get("source_version", ""),
-            status=d.get("status", ""),
-            retention_class=d.get("retention_class", ""),
-        )
+    projection = replay_knowledge_resource(events, resource_id)
+    if projection is None:
+        return None
+    attrs = events[0].attributes if events else {}
     return KnowledgeResource(
-        resource_id=row[0],
-        status=row[12] if len(row) > 12 else "",
-        content_hash=row[7] if len(row) > 7 else "",
+        resource_id=projection.resource_id,
+        principal_id=str(attrs.get("principal_id", "")),
+        connector_id=str(attrs.get("connector_id", "")),
+        source_uri_hash=str(attrs.get("source_uri_hash", "")),
+        source_kind=str(attrs.get("source_kind", "")),
+        media_type=str(attrs.get("media_type", "")),
+        payload_ref=str(attrs.get("payload_ref", "")),
+        content_hash=str(attrs.get("content_hash", "")),
+        trust_label=str(attrs.get("trust_label", "")),
+        scope_type=str(attrs.get("scope_type", "")),
+        scope_id=str(attrs.get("scope_id", "")),
+        source_version=str(attrs.get("source_version", "")),
+        status=projection.status,
+        retention_class=str(attrs.get("retention_class", "")),
     )
 
 
 def update_resource_status(conn: sqlite3.Connection, resource_id: str, status: str) -> None:
+    EventStore(conn).append(
+        Event(
+            event_type="knowledge.resource.updated",
+            stream_type="knowledge_resource",
+            stream_id=resource_id,
+            producer="knowledge-repository",
+            event_class=EventClass.DOMAIN,
+            summary=f"Knowledge resource status: {status}",
+            attributes={"status": status},
+            outcome=status,
+            idempotency_key=f"knowledge:resource:{resource_id}:status:{status}",
+        ),
+    )
     conn.execute(
         "UPDATE knowledge_resources SET status=?, updated_at=? WHERE resource_id=?",
         (status, datetime.now(UTC).isoformat(), resource_id),
