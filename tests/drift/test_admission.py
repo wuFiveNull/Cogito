@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from cogito.service.drift_admission import admit
-from cogito.domain.event import Event, EventClass
+from cogito.domain.event import Event, EventClass, EventContext
 from cogito.store.event_store import EventStore
 from cogito.store.migration import migrate
 
@@ -54,35 +54,92 @@ def memory_db():
 
 def _seed_turn(conn, status="running"):
     tid = _uniq(f"turn-{status}")
-    conn.execute(
-        "INSERT INTO turns (turn_id, session_id, input_message_id, status, priority, created_at) "
-        "VALUES (?,?,?,?,?,?)",
-        (tid, "sess-1", "msg-1", status, 80, (datetime.now(UTC)).isoformat()),
+    EventStore(conn).append_many(
+        [
+            Event(
+                event_type="interaction.message.accepted",
+                stream_type="turn",
+                stream_id=tid,
+                producer="test-admission",
+                event_class=EventClass.DOMAIN,
+                context=EventContext(session_id="sess-1"),
+                idempotency_key=f"accept:{tid}",
+            ),
+            Event(
+                event_type="runtime.turn.queued",
+                stream_type="turn",
+                stream_id=tid,
+                producer="test-admission",
+                event_class=EventClass.DOMAIN,
+                outcome="queued",
+                idempotency_key=f"queued:{tid}",
+            ),
+        ],
     )
+    if status == "running":
+        EventStore(conn).append(
+            Event(
+                event_type="runtime.turn.started",
+                stream_type="turn",
+                stream_id=tid,
+                producer="test-admission",
+                event_class=EventClass.OPERATION,
+                outcome="running",
+                attributes={"active_attempt_id": f"attempt-{tid}"},
+                context=EventContext(session_id="sess-1"),
+                idempotency_key=f"started:{tid}",
+            ),
+            expected_version=2,
+        )
     conn.commit()
     return tid
 
 
 def _seed_task(conn, priority=50, status="queued", task_type="knowledge.embed"):
     tid = _uniq("task")
-    conn.execute(
-        "INSERT INTO tasks (task_id, task_type, status, priority, idempotency_key, created_at) "
-        "VALUES (?,?,?,?,?,?)",
-        (tid, task_type, status, priority, f"idemp-{tid}", int(time.time() * 1000)),
+    EventStore(conn).append(
+        Event(
+            event_type="task.created",
+            stream_type="task",
+            stream_id=tid,
+            producer="test-admission",
+            event_class=EventClass.DOMAIN,
+            summary=f"Task {task_type}",
+            attributes={
+                "task_type": task_type,
+                "priority": priority,
+                "idempotency_key": f"idemp-{tid}",
+            },
+            outcome=status,
+            idempotency_key=f"task:{tid}:created",
+        ),
+        expected_version=0,
     )
     conn.commit()
     return tid
 
 
 def _seed_drift_run(conn, run_id, task_id=None, status="completed"):
-    """写入一条 drift_runs（需先有对应 task 因 FK task_id→tasks）。"""
-    tid = task_id if task_id else _seed_task(conn, task_type="drift.run")
-    conn.execute(
-        "INSERT INTO drift_runs "
-        "(drift_run_id, task_id, principal_id, skill_name, skill_version, "
-        " status, admission_snapshot_json, created_at) "
-        "VALUES (?,?,?,?,?,?,?,?)",
-        (run_id, tid, "owner", "s", "1.0", status, "{}", int(time.time() * 1000)),
+    tid = task_id or _seed_task(conn, task_type="drift.run")
+    EventStore(conn).append(
+        Event(
+            event_type="drift.run.admitted",
+            stream_type="drift_run",
+            stream_id=run_id,
+            producer="test-admission",
+            event_class=EventClass.DOMAIN,
+            summary="Drift run admitted",
+            context=EventContext(principal_id="owner", task_id=tid),
+            attributes={
+                "task_id": tid,
+                "skill_name": "s",
+                "skill_version": "1.0",
+            },
+            outcome="admitted",
+            occurred_at=int(time.time() * 1000),
+            idempotency_key=f"drift:run:{run_id}:admitted",
+        ),
+        expected_version=0,
     )
     conn.commit()
     return tid

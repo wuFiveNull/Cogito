@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 from cogito.domain.drift import DriftAdmissionSnapshot, DriftReasonCode
+from cogito.store.drift_repo import DriftRunRepository
 from cogito.store.event_projection_store import EventProjectionStore
 from cogito.store.event_store import EventStore
 
@@ -50,19 +51,20 @@ def admit(
     now_ms = int(time.time() * 1000)
     reasons: list[str] = []
 
-    # 1. active normal turns (running/queued turns)
-    row = conn.execute(
-        "SELECT COUNT(*) FROM turns WHERE status IN ('running','queued','accepted')"
-    ).fetchone()
-    active_turns = row[0] if row else 0
+    # 1. active normal turns (running/queued turns) — from Event replay
+    projections = EventProjectionStore(EventStore(conn))
+    active_turns = len([
+        t for t in projections.turns()
+        if t["status"] in ("running", "queued", "accepted")
+    ])
 
     # 2. high-priority task backlog (priority >= 50 且 queued/running)
-    row = conn.execute(
-        "SELECT COUNT(*) FROM tasks WHERE status IN ('queued','running') AND priority >= 50"
-    ).fetchone()
-    priority_backlog = row[0] if row else 0
+    priority_backlog = len([
+        t for t in projections.tasks()
+        if t["status"] in ("queued", "running") and (t["priority"] or 0) >= 50
+    ])
 
-    # 3. ready delivery backlog (pending) is an Event projection, not a row count.
+    # 3. ready delivery backlog (pending) is an Event projection
     pending_deliveries = EventProjectionStore(EventStore(conn)).deliveries(status="pending")
     delivery_backlog = len(pending_deliveries)
 
@@ -85,10 +87,10 @@ def admit(
         oldest_pending_delivery_age_ms if oldest_pending_delivery_age_ms is not None else 0
     )
 
-    # 5. recovery in progress (近 grace_period 内存在恢复过的 attempt → 视为进行中)
-    #    简化：有 in-progress 的 turn/streaming delivery 即为 recovery
-    row = conn.execute("SELECT COUNT(*) FROM turns WHERE status='running'").fetchone()
-    recovery_in_progress = (row[0] if row else 0) > 0
+    # 5. recovery in progress — from Event replay
+    recovery_in_progress = bool([
+        t for t in projections.turns(status="running")
+    ])
 
     # 6. user activity age
     last_user_activity_age_ms = None
@@ -105,25 +107,21 @@ def admit(
         if lu is not None:
             last_user_activity_age_ms = max(0, now_ms - lu)
 
-    # 7. daily drift budget (当日已完成/进行的 run 数)
-    day_start_ms = now_ms - (now_ms % 86400000)  # 粗略日切（UTC）；精确切在 service 层
-    row = conn.execute(
-        "SELECT COUNT(*) FROM drift_runs WHERE principal_id=? AND created_at>=? "
-        "AND status NOT IN ('failed')",
-        (principal_id, day_start_ms),
-    ).fetchone()
-    runs_today = row[0] if row else 0
+    # 7. daily drift budget — from Event replay
+    day_start_ms = now_ms - (now_ms % 86400000)
+    drift_repo = DriftRunRepository(conn, event_sourced=True)
+    all_runs = drift_repo.list_runs(principal_id=principal_id)
+    runs_today = len([
+        r for r in all_runs
+        if r.get("created_at", 0) >= day_start_ms and r.get("status") not in ("failed",)
+    ])
     daily_budget_remaining = max(0, max_runs_per_day - runs_today)
 
-    # 8. drift active count vs max_concurrent (PLAN-17 R6 DR-P1-02)
-    row = conn.execute(
-        "SELECT COUNT(*) FROM drift_runs WHERE principal_id=? AND status IN "
-        "('admitted','running','waiting','paused')",
-        (principal_id,),
-    ).fetchone()
-    active_drift_count = int(row[0]) if row else 0
-    # partial unique index (uq_drift_one_active_per_principal) 保证 status='admitted/
-    # running/waiting/paused' 行 per principal 唯一 → active_drift_count 实际最大为 1。
+    # 8. drift active count vs max_concurrent — from Event replay
+    active_drift_count = len([
+        r for r in all_runs
+        if r.get("status") in ("admitted", "running", "waiting", "paused")
+    ])
     drift_already_active = active_drift_count >= max_concurrent
 
     # 判定

@@ -14,6 +14,7 @@ import json
 
 import pytest
 
+from cogito.domain.event import Event, EventClass, EventContext
 from cogito.service.drift_preemption import (
     is_preemption_requested,
     request_preemption,

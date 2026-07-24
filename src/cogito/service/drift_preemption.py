@@ -18,6 +18,9 @@ from cogito.domain.drift import (
     DriftCheckpointV1,
     DriftReasonCode,
 )
+from cogito.domain.event import Event, EventClass, EventContext
+from cogito.store.event_projection_store import EventProjectionStore
+from cogito.store.event_store import EventStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,55 +28,65 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def request_preemption(conn, principal_id: str, reason: str) -> None:
-    """新 Turn 入站后调用：置位 preemption signal。"""
-    now = int(time.time() * 1000)
-    conn.execute(
-        "INSERT INTO drift_preemption_signals "
-        "(principal_id, preempt_requested, requested_at, reason) "
-        "VALUES (?,?,?,?) "
-        "ON CONFLICT(principal_id) DO UPDATE SET "
-        "preempt_requested=1, requested_at=excluded.requested_at, "
-        "reason=excluded.reason",
-        (principal_id, 1, now, reason),
+    """新 Turn 入站后调用：置位 preemption signal via Event。"""
+    EventStore(conn).append(
+        Event(
+            event_type="drift.preemption.requested",
+            stream_type="drift_preemption",
+            stream_id=principal_id,
+            producer="drift-preemption",
+            event_class=EventClass.OPERATION,
+            summary=f"Drift preemption requested: {reason}",
+            attributes={"reason": reason},
+            outcome="requested",
+            idempotency_key=f"drift:preemption:{principal_id}:{int(time.time() * 1000)}",
+        ),
     )
     conn.commit()
 
 
 def is_preemption_requested(conn, principal_id: str) -> tuple[bool, str]:
-    """检查并清除 preemption signal。"""
-    row = conn.execute(
-        "SELECT preempt_requested, reason FROM drift_preemption_signals WHERE principal_id=?",
-        (principal_id,),
-    ).fetchone()
-    if row and row[0]:
-        # 消费后清除
-        conn.execute(
-            "UPDATE drift_preemption_signals SET preempt_requested=0 WHERE principal_id=?",
-            (principal_id,),
-        )
-        conn.commit()
-        return True, (row[1] or "")
+    """检查并清除 preemption signal via Event。"""
+    events = EventStore(conn).read_stream("drift_preemption", principal_id)
+    if events:
+        latest = events[-1]
+        if latest.event_type == "drift.preemption.requested":
+            reason = str(latest.attributes.get("reason", ""))
+            # Mark as consumed
+            EventStore(conn).append(
+                Event(
+                    event_type="drift.preemption.consumed",
+                    stream_type="drift_preemption",
+                    stream_id=principal_id,
+                    producer="drift-preemption",
+                    event_class=EventClass.OPERATION,
+                    summary="Drift preemption consumed",
+                    idempotency_key=f"drift:preemption:consumed:{principal_id}:{latest.occurred_at}",
+                ),
+                expected_version=latest.stream_version,
+            )
+            conn.commit()
+            return True, reason
     return False, ""
 
 
 def _count_active_normal_turns(conn) -> int:
-    """每步前从 DB 查询正在运行的 normal turns (PLAN-17 R4/R0 P0-05)。
-    非 idle 的 running/accepted/queued Turn 到达后会抢占 Drift。
-    """
-    row = conn.execute(
-        "SELECT COUNT(*) FROM turns WHERE status IN ('running','accepted','queued')"
-    ).fetchone()
-    return int(row[0]) if row else 0
+    """从 Event projection 查询正在运行的 normal turns。"""
+    projections = EventProjectionStore(EventStore(conn))
+    return len([
+        t for t in projections.turns()
+        if t["status"] in ("running", "accepted", "queued")
+    ])
 
 
 def _count_high_priority_backlog(conn, threshold: int = 50) -> int:
-    """每步前从 DB 查询高优先级任务积压 (PLAN-17 R4 P0-05)。"""
-    row = conn.execute(
-        "SELECT COUNT(*) FROM tasks WHERE status IN ('queued','scheduled','running') "
-        "AND priority >= ?",
-        (threshold,),
-    ).fetchone()
-    return int(row[0]) if row else 0
+    """从 Event projection 查询高优先级任务积压。"""
+    projections = EventProjectionStore(EventStore(conn))
+    return len([
+        t for t in projections.tasks()
+        if t["status"] in ("queued", "scheduled", "running")
+        and (t["priority"] or 0) >= threshold
+    ])
 
 
 def should_preempt_step(

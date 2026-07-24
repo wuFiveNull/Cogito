@@ -68,6 +68,8 @@ _TYPES: dict[str, EventClass] = {
     "task.failed": EventClass.DOMAIN,
     "task.cancelled": EventClass.DOMAIN,
     "drift.checkpoint.saved": EventClass.OPERATION,
+    "drift.preemption.requested": EventClass.OPERATION,
+    "drift.preemption.consumed": EventClass.OPERATION,
     "connector.created": EventClass.DOMAIN,
     "connector.status.updated": EventClass.DOMAIN,
     "connector.cursor.updated": EventClass.OPERATION,
