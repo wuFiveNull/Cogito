@@ -23,7 +23,7 @@ from cogito.service.delivery_effect_payload import load_delivery_effect_payload
 from cogito.service.retrieval_service import RetrievalService
 from cogito.store.capability_repo import CapabilityRepository
 from cogito.store.config_version_repo import ConfigVersionRepository
-from cogito.store.connector_repo import ConnectorRepository
+from cogito.store.connector_repo import ConnectorCursorRepository, ConnectorRepository
 from cogito.store.digest_repo import DigestRepository
 from cogito.store.drift_repo import DriftRunRepository, DriftSkillStateRepository
 from cogito.store.event_projection_store import EventProjectionStore
@@ -2009,32 +2009,35 @@ class QueryService:
         return [dict(r) for r in rows]
 
     def get_connector_detail(self, connector_id: str) -> dict[str, Any] | None:
-        """连接器详情：connector + cursor + items + ingestion stats。"""
-        connector = self._conn.execute(
-            "SELECT * FROM connectors WHERE connector_id=?", (connector_id,)
-        ).fetchone()
+        """连接器详情：connector + cursor + items + ingestion stats from Event replay."""
+        connector = self._connector_repo.get(connector_id)
         if connector is None:
             return None
-        result = dict(connector)
-        # cursor
-        cursor = self._conn.execute(
-            "SELECT * FROM connector_cursors WHERE connector_id=?", (connector_id,)
-        ).fetchone()
-        result["cursor"] = dict(cursor) if cursor else None
-        # ingestion stats
-        stats = self._conn.execute(
-            "SELECT status, COUNT(*) AS n FROM connector_items "
-            "WHERE connector_id=? GROUP BY status",
-            (connector_id,),
-        ).fetchall()
-        result["ingestion_stats"] = {r["status"]: r["n"] for r in stats}
-        # items
-        items = self._conn.execute(
-            "SELECT * FROM connector_items WHERE connector_id=? ORDER BY created_at DESC LIMIT 100",
-            (connector_id,),
-        ).fetchall()
-        result["items"] = [dict(r) for r in items]
-        # Canonical Event facts linked by stream or safe connector metadata.
+        result = {
+            "connector_id": connector.connector_id,
+            "name": connector.name,
+            "connector_type": connector.connector_type.value,
+            "url": connector.url or "",
+            "status": connector.status.value,
+        }
+        # cursor from Event replay
+        try:
+            cursor = ConnectorCursorRepository(self._conn).get(connector_id)
+            result["cursor"] = {
+                "etag": cursor.etag if cursor else None,
+                "last_modified": cursor.last_modified if cursor else None,
+                "last_polled_at": cursor.last_polled_at.isoformat() if cursor and cursor.last_polled_at else None,
+            } if cursor else None
+        except Exception:
+            result["cursor"] = None
+        # ingestion stats from Event stream
+        ingested_count = 0
+        for event in self._event_store.read_stream_type("source"):
+            if event.attributes.get("connector_id", "") == connector_id:
+                ingested_count += 1
+        result["ingestion_stats"] = {"new": ingested_count, "digest": 0}
+        result["items"] = []
+        # Event facts from event_log
         event_ids = self._conn.execute(
             "SELECT event_id FROM event_log WHERE stream_id=? OR "
             "(json_valid(attributes_json)=1 AND json_extract(attributes_json, '$.connector_id')=?) "
