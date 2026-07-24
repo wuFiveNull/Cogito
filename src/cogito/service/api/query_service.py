@@ -989,20 +989,15 @@ class QueryService:
             messages.append(d)
 
         # ── Turns（每条 user 消息对应一个；过滤已软删除 session） ──
-        turns = self._conn.execute(
-            "SELECT * FROM turns WHERE session_id IN "
-            "(SELECT session_id FROM sessions WHERE conversation_id=? AND deleted_at IS NULL) "
-            "ORDER BY created_at ASC",
-            (real_id,),
-        ).fetchall()
+        active_session_ids = {s["session_id"] for s in sessions}
+        turns = self._event_projections.turns()
         turns_out: list[dict[str, Any]] = []
-        for t in turns:
-            td = dict(t)
+        for turn in turns:
+            if turn["session_id"] not in active_session_ids:
+                continue
+            td = dict(turn)
             # attempts
-            attempts = self._conn.execute(
-                "SELECT * FROM run_attempts WHERE turn_id=? ORDER BY attempt_no ASC",
-                (t["turn_id"],),
-            ).fetchall()
+            attempts = self._event_projections.attempts(turn_id=turn["turn_id"])
             attempts_out: list[dict[str, Any]] = []
             for a in attempts:
                 ad = dict(a)
@@ -1020,7 +1015,7 @@ class QueryService:
             del_out = [
                 delivery
                 for delivery in self._event_projections.deliveries()
-                if delivery["turn_id"] == t["turn_id"]
+                if delivery["turn_id"] == turn["turn_id"]
             ]
             td["deliveries"] = del_out
             td["delivery_count"] = len(del_out)
