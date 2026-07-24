@@ -16,6 +16,7 @@ from typing import Any
 
 from cogito.contracts.clock import epoch_ms, now_ms
 from cogito.domain.event import Event, EventClass, EventContext
+from cogito.store.event_replay import ProactiveCandidateProjection, replay_proactive_candidate
 from cogito.store.event_store import EventStore
 
 
@@ -111,6 +112,23 @@ class ProactiveCandidateRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
+    # ── Event-based read helpers ──
+
+    def _replay_candidate(self, candidate_id: str) -> ProactiveCandidateProjection | None:
+        events = EventStore(self._conn).read_stream("proactive_candidate", candidate_id)
+        return replay_proactive_candidate(events, candidate_id)
+
+    def _event_candidates(self) -> list[ProactiveCandidateProjection]:
+        grouped: dict[str, list[Event]] = {}
+        for event in EventStore(self._conn).read_stream_type("proactive_candidate"):
+            grouped.setdefault(event.stream_id, []).append(event)
+        return [
+            p for p in (
+                replay_proactive_candidate(stream, sid)
+                for sid, stream in grouped.items()
+            ) if p
+        ]
+
     def insert(self, c: ProactiveCandidate) -> None:
         self._conn.execute(
             "INSERT INTO proactive_candidates "
@@ -166,6 +184,10 @@ class ProactiveCandidateRepository:
         )
 
     def get(self, candidate_id: str) -> ProactiveCandidate | None:
+        projection = self._replay_candidate(candidate_id)
+        if projection is not None:
+            return _projection_to_candidate(projection, candidate_id)
+        # Legacy fallback for pre-backfill data
         row = self._conn.execute(
             "SELECT * FROM proactive_candidates WHERE candidate_id=?",
             (candidate_id,),
@@ -173,23 +195,24 @@ class ProactiveCandidateRepository:
         return _row_to_candidate(row) if row else None
 
     def find_queued(self, principal_id: str, limit: int = 20) -> list[ProactiveCandidate]:
-        """status='queued'，已到 evaluate 时机。"""
-        rows = self._conn.execute(
-            "SELECT * FROM proactive_candidates "
-            "WHERE principal_id=? AND status='queued' "
-            "ORDER BY urgency DESC, relevance DESC LIMIT ?",
-            (principal_id, limit),
-        ).fetchall()
-        return [_row_to_candidate(r) for r in rows]
+        candidates = self._event_candidates()
+        queued = [
+            c for c in candidates
+            if c.principal_id == principal_id
+            and c.status in {"queued", "evaluating"}
+        ]
+        # Sort by urgency (desc), relevance (desc)
+        queued.sort(key=lambda c: (c.urgency or 0, c.relevance or 0), reverse=True)
+        return [_projection_to_candidate(c, c.candidate_id) for c in queued[:limit]]
 
     def find_evaluating(self, principal_id: str, limit: int = 50) -> list[ProactiveCandidate]:
-        rows = self._conn.execute(
-            "SELECT * FROM proactive_candidates "
-            "WHERE principal_id=? AND status='evaluating' "
-            "ORDER BY created_at ASC LIMIT ?",
-            (principal_id, limit),
-        ).fetchall()
-        return [_row_to_candidate(r) for r in rows]
+        candidates = self._event_candidates()
+        evaluating = [
+            c for c in candidates
+            if c.principal_id == principal_id and c.status == "evaluating"
+        ]
+        evaluating.sort(key=lambda c: c.created_at or 0)
+        return [_projection_to_candidate(c, c.candidate_id) for c in evaluating[:limit]]
 
     def quality_stats(self, principal_id: str = "owner") -> dict[str, int]:
         """读回各 status/origin 候选数与最近一次 evaluate 指标 (read-only 诊断用)。"""
@@ -265,6 +288,20 @@ def _row_to_candidate(row: Any) -> ProactiveCandidate:
         critical_override=bool(row["critical_override"])
         if "critical_override" in row.keys()
         else False,
+    )
+
+
+def _projection_to_candidate(
+    proj: ProactiveCandidateProjection, candidate_id: str
+) -> ProactiveCandidate:
+    """Convert a ProactiveCandidateProjection to the full ProactiveCandidate dataclass."""
+    return ProactiveCandidate(
+        candidate_id=candidate_id,
+        principal_id=proj.principal_id or "",
+        stream_type="",
+        status=proj.status or "evaluating",
+        created_at=proj.created_at or 0,
+        idempotency_key=f"proactive-candidate:{candidate_id}:created",
     )
 
 
@@ -419,6 +456,14 @@ class ProactiveDecisionRepository:
         )
 
     def get_by_candidate(self, candidate_id: str) -> ProactiveDecision | None:
+        # Try Event replay first
+        events = EventStore(self._conn).read_stream("proactive_candidate", candidate_id)
+        from cogito.store.event_replay import replay_proactive_candidate
+
+        projection = replay_proactive_candidate(events, candidate_id)
+        if projection is not None and projection.action:
+            return self._projection_to_decision(projection, candidate_id)
+        # Legacy fallback for pre-backfill data
         rows = self._conn.execute(
             "SELECT * FROM proactive_decisions_v2 WHERE candidate_id=? ORDER BY decided_at DESC",
             (candidate_id,),
@@ -445,6 +490,19 @@ class ProactiveDecisionRepository:
                 r["energy_model_version"] if "energy_model_version" in r.keys() else "v1"
             ),
             config_version_id=r["config_version_id"] if "config_version_id" in r.keys() else None,
+        )
+
+    @staticmethod
+    def _projection_to_decision(
+        proj: ProactiveCandidateProjection, candidate_id: str
+    ) -> ProactiveDecision:
+        """Convert a ProactiveCandidateProjection with decision info to ProactiveDecision."""
+        return ProactiveDecision(
+            decision_id=proj.decision_id or "",
+            candidate_id=candidate_id,
+            action=proj.action or "evaluate",
+            decided_at=0,
+            delivery_id=proj.delivery_id,
         )
 
     def count_hourly_sent(self, principal_id: str, epoch_hour: int) -> int:
