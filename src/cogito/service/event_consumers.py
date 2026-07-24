@@ -20,6 +20,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from cogito.service.event_subscription import ConsumerEvent
+from cogito.store.task_repo import TaskRepository
+from cogito.domain.task import Task, TaskStatus
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -198,26 +200,17 @@ class SourceEventIngestedConsumer(EventConsumer):
             # 因此本批已投影 Candidate 会先全部落库，再由 bounded handler 评估。
             trigger_id = lease.correlation_id or lease.event_id
             eval_idempotency = f"proactive-evaluate-source:{trigger_id}"
-            exists = conn.execute(
-                "SELECT 1 FROM tasks WHERE idempotency_key=?",
-                (eval_idempotency,),
-            ).fetchone()
-            if exists is None:
-                conn.execute(
-                    "INSERT INTO tasks "
-                    "(task_id, task_type, payload_ref, status, priority, "
-                    "idempotency_key, origin, created_at) VALUES (?,?,?,?,?,?,?,?)",
-                    (
-                        f"task-pe-src-{uuid.uuid4().hex[:16]}",
-                        "proactive.evaluate",
-                        trigger_id,
-                        "queued",
-                        15,
-                        eval_idempotency,
-                        "source-event-immediate-eval",
-                        int(now.timestamp() * 1000),
-                    ),
+            task_repo = TaskRepository(conn)
+            if not task_repo.exists_by_idempotency(eval_idempotency):
+                task = Task(
+                    task_type="proactive.evaluate",
+                    payload_ref=trigger_id,
+                    status=TaskStatus.queued,
+                    priority=15,
+                    idempotency_key=eval_idempotency,
+                    origin="source-event-immediate-eval",
                 )
+                task_repo.insert(task)
         return True
 
 
@@ -438,20 +431,14 @@ class InboundImmediateEvalConsumer(EventConsumer):
         # 幂等: anchor on turn + day window — 同 turn 当天只 1 次
         day_window = int(_time.time() * 1000) // 86400000
         idempotency = f"proactive-evaluate-immediate:{turn_id}:{day_window}"
-        existing = conn.execute(
-            "SELECT task_id FROM tasks WHERE idempotency_key=?",
-            (idempotency,),
-        ).fetchone()
-        if existing is not None:
+        task_repo = TaskRepository(conn)
+        if task_repo.exists_by_idempotency(idempotency):
             with conn:
                 _mark_consumed(conn, self.name, lease.event_id)
             return True
 
         try:
-            from cogito.domain.task import Task, TaskStatus
-
             task = Task(
-                task_id=f"task-pe-imm-{uuid.uuid4().hex[:16]}",
                 task_type="proactive.evaluate",
                 payload_ref="",
                 status=TaskStatus.queued,
@@ -459,21 +446,7 @@ class InboundImmediateEvalConsumer(EventConsumer):
                 idempotency_key=idempotency,
                 origin="inbound-immediate-eval",
             )
-            conn.execute(
-                "INSERT INTO tasks "
-                "(task_id, task_type, status, priority, "
-                " idempotency_key, origin, created_at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (
-                    task.task_id,
-                    task.task_type,
-                    task.status.value,
-                    task.priority,
-                    task.idempotency_key,
-                    task.origin,
-                    int(_time.time() * 1000),
-                ),
-            )
+            task_repo.insert(task)
             with conn:
                 _mark_consumed(conn, self.name, lease.event_id)
             return True
