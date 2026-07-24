@@ -584,6 +584,39 @@ class MemoryRepository:
         ).fetchone()
         return _row_to_memory(row) if row else None
 
+    # ── Event append helper ──
+
+    def _append_memory_event(
+        self,
+        memory_id: str,
+        event_type: str,
+        *,
+        summary: str = "",
+        attributes: dict[str, Any] | None = None,
+        outcome: str = "",
+        idempotency_key: str = "",
+    ) -> None:
+        """Append a single memory lifecycle Event."""
+        EventStore(self._conn).append(
+            Event(
+                event_type=event_type,
+                stream_type="memory",
+                stream_id=memory_id,
+                producer="memory-repository",
+                event_class=(
+                    EventClass.OPERATION
+                    if event_type in {"memory.weight.recomputed", "memory.signal.recorded"}
+                    else EventClass.DOMAIN
+                ),
+                summary=summary or f"Memory {event_type.split('.')[-1]}",
+                attributes=attributes or {},
+                outcome=outcome,
+                idempotency_key=(
+                    idempotency_key or f"memory:{memory_id}:{event_type.split('.')[-1]}"
+                ),
+            ),
+        )
+
     # ── 写入操作 ──
 
     def insert(self, memory: MemoryItem) -> MemoryItem:
@@ -723,6 +756,18 @@ class MemoryRepository:
         if cursor.rowcount > 0:
             self._sync_fts_update(memory.memory_id, memory.subject, memory.predicate, memory.value)
             self._sync_embedding_update(memory.memory_id, memory.value)
+            self._append_memory_event(
+                memory.memory_id,
+                "memory.updated",
+                summary=f"Memory updated: {memory.subject} {memory.predicate}",
+                attributes={
+                    "kind": memory.kind.value,
+                    "confidence": memory.confidence,
+                    "importance": memory.importance,
+                },
+                outcome=memory.status.value,
+                idempotency_key=f"memory:{memory.memory_id}:updated:{now}",
+            )
         return cursor.rowcount > 0
 
     # ── 状态转换 ──
@@ -755,6 +800,18 @@ class MemoryRepository:
             f"WHERE {' AND '.join(conditions)}",
             [confirmed_by, confirmation_method, now, now] + params,
         )
+        if cursor.rowcount > 0:
+            self._append_memory_event(
+                memory_id,
+                "memory.confirmed",
+                summary="Memory confirmed",
+                attributes={
+                    "confirmed_by": confirmed_by,
+                    "confirmation_method": confirmation_method,
+                },
+                outcome="confirmed",
+                idempotency_key=f"memory:{memory_id}:confirmed:{now}",
+            )
         return cursor.rowcount > 0
 
     def reject(
@@ -778,6 +835,14 @@ class MemoryRepository:
             f"WHERE {' AND '.join(conditions)}",
             [now] + params,
         )
+        if cursor.rowcount > 0:
+            self._append_memory_event(
+                memory_id,
+                "memory.rejected",
+                summary="Memory rejected",
+                outcome="rejected",
+                idempotency_key=f"memory:{memory_id}:rejected:{now}",
+            )
         return cursor.rowcount > 0
 
     def expire(self, memory_id: str) -> bool:
@@ -788,6 +853,14 @@ class MemoryRepository:
             "WHERE memory_id=? AND status IN ('candidate','confirmed') AND deleted_at IS NULL",
             (now, memory_id),
         )
+        if cursor.rowcount > 0:
+            self._append_memory_event(
+                memory_id,
+                "memory.expired",
+                summary="Memory expired",
+                outcome="expired",
+                idempotency_key=f"memory:{memory_id}:expired:{now}",
+            )
         return cursor.rowcount > 0
 
     def supersede(self, old_id: str, new_id: str) -> bool:
@@ -799,6 +872,15 @@ class MemoryRepository:
             "WHERE memory_id=? AND status='confirmed' AND deleted_at IS NULL",
             (now, now, old_id),
         )
+        if cursor.rowcount > 0:
+            self._append_memory_event(
+                old_id,
+                "memory.superseded",
+                summary=f"Memory superseded by {new_id}",
+                attributes={"superseded_by": new_id},
+                outcome="superseded",
+                idempotency_key=f"memory:{old_id}:superseded:{now}",
+            )
         return cursor.rowcount > 0
 
     # ── 关系管理（0016 迁移后可用）──
@@ -971,6 +1053,13 @@ class MemoryRepository:
         if cursor.rowcount > 0:
             self._sync_fts_delete(memory_id)
             self._sync_embedding_delete(memory_id)
+            self._append_memory_event(
+                memory_id,
+                "memory.erased",
+                summary="Memory soft deleted",
+                outcome="erased",
+                idempotency_key=f"memory:{memory_id}:erased:{now}",
+            )
         return cursor.rowcount > 0
 
     def hard_delete(self, memory_id: str) -> bool:
@@ -981,6 +1070,14 @@ class MemoryRepository:
             "DELETE FROM memory_items WHERE memory_id=?",
             (memory_id,),
         )
+        if cursor.rowcount > 0:
+            self._append_memory_event(
+                memory_id,
+                "memory.erased",
+                summary="Memory hard deleted",
+                outcome="erased",
+                idempotency_key=f"memory:{memory_id}:hard-deleted:hard-deleted",
+            )
         return cursor.rowcount > 0
 
     # ── 擦除 tombstone（PLAN-16 M3 MEM-05）──
@@ -1026,6 +1123,14 @@ class MemoryRepository:
             "  erasure_reason=?, receipt_id=? "
             "WHERE memory_id=? AND deleted_at IS NULL",
             (now, now, reason, receipt_id, memory_id),
+        )
+        self._append_memory_event(
+            memory_id,
+            "memory.erased",
+            summary=f"Memory tombstoned: {reason}",
+            attributes={"receipt_id": receipt_id, "reason": reason},
+            outcome="erased",
+            idempotency_key=f"memory:{memory_id}:erased:receipt-{receipt_id}",
         )
         return True
 
