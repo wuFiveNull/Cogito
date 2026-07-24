@@ -1186,6 +1186,67 @@ def replay_schedule(events: Iterable[Event], schedule_id: str) -> ScheduleProjec
     return state
 
 
+@dataclass(frozen=True, slots=True)
+class DelegationProjection:
+    """Delegation lifecycle reconstructed from its Event stream."""
+
+    delegation_id: str
+    status: str = ""
+    parent_turn_id: str = ""
+    parent_attempt_id: str = ""
+    principal_id: str = ""
+    child_count: int = 0
+    completed_children: int = 0
+    join_policy: str = "all"
+    depth: int = 0
+    created_at: int | None = None
+    completed_at: int | None = None
+    stream_version: int = 0
+
+
+def replay_delegation(events: Iterable[Event], delegation_id: str) -> DelegationProjection | None:
+    """Rebuild a Delegation's lifecycle state from its Event stream."""
+    state: DelegationProjection | None = None
+    for event in _stream(events, "delegation", delegation_id):
+        attrs = event.attributes
+        if event.event_type == "delegation.created":
+            state = DelegationProjection(
+                delegation_id=delegation_id,
+                status="running",
+                parent_turn_id=str(attrs.get("parent_turn_id", "")),
+                parent_attempt_id=str(attrs.get("parent_attempt_id", "")),
+                principal_id=str(attrs.get("principal_id", "")),
+                child_count=int(attrs.get("child_count", 0)),
+                join_policy=str(attrs.get("join_policy", "all")),
+                depth=int(attrs.get("depth", 0)),
+                created_at=event.occurred_at,
+                stream_version=event.stream_version,
+            )
+        elif state is not None and event.event_type == "delegation.child.completed":
+            state = replace(
+                state,
+                completed_children=min(state.completed_children + 1, state.child_count),
+                stream_version=event.stream_version,
+            )
+        elif state is not None and event.event_type == "delegation.completed":
+            state = replace(
+                state,
+                status="completed",
+                completed_at=event.occurred_at,
+                stream_version=event.stream_version,
+            )
+        elif state is not None and event.event_type == "delegation.cancelled":
+            state = replace(
+                state,
+                status="cancelled",
+                completed_at=event.occurred_at,
+                stream_version=event.stream_version,
+            )
+        elif state is not None and state.stream_version != event.stream_version:
+            state = replace(state, stream_version=event.stream_version)
+    return state
+
+
 def _stream(events: Iterable[Event], stream_type: str, stream_id: str) -> list[Event]:
     return sorted(
         (

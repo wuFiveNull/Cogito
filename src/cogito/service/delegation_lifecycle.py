@@ -17,6 +17,7 @@ from cogito.domain.delegation import (
 )
 from cogito.domain.event import Event, EventClass, EventContext
 from cogito.domain.task import Task, TaskStatus
+from cogito.store.event_replay import DelegationProjection, replay_delegation
 from cogito.store.event_store import EventStore
 from cogito.store.task_repo import TaskRepository
 
@@ -266,6 +267,24 @@ class DelegationLifecycleService:
             "WHERE delegation_id=?",
             (completed, failed, json.dumps(aggregate_usage), delegation_id),
         )
+        # Append delegation.child.completed Event (one per evaluation)
+        event_store = EventStore(self._conn)
+        event_store.append(
+            Event(
+                event_type="delegation.child.completed",
+                stream_type="delegation",
+                stream_id=delegation_id,
+                producer="delegation-lifecycle",
+                event_class=EventClass.OPERATION,
+                summary=f"Child task completed (completed={completed}/{len(rows)})",
+                attributes={
+                    "task_id": task_id,
+                    "completed": completed,
+                    "total": len(rows),
+                },
+                idempotency_key=f"delegation:{delegation_id}:child:{task_id}",
+            ),
+        )
         if not satisfied:
             self._conn.commit()
             return False
@@ -321,6 +340,26 @@ class DelegationLifecycleService:
         }
         result_json = json.dumps(result, ensure_ascii=False)
         now = datetime.now(UTC).isoformat()
+        # Append delegation.completed Event
+        event_store.append(
+            Event(
+                event_type="delegation.completed",
+                stream_type="delegation",
+                stream_id=delegation_id,
+                producer="delegation-lifecycle",
+                event_class=EventClass.DOMAIN,
+                summary=f"Delegation {result['status']}",
+                attributes={
+                    "parent_turn_id": delegation["parent_turn_id"],
+                    "completed_count": completed,
+                    "failed_count": failed,
+                    "join_policy": delegation["join_policy"],
+                    "failure_policy": delegation["failure_policy"],
+                },
+                outcome=result["status"],
+                idempotency_key=f"delegation:{delegation_id}:terminated:{result['status']}",
+            ),
+        )
         self._conn.execute(
             "UPDATE agent_delegations SET status=?,result_text=?,result_ref=?,completed_at=?,"
             "version=version+1 WHERE delegation_id=? AND status IN ('running','cancel_requested')",
@@ -355,6 +394,23 @@ class DelegationLifecycleService:
         )
         if cur.rowcount:
             self._cancel_child_execution(delegation_id, now)
+            # Append delegation.cancelled Event
+            EventStore(self._conn).append(
+                Event(
+                    event_type="delegation.cancelled",
+                    stream_type="delegation",
+                    stream_id=delegation_id,
+                    producer="delegation-lifecycle",
+                    event_class=EventClass.DOMAIN,
+                    summary=f"Delegation cancelled (resume_parent={resume_parent})",
+                    attributes={
+                        "parent_turn_id": parent_turn_id,
+                        "resume_parent": resume_parent,
+                    },
+                    outcome="cancelled",
+                    idempotency_key=f"delegation:{delegation_id}:cancelled",
+                ),
+            )
             result = self.status(delegation_id, parent_turn_id) or {
                 "delegation_id": delegation_id,
                 "status": "cancelled",
@@ -382,29 +438,89 @@ class DelegationLifecycleService:
         return bool(cur.rowcount)
 
     def cancel_for_parent(self, parent_turn_id: str) -> int:
-        rows = self._conn.execute(
-            "SELECT delegation_id FROM agent_delegations WHERE parent_turn_id=? "
-            "AND status IN ('queued','running')",
-            (parent_turn_id,),
-        ).fetchall()
+        # Use Event-based delegation scan for pre-backfill auto-detect
+        delegations = [
+            p for p in self._event_delegations()
+            if p.parent_turn_id == parent_turn_id and p.status in {"running", ""}
+        ]
+        if not delegations:
+            # Legacy fallback
+            rows = self._conn.execute(
+                "SELECT delegation_id FROM agent_delegations WHERE parent_turn_id=? "
+                "AND status IN ('queued','running')",
+                (parent_turn_id,),
+            ).fetchall()
+            return sum(
+                self.cancel(row["delegation_id"], parent_turn_id, resume_parent=False)
+                for row in rows
+            )
         return sum(
-            self.cancel(row["delegation_id"], parent_turn_id, resume_parent=False) for row in rows
+            self.cancel(p.delegation_id, parent_turn_id, resume_parent=False)
+            for p in delegations
         )
 
     def list_for_parent(self, parent_turn_id: str) -> dict[str, Any]:
-        rows = self._conn.execute(
-            "SELECT delegation_id FROM agent_delegations WHERE parent_turn_id=? "
-            "ORDER BY created_at DESC LIMIT 20",
-            (parent_turn_id,),
-        ).fetchall()
-        items = [
-            view
-            for row in rows
-            if (view := self.status(str(row["delegation_id"]), parent_turn_id)) is not None
+        # Use Event-based delegation scan
+        delegations = [
+            p for p in self._event_delegations()
+            if p.parent_turn_id == parent_turn_id
         ]
+        if not delegations:
+            # Legacy fallback
+            rows = self._conn.execute(
+                "SELECT delegation_id FROM agent_delegations WHERE parent_turn_id=? "
+                "ORDER BY created_at DESC LIMIT 20",
+                (parent_turn_id,),
+            ).fetchall()
+            items = [
+                view
+                for row in rows
+                if (view := self.status(str(row["delegation_id"]), parent_turn_id)) is not None
+            ]
+            return {"delegations": items, "total": len(items)}
+        delegations.sort(key=lambda p: p.created_at or 0, reverse=True)
+        items = [self._projection_to_status(p) for p in delegations[:20]]
         return {"delegations": items, "total": len(items)}
 
+    # ── Event-based delegation read helpers ──
+
+    def _event_delegation(self, delegation_id: str) -> DelegationProjection | None:
+        """Read delegation state from Event stream."""
+        events = EventStore(self._conn).read_stream("delegation", delegation_id)
+        return replay_delegation(events, delegation_id)
+
+    def _event_delegations(self) -> list[DelegationProjection]:
+        """Scan all delegation streams and return current state for each."""
+        grouped: dict[str, list[Event]] = {}
+        for event in EventStore(self._conn).read_stream_type("delegation"):
+            grouped.setdefault(event.stream_id, []).append(event)
+        return [
+            p for p in (replay_delegation(stream, sid) for sid, stream in grouped.items()) if p
+        ]
+
+    # ── Delegation read paths (Event-first, legacy fallback) ──
+
+    def _projection_to_status(self, projection: DelegationProjection) -> dict[str, Any]:
+        """Convert a DelegationProjection to the status dict format."""
+        return {
+            "delegation_id": projection.delegation_id,
+            "parent_turn_id": projection.parent_turn_id,
+            "depth": projection.depth,
+            "status": projection.status,
+            "child_count": projection.child_count,
+            "completed_count": projection.completed_children,
+            "join_policy": projection.join_policy,
+            "created_at": projection.created_at,
+            "completed_at": projection.completed_at,
+            "children": [],
+        }
+
     def status(self, delegation_id: str, parent_turn_id: str) -> dict[str, Any] | None:
+        # Try Event replay first
+        projection = self._event_delegation(delegation_id)
+        if projection is not None and projection.parent_turn_id == parent_turn_id:
+            return self._projection_to_status(projection)
+        # Legacy fallback for pre-backfill data
         delegation = self._conn.execute(
             "SELECT * FROM agent_delegations WHERE delegation_id=? AND parent_turn_id=?",
             (delegation_id, parent_turn_id),
