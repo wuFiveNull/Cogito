@@ -506,30 +506,39 @@ class ProactiveDecisionRepository:
         )
 
     def count_hourly_sent(self, principal_id: str, epoch_hour: int) -> int:
-        """最近 1 小时内实际（dry_run=0）发送数量。"""
-        return self._conn.execute(
-            "SELECT COUNT(*) FROM proactive_decisions_v2 "
-            "WHERE principal_id=? AND dry_run=0 "
-            "AND decided_at >= ? AND action='send_now'",
-            (principal_id, epoch_hour * 3600 * 1000),
-        ).fetchone()[0]
+        """最近 1 小时内实际（dry_run=0）发送数量 — Event stream scan."""
+        threshold = epoch_hour * 3600 * 1000
+        return sum(
+            1 for event in EventStore(self._conn).read_stream_type("proactive_candidate")
+            if event.event_type == "proactive.decision.made"
+            and event.attributes.get("action") == "send_now"
+            and event.occurred_at >= threshold
+            and not event.attributes.get("dry_run")
+        )
 
     def count_daily_sent(self, principal_id: str, epoch_day: int) -> int:
-        return self._conn.execute(
-            "SELECT COUNT(*) FROM proactive_decisions_v2 "
-            "WHERE principal_id=? AND dry_run=0 "
-            "AND decided_at >= ?",
-            (principal_id, epoch_day * 86400 * 1000),
-        ).fetchone()[0]
+        threshold = epoch_day * 86400 * 1000
+        return sum(
+            1 for event in EventStore(self._conn).read_stream_type("proactive_candidate")
+            if event.event_type == "proactive.decision.made"
+            and event.occurred_at >= threshold
+            and not event.attributes.get("dry_run")
+        )
 
     def count_alert_hourly_sent(self, principal_id: str, epoch_hour: int) -> int:
-        return self._conn.execute(
-            "SELECT COUNT(*) FROM proactive_decisions_v2 d "
-            "JOIN proactive_candidates c ON c.candidate_id=d.candidate_id "
-            "WHERE d.principal_id=? AND d.dry_run=0 AND d.action='send_now' "
-            "AND c.stream_type='alert' AND d.decided_at >= ?",
-            (principal_id, epoch_hour * 3600 * 1000),
-        ).fetchone()[0]
+        threshold = epoch_hour * 3600 * 1000
+        return sum(
+            1 for event in EventStore(self._conn).read_stream_type("proactive_candidate")
+            if event.event_type == "proactive.decision.made"
+            and event.attributes.get("action") == "send_now"
+            and event.occurred_at >= threshold
+            and not event.attributes.get("dry_run")
+            and event.attributes.get("stream_type") == "alert"
+        )
+
+    def _replay_candidate(self, candidate_id: str) -> ProactiveCandidateProjection | None:
+        events = EventStore(self._conn).read_stream("proactive_candidate", candidate_id)
+        return replay_proactive_candidate(events, candidate_id)
 
 
 def _safe_json(raw: str | None, default: dict) -> dict:
