@@ -21,6 +21,7 @@ from typing import Any
 
 from cogito.service.event_subscription import ConsumerEvent
 from cogito.store.task_repo import TaskRepository
+from cogito.store.drift_repo import DriftRunRepository
 from cogito.domain.task import Task, TaskStatus
 
 _LOGGER = logging.getLogger(__name__)
@@ -490,20 +491,18 @@ class DriftResultCommittedConsumer(EventConsumer):
         # payload_ref 直接存 drift_run_id (str)
         drift_run_id = (lease.payload_ref or "").strip()
 
-        run = conn.execute(
-            "SELECT principal_id, status, skill_name FROM drift_runs WHERE drift_run_id=?",
-            (drift_run_id,),
-        ).fetchone()
+        drift_repo = DriftRunRepository(conn)
+        run = drift_repo.get(drift_run_id)
         if run is None:
             return False
-        if run["status"] != "completed":
+        if run.get("status") != "completed":
             _LOGGER.info(
                 "DriftResultCommitted: run %s not completed (status=%s); skip",
                 drift_run_id,
-                run["status"],
+                run.get("status"),
             )
             return True
-        principal_id = run["principal_id"] or self._default_principal_id
+        principal_id = run.get("principal_id") or self._default_principal_id
 
         # 校验 config 拒绝投影 (dry-run / allow_candidate_projection / allow_candidate_emission)
         allow = True
@@ -569,10 +568,21 @@ class DriftResultCommittedConsumer(EventConsumer):
             return False  # 触发 Outbox retry
 
         if candidate_id:
-            # 回写 candidate_id on DriftRun + DriftResult
-            conn.execute(
-                "UPDATE drift_runs SET candidate_id=? WHERE drift_run_id=?",
-                (candidate_id, drift_run_id),
+            # Record candidate_id on drift run via Event append
+            from cogito.domain.event import Event, EventClass
+
+            EventStore(conn).append(
+                Event(
+                    event_type="drift.run.completed",
+                    stream_type="drift_run",
+                    stream_id=drift_run_id,
+                    producer="drift-result-projector",
+                    event_class=EventClass.DOMAIN,
+                    summary=f"Drift result projected to candidate {candidate_id}",
+                    attributes={"candidate_id": candidate_id},
+                    outcome="projected",
+                    idempotency_key=f"drift-run:{drift_run_id}:projected:{candidate_id}",
+                ),
             )
             if drr is not None:
                 DriftResultRepository(conn).mark_emitted(drr.drift_result_id, candidate_id)

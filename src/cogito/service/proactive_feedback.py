@@ -18,6 +18,9 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from cogito.store.event_store import EventStore
+from cogito.domain.event import Event, EventClass
+
 _LOGGER = logging.getLogger(__name__)
 
 # ACK 窗口（秒）
@@ -78,40 +81,36 @@ def record_feedback(
     """
     now = int(time.time() * 1000)
     action = None
-    # 查当前 decision 的 action 以决定 ACK 窗口
-    row = conn.execute(
-        "SELECT action FROM proactive_decisions_v2 WHERE candidate_id=? "
-        "ORDER BY decided_at DESC LIMIT 1",
-        (candidate_id,),
-    ).fetchone()
-    if row is not None:
-        action = row[0]
+    # 查当前 decision 的 action — 从 Event stream
+    for event in EventStore(conn).read_stream_type("proactive_candidate"):
+        if event.stream_id == candidate_id and event.event_type == "proactive.decision.made":
+            action = event.attributes.get("action", "")
     window = ack_window_for(event_type, action)
 
-    # 写信号（幂等键：event+candidate）
-    signal_id = f"fb-{event_type}-{candidate_id}"
+    # 写反馈 Event 到 proactive_candidate stream
+    sig_id = f"fb-{event_type}-{candidate_id}"
     try:
-        conn.execute(
-            "INSERT OR IGNORE INTO proactive_signals "
-            "(signal_id, signal_type, source_type, source_id, "
-            " principal_id, payload_json, created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (
-                signal_id,
-                f"proactive_feedback_{event_type}",
-                "feedback",
-                candidate_id,
-                principal_id,
-                f'{{"ack_window_s":{window},"candidate_id":"{candidate_id}"}}',
-                now,
+        EventStore(conn).append(
+            Event(
+                event_type="proactive.candidate.created",
+                stream_type="proactive_candidate",
+                stream_id=sig_id,
+                producer="proactive-feedback",
+                event_class=EventClass.OPERATION,
+                summary=f"Feedback: {event_type}",
+                attributes={
+                    "feedback_type": event_type,
+                    "candidate_id": candidate_id,
+                    "ack_window_s": window,
+                },
+                outcome="recorded",
+                idempotency_key=f"feedback:{event_type}:{candidate_id}",
             ),
+            expected_version=0,
         )
         conn.commit()
     except Exception:
-        # proactive_signals 表若不存在，降级写到日志（不影响主路径）
-        _LOGGER.warning(
-            "record_feedback: signal write failed (signal_id=%s)", signal_id, exc_info=True
-        )
+        _LOGGER.warning("record_feedback: Event append failed", exc_info=True)
 
     _LOGGER.info("feedback %s candidate=%s window=%ds", event_type, candidate_id, window)
     return {

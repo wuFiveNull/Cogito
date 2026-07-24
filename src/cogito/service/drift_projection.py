@@ -16,7 +16,10 @@ import uuid
 from typing import Any
 
 from cogito.domain.drift import DriftCandidateDraft, DriftRunStatus
+from cogito.store.drift_repo import DriftRunRepository
+from cogito.store.event_store import EventStore
 from cogito.store.proactive_repo import ProactiveCandidate
+from cogito.store.event_replay import replay_proactive_candidate
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,32 +38,26 @@ class DriftProjectionService:
 
         Returns candidate_id 或 None（dry_run / 重复投影 / run 未完成）。
         """
-        # 校验 run 状态
-        row = self._conn.execute(
-            "SELECT status, principal_id FROM drift_runs WHERE drift_run_id=?",
-            (drift_run_id,),
-        ).fetchone()
-        if row is None:
+        # 校验 run 状态 — 使用 Event-only DriftRunRepository
+        run = DriftRunRepository(self._conn).get(drift_run_id)
+        if run is None:
             _LOGGER.warning("drift_project: run %s not found", drift_run_id)
             return None
-        if row["status"] != DriftRunStatus.completed.value:
+        if run.get("status") != DriftRunStatus.completed.value:
             _LOGGER.warning(
-                "drift_project: run %s not completed (status=%s)", drift_run_id, row["status"]
+                "drift_project: run %s not completed (status=%s)", drift_run_id, run.get("status")
             )
             return None
-        if row["principal_id"] != principal_id:
+        if run.get("principal_id") != principal_id:
             _LOGGER.warning("drift_project: principal mismatch")
             return None
 
         # 同一 DriftRun 最多生成一个用户可见 Candidate
-        existing = self._conn.execute(
-            "SELECT 1 FROM proactive_candidates WHERE origin='drift' "
-            "AND source_payload_ref=? LIMIT 1",
-            (drift_run_id,),
-        ).fetchone()
-        if existing is not None:
-            _LOGGER.debug("drift_project: run %s already projected", drift_run_id)
-            return None
+        _event_store = EventStore(self._conn)
+        for event in _event_store.read_stream_type("proactive_candidate"):
+            if event.attributes.get("origin", "") == "drift" and event.payload_ref == drift_run_id:
+                _LOGGER.debug("drift_project: run %s already projected", drift_run_id)
+                return None
 
         if self._dry_run:
             _LOGGER.info(
@@ -73,12 +70,9 @@ class DriftProjectionService:
 
         # 幂等键
         idempotency = f"drift-projection:{drift_run_id}"
-        dup = self._conn.execute(
-            "SELECT candidate_id FROM proactive_candidates WHERE idempotency_key=?",
-            (idempotency,),
-        ).fetchone()
-        if dup is not None:
-            return dup["candidate_id"]
+        for event in _event_store.read_stream_type("proactive_candidate"):
+            if event.attributes.get("idempotency_key", "") == idempotency:
+                return event.stream_id
 
         now = int(time.time() * 1000)
         candidate_id = f"pc-drift-{uuid.uuid4().hex[:16]}"
