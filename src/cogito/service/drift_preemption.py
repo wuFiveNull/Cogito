@@ -212,43 +212,21 @@ def write_checkpoint(
     )
 
     from cogito.store.drift_repo import DriftRunRepository, DriftSkillStateRepository
-    from cogito.store.event_store import EventStore
 
-    event_sourced = bool(EventStore(conn).read_stream_type("drift_run", limit=1))
-    drift_repo = DriftRunRepository(conn, event_sourced=event_sourced)
-    if event_sourced:
-        drift_repo.record_checkpoint(
-            drift_run_id,
-            stored_checkpoint.payload_ref,
-            stored_checkpoint.payload_hash,
+    drift_repo = DriftRunRepository(conn)
+    drift_repo.record_checkpoint(
+        drift_run_id,
+        stored_checkpoint.payload_ref,
+        stored_checkpoint.payload_hash,
+    )
+    run = drift_repo.get(drift_run_id)
+    if run is not None:
+        DriftSkillStateRepository(conn).upsert(
+            principal_id=str(run.get("principal_id") or ""),
+            skill_name=skill_name,
+            skill_version=skill_version,
+            checkpoint_ref=stored_checkpoint.payload_ref,
         )
-        run = drift_repo.get(drift_run_id)
-        if run is not None:
-            DriftSkillStateRepository(conn, event_sourced=True).upsert(
-                principal_id=str(run.get("principal_id") or ""),
-                skill_name=skill_name,
-                skill_version=skill_version,
-                checkpoint_ref=stored_checkpoint.payload_ref,
-            )
-    else:
-        conn.execute("UPDATE tasks SET checkpoint_ref=? WHERE task_id=?", (ref, task_id))
-        if real_attempt_id:
-            conn.execute(
-                "UPDATE task_attempts SET checkpoint_ref=? WHERE task_attempt_id=?",
-                (ref, real_attempt_id),
-            )
-        prow = conn.execute(
-            "SELECT principal_id FROM drift_runs WHERE drift_run_id=?",
-            (drift_run_id,),
-        ).fetchone()
-        if prow is not None:
-            conn.execute(
-                "UPDATE drift_skill_state "
-                "SET checkpoint_ref=?, cursor_json=?, updated_at=? "
-                "WHERE principal_id=? AND skill_name=? AND skill_version=?",
-                (ref, json.dumps(dict(cursor), ensure_ascii=False), now, prow[0], skill_name, skill_version),
-            )
-        drift_repo.record_checkpoint(drift_run_id, ref)
     conn.commit()
     return payload_json
 

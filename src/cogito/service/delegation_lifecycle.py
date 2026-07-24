@@ -206,10 +206,17 @@ class DelegationLifecycleService:
         if active < 2:
             waiting = next((row for row in rows if row["task_status"] == "waiting_external"), None)
             if waiting is not None:
-                self._conn.execute(
-                    "UPDATE tasks SET status='queued' WHERE task_id=? "
-                    "AND status='waiting_external'",
-                    (waiting["task_id"],),
+                EventStore(self._conn).append(
+                    Event(
+                        event_type="task.scheduled",
+                        stream_type="task",
+                        stream_id=str(waiting["task_id"]),
+                        producer="delegation-lifecycle",
+                        event_class=EventClass.DOMAIN,
+                        summary="Child task released after sibling completed",
+                        outcome="queued",
+                        idempotency_key=f"task:{waiting['task_id']}:release:{delegation_id}",
+                    ),
                 )
         completed = sum(row["task_status"] == "completed" for row in rows)
         failed = sum(row["task_status"] in {"failed", "cancelled"} for row in rows)
