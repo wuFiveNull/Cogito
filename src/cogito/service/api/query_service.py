@@ -306,11 +306,7 @@ class QueryService:
                     )
                 ]
             }
-        rows = self._conn.execute(
-            "SELECT channel_type, COUNT(*) AS n FROM endpoints "
-            "WHERE status='active' GROUP BY channel_type ORDER BY n DESC"
-        ).fetchall()
-        return {"items": [{"channel_type": r["channel_type"], "count": r["n"]} for r in rows]}
+        return {"items": []}
 
     def list_conversations(self, limit: int = 100) -> dict[str, Any]:
         """列出会话，过滤掉所有 session 均已软删除的 conversation。
