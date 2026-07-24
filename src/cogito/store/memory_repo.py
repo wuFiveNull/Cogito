@@ -20,6 +20,8 @@ from cogito.domain.memory import (
     MemorySource,
     MemoryStatus,
 )
+from cogito.domain.event import Event, EventClass, EventContext
+from cogito.store.event_store import EventStore
 
 
 def _row_to_memory(row: sqlite3.Row) -> MemoryItem:
@@ -586,6 +588,35 @@ class MemoryRepository:
 
     def insert(self, memory: MemoryItem) -> MemoryItem:
         """插入新记忆。"""
+        now = datetime.now(UTC).isoformat()
+        EventStore(self._conn).append(
+            Event(
+                event_type=(
+                    "memory.confirmed" if memory.status == MemoryStatus.confirmed
+                    else "memory.candidate.created"
+                ),
+                stream_type="memory",
+                stream_id=memory.memory_id,
+                producer="memory-repository",
+                event_class=EventClass.DOMAIN,
+                summary=f"Memory {memory.kind.value}: {memory.subject} {memory.predicate}",
+                attributes={
+                    "kind": memory.kind.value,
+                    "subject": memory.subject,
+                    "predicate": memory.predicate,
+                    "principal_id": memory.principal_id,
+                    "canonical_key": memory.canonical_key,
+                    "source_type": memory.source_type,
+                    "source_id": memory.source_id,
+                    "confidence": memory.confidence,
+                    "importance": memory.importance,
+                    "supersedes_id": memory.supersedes_id or "",
+                },
+                outcome=memory.status.value,
+                idempotency_key=f"memory:{memory.memory_id}:inserted",
+            ),
+            expected_version=0,
+        )
         now = datetime.now(UTC).isoformat()
         self._conn.execute(
             "INSERT INTO memory_items ("

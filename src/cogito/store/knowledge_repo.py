@@ -18,6 +18,8 @@ from cogito.domain.knowledge import (
     KnowledgeResource,
     KnowledgeSegment,
 )
+from cogito.domain.event import Event, EventClass, EventContext
+from cogito.store.event_store import EventStore
 
 # ── 辅助 ──
 
@@ -64,6 +66,59 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
 
 
 def insert_resource(conn: sqlite3.Connection, r: KnowledgeResource) -> KnowledgeResource:
+    EventStore(conn).append(
+        Event(
+            event_type="knowledge.resource.created",
+            stream_type="knowledge_resource",
+            stream_id=r.resource_id,
+            producer="knowledge-repository",
+            event_class=EventClass.DOMAIN,
+            summary=f"Knowledge resource created: {r.source_kind}",
+            attributes={
+                "principal_id": r.principal_id,
+                "connector_id": r.connector_id,
+                "source_uri_hash": r.source_uri_hash,
+                "source_kind": r.source_kind,
+                "media_type": r.media_type,
+                "content_hash": r.content_hash,
+                "trust_label": r.trust_label,
+                "scope_type": r.scope_type,
+                "scope_id": r.scope_id,
+                "source_version": r.source_version,
+                "retention_class": r.retention_class,
+            },
+            outcome=r.status,
+            idempotency_key=f"knowledge:resource:{r.resource_id}:created",
+        ),
+        expected_version=0,
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO knowledge_resources ("
+        "  resource_id, principal_id, connector_id, source_uri_hash, source_kind, "
+        "  media_type, payload_ref, content_hash, trust_label, scope_type, scope_id, "
+        "  source_version, status, retention_class, created_at, updated_at, deleted_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            r.resource_id,
+            r.principal_id,
+            r.connector_id,
+            r.source_uri_hash,
+            r.source_kind,
+            r.media_type,
+            r.payload_ref,
+            r.content_hash,
+            r.trust_label,
+            r.scope_type,
+            r.scope_id,
+            r.source_version,
+            r.status,
+            r.retention_class,
+            r.created_at.isoformat(),
+            r.updated_at.isoformat() if r.updated_at else None,
+            r.deleted_at.isoformat() if r.deleted_at else None,
+        ),
+    )
+    return r
     conn.execute(
         "INSERT OR REPLACE INTO knowledge_resources ("
         "  resource_id, principal_id, connector_id, source_uri_hash, source_kind, "
