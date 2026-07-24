@@ -554,12 +554,11 @@ class Scheduler:
             # 选择 task_type：按 connector_type 分派（mcp vs rss/json/atom）
             task_type = schedule.task_type or POLL_TASK_TYPE
             if schedule.connector_id:
-                row = self._conn.execute(
-                    "SELECT connector_type FROM connectors WHERE connector_id=?",
-                    (schedule.connector_id,),
-                ).fetchone()
-                if row is not None:
-                    task_type = self.task_type_for_connector(row[0])
+                from cogito.store.connector_repo import ConnectorRepository
+
+                connector = ConnectorRepository(self._conn).get(schedule.connector_id)
+                if connector is not None:
+                    task_type = self.task_type_for_connector(str(connector.connector_type.value))
 
             # 构建 payload：merge 时携带合并元数据
             payload_ref = schedule.task_payload or schedule.connector_id or ""

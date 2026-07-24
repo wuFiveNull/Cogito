@@ -197,20 +197,25 @@ class KnowledgeService:
         return r
 
     def _find_resource_by_uri(self, principal_id: str, uri_hash: str) -> KnowledgeResource | None:
-        row = self._conn.execute(
-            "SELECT * FROM knowledge_resources "
-            "WHERE principal_id=? AND source_uri_hash=? AND deleted_at IS NULL",
-            (principal_id, uri_hash),
-        ).fetchone()
-        if not row:
-            return None
-        d = dict(row)
-        return KnowledgeResource(
-            resource_id=d["resource_id"],
-            source_uri_hash=d["source_uri_hash"],
-            content_hash=d.get("content_hash", ""),
-            status=d.get("status", ""),
-        )
+        from cogito.store.event_replay import replay_knowledge_resource
+
+        events = EventStore(self._conn).read_stream_type("knowledge_resource")
+        grouped: dict[str, list[Event]] = {}
+        for event in events:
+            grouped.setdefault(event.stream_id, []).append(event)
+        for rid, stream in grouped.items():
+            proj = replay_knowledge_resource(stream, rid)
+            if proj is None:
+                continue
+            attrs = stream[0].attributes
+            if attrs.get("principal_id") == principal_id and attrs.get("source_uri_hash") == uri_hash:
+                return KnowledgeResource(
+                    resource_id=proj.resource_id,
+                    source_uri_hash=str(attrs.get("source_uri_hash", "")),
+                    content_hash=str(attrs.get("content_hash", "")),
+                    status=proj.status,
+                )
+        return None
 
     # ── Ingest ──
 
