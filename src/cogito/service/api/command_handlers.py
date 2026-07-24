@@ -644,47 +644,6 @@ def delete_session(
         )
         return _ok("delete-session", payload.session_id, deleted_at=deleted_at)
 
-    # Compatibility path for historical, pre-backfill rows.
-    row = deps.conn.execute(
-        "SELECT s.session_id, s.conversation_id, "
-        "COALESCE(c.principal_scope, 'owner') AS principal_id "
-        "FROM sessions s LEFT JOIN conversations c ON c.conversation_id=s.conversation_id "
-        "WHERE s.session_id=? AND s.deleted_at IS NULL",
-        (payload.session_id,),
-    ).fetchone()
-    if row is None:
-        return _fail("delete-session", payload.session_id, "not found or already deleted")
-    from datetime import UTC, datetime
-
-    deleted_at = datetime.now(UTC).isoformat()
-    conversation_id = row["conversation_id"] or ""
-    principal_id = row["principal_id"] or "owner"
-    with deps.conn:
-        deps.conn.execute(
-            "UPDATE sessions SET deleted_at=? WHERE session_id=?",
-            (deleted_at, payload.session_id),
-        )
-        # PLAN-16 M1 P0-06: session_closed 触发 → 提交关闭前最后一次提取任务
-        _emit_session_completed(
-            deps.conn,
-            session_id=payload.session_id,
-            conversation_id=conversation_id,
-            principal_id=principal_id,
-        )
-    write_audit(
-        deps.conn,
-        actor_id=ACTOR,
-        action="delete-session",
-        target_type="session",
-        target_id=payload.session_id,
-        changes={"deleted_at": deleted_at},
-    )
-    return _ok("delete-session", payload.session_id, deleted_at=deleted_at)
-
-
-# ── delete-sessions-by-conversation (按 conversation_id 批量软删除) ──
-
-
 @router.post("/delete-sessions-by-conversation", response_model=CommandResponse)
 def delete_sessions_by_conversation(
     payload: DeleteSessionsByConvPayload,
@@ -727,52 +686,6 @@ def delete_sessions_by_conversation(
             deleted_count=len(ids),
             deleted_at=deleted_at,
         )
-
-    # Compatibility path for historical, pre-backfill rows.
-    rows = deps.conn.execute(
-        "SELECT s.session_id, COALESCE(c.principal_scope, 'owner') AS principal_id "
-        "FROM sessions s LEFT JOIN conversations c ON c.conversation_id=s.conversation_id "
-        "WHERE s.conversation_id=? AND s.deleted_at IS NULL",
-        (payload.conversation_id,),
-    ).fetchall()
-    if not rows:
-        return _fail(
-            "delete-sessions-by-conversation", payload.conversation_id, "no active sessions"
-        )
-    deleted_at = datetime.now(UTC).isoformat()
-    ids = [r["session_id"] for r in rows]
-    placeholders = ",".join("?" * len(ids))
-    with deps.conn:
-        deps.conn.execute(
-            f"UPDATE sessions SET deleted_at=? WHERE session_id IN ({placeholders})",
-            [deleted_at, *ids],
-        )
-        # PLAN-16 M1 P0-06: 每个关闭的 session 都提交关闭前最后一次提取任务
-        for r in rows:
-            _emit_session_completed(
-                deps.conn,
-                session_id=r["session_id"],
-                conversation_id=payload.conversation_id,
-                principal_id=r["principal_id"] or "owner",
-            )
-    write_audit(
-        deps.conn,
-        actor_id=ACTOR,
-        action="delete-sessions-by-conversation",
-        target_type="conversation",
-        target_id=payload.conversation_id,
-        changes={"deleted_at": deleted_at, "session_count": len(ids), "session_ids": ids},
-    )
-    return _ok(
-        "delete-sessions-by-conversation",
-        payload.conversation_id,
-        deleted_count=len(ids),
-        deleted_at=deleted_at,
-    )
-
-
-# ── pause-connector ───────────────────────────────────────────
-
 
 @router.post("/pause-connector", response_model=CommandResponse)
 def pause_connector(
