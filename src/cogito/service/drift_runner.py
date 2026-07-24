@@ -25,6 +25,7 @@ from cogito.domain.drift import (
     DriftSkillManifest,
 )
 from cogito.domain.task import Task
+from cogito.domain.event import Event
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -426,11 +427,20 @@ def _step_candidate_quality_stats(
             ],
         }
     if step_index == 2:
-        # 简单查询 deliveries 状态统计
-        rows = run.conn.execute(
-            "SELECT status, COUNT(*) FROM deliveries GROUP BY status"
-        ).fetchall()
-        dstats = {r[0]: r[1] for r in rows}
+        # 从 Event replay 聚合 delivery 状态统计
+        from cogito.store.event_store import EventStore
+        from cogito.store.event_replay import replay_delivery
+
+        deliveries: dict[str, int] = {}
+        grouped: dict[str, list[Event]] = {}
+        for event in EventStore(run.conn).read_stream_type("delivery"):
+            grouped.setdefault(event.stream_id, []).append(event)
+        for did, stream in grouped.items():
+            proj = replay_delivery(stream, did)
+            if proj is not None:
+                status = proj.status or "unknown"
+                deliveries[status] = deliveries.get(status, 0) + 1
+        dstats = deliveries
         return {
             "done": False,
             "no_value": False,

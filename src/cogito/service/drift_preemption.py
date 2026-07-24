@@ -153,13 +153,21 @@ def write_checkpoint(
     # task 最新 running attempt 解析，绝不静默丢弃。
     real_attempt_id = attempt_id.strip() if attempt_id else ""
     if not real_attempt_id:
-        row = conn.execute(
-            "SELECT task_attempt_id FROM task_attempts WHERE task_id=? "
-            "AND status IN ('running','created') ORDER BY attempt_no DESC LIMIT 1",
-            (task_id,),
-        ).fetchone()
-        if row is not None:
-            real_attempt_id = row[0]
+        # Fallback: find latest running attempt from Event stream
+        from cogito.store.event_replay import replay_task_attempt
+
+        grouped: dict[str, list[Event]] = {}
+        for event in EventStore(conn).read_stream_type("task_attempt"):
+            if event.context.task_id == task_id:
+                grouped.setdefault(event.stream_id, []).append(event)
+        best = None
+        for aid, stream in grouped.items():
+            proj = replay_task_attempt(stream, aid)
+            if proj is not None and proj.status in {"running", "created"}:
+                if best is None or proj.attempt_no > best.attempt_no:
+                    best = proj
+        if best is not None:
+            real_attempt_id = best.task_attempt_id
 
     ck = DriftCheckpointV1(
         drift_run_id=drift_run_id,

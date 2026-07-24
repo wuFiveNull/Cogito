@@ -92,20 +92,16 @@ def resume_turn_after_approval(
     if not resumed:
         return None
     # Child-Agent approvals resume their durable Task as well as the child Turn.
-    task_rows = conn.execute(
-        "SELECT t.task_id FROM tasks t WHERE t.task_id IN "
-        "(SELECT task_id FROM child_task_links WHERE turn_id=?) AND t.status='waiting_user'",
+    child_links = conn.execute(
+        "SELECT task_id FROM child_task_links WHERE turn_id=?",
         (turn_id,),
     ).fetchall()
-    conn.execute(
-        "UPDATE tasks SET status='queued',checkpoint_ref=NULL "
-        "WHERE task_id IN (SELECT task_id FROM child_task_links WHERE turn_id=?) "
-        "AND status='waiting_user'",
-        (turn_id,),
-    )
+    task_ids = [str(r["task_id"]) for r in child_links]
     store = EventStore(conn)
-    for task_row in task_rows:
-        task_id = str(task_row["task_id"])
+    for task_id in task_ids:
+        task = TaskRepository(conn).get(task_id)
+        if task is None or task.status.value != "waiting_user":
+            continue
         store.append(
             Event(
                 event_type="task.scheduled",

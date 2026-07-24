@@ -69,6 +69,7 @@ from cogito.service.memory_service import SqliteMemoryService
 from cogito.service.task_service import SqliteTaskService
 from cogito.store.connector_repo import ConnectorRepository
 from cogito.store.event_store import EventStore
+from cogito.store.schedule_repo import ScheduleRepository
 from cogito.store.task_repo import TaskRepository
 
 _LOGGER = logging.getLogger("cogito.interaction_web.commands")
@@ -952,25 +953,21 @@ def force_connector_poll(
     cached = _check_idempotency(deps.conn, ACTOR, "force-connector-poll", payload.idempotency_key)
     if cached:
         return cached
-    connector = deps.conn.execute(
-        "SELECT * FROM connectors WHERE connector_id=?", (payload.connector_id,)
-    ).fetchone()
+    connector = ConnectorRepository(deps.conn).get(payload.connector_id)
     if connector is None:
         raise HTTPException(status_code=404, detail=f"connector {payload.connector_id} not found")
     # 关联 active schedule，触发一次 fire
     from datetime import UTC, datetime
 
-    now_ms = int(datetime.now(UTC).timestamp() * 1000)
-    sched = deps.conn.execute(
-        "SELECT * FROM schedules WHERE connector_id=? AND enabled=1 LIMIT 1",
-        (payload.connector_id,),
-    ).fetchone()
+    schedule_repo = ScheduleRepository(deps.conn)
+    now = datetime.now(UTC)
+    sched = next(
+        (s for s in schedule_repo.find_all(limit=100)
+         if s.connector_id == payload.connector_id and s.enabled),
+        None,
+    )
     if sched:
-        deps.conn.execute(
-            "UPDATE schedules SET next_fire_at=? WHERE schedule_id=?",
-            (now_ms, sched["schedule_id"]),
-        )
-        deps.conn.commit()
+        schedule_repo.update_fire_time(sched.schedule_id, None, now, sched.version)
     write_audit(
         deps.conn,
         actor_id=ACTOR,
@@ -1006,11 +1003,8 @@ def fetch_proactive_data(
 
     request_key = payload.idempotency_key or uuid.uuid4().hex
     task_key = f"manual-proactive-fetch:{request_key}"
-    existing = deps.conn.execute(
-        "SELECT task_id FROM tasks WHERE idempotency_key=?",
-        (task_key,),
-    ).fetchone()
-    if existing is not None:
+    task_repo = TaskRepository(deps.conn)
+    if task_repo.exists_by_idempotency(task_key):
         task_id = existing["task_id"]
         return _ok(
             "fetch-proactive-data",
@@ -1078,11 +1072,7 @@ def trigger_proactive_mock(
 
     request_key = payload.idempotency_key or uuid.uuid4().hex
     task_key = f"manual-proactive-mock:{request_key}"
-    existing = deps.conn.execute(
-        "SELECT task_id FROM tasks WHERE idempotency_key=?",
-        (task_key,),
-    ).fetchone()
-    if existing is not None:
+    if TaskRepository(deps.conn).exists_by_idempotency(task_key):
         return _ok(
             "trigger-proactive-mock",
             PROACTIVE_MOCK_CONNECTOR_ID,

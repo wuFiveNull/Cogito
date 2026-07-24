@@ -634,13 +634,31 @@ class ContextBuilder:
         """
         if not principal_id:
             return [], {}
-        rows = self._conn.execute(
-            "SELECT task_id, task_type, payload_ref, origin, priority, status "
-            "FROM tasks WHERE status IN ('queued','running') "
-            "AND origin NOT LIKE 'memory_maintenance%' "
-            "ORDER BY priority DESC, created_at DESC LIMIT ?",
-            (10,),
-        ).fetchall()
+        # Scan all task streams via Event replay
+        from cogito.store.task_repo import TaskRepository
+        from cogito.store.event_store import EventStore
+
+        task_repo = TaskRepository(self._conn if hasattr(self, '_conn') else self.connection)
+        # Use Event projection to find queued + running tasks
+        grouped: dict[str, list[Event]] = {}
+        store = EventStore(self._conn if hasattr(self, '_conn') else self.connection)
+        for event in store.read_stream_type("task"):
+            grouped.setdefault(event.stream_id, []).append(event)
+        projections = []
+        for tid, stream in grouped.items():
+            from cogito.store.event_replay import replay_task
+            proj = replay_task(stream, tid)
+            if proj is not None and proj.status in {"queued", "running"}:
+                projections.append(proj)
+        projections.sort(key=lambda p: (p.priority or 40), reverse=True)
+        rows = [{
+            "task_id": p.task_id,
+            "task_type": p.task_type,
+            "payload_ref": p.payload_ref or "",
+            "origin": p.origin,
+            "priority": p.priority or 40,
+            "status": p.status,
+        } for p in projections[:10]]
         if not rows:
             return [], {}
         task_candidates: list[RetrievalCandidate] = []
